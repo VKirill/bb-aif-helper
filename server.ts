@@ -1,7 +1,8 @@
 import type { BbPluginApi } from '@get-bb/plugin-sdk';
 import { createHash } from 'node:crypto';
 import { z } from 'zod';
-import { hostContract, rpcContract } from './contract.ts';
+import { hostContract, rpcContract, type DelegationView } from './contract.ts';
+import type { DelegationChoice } from './delegation.ts';
 import { requestSchema, phaseSchema, snapshotSchema, type CardRequest, type Snapshot, type Phase, type Suggestions } from './model.ts';
 import { actionPrompt, workflowActions } from './workflow.ts';
 import { analyzeReply } from './suggestions.ts';
@@ -241,9 +242,35 @@ export default async function plugin(bb: BbPluginApi) {
       })) };
     return { view, ids, hidden, snapshot };
   }
+  async function delegationView(threadId: string): Promise<DelegationView> {
+    const { environment } = await context(threadId);
+    const [state, providers, children] = await Promise.all([
+      host.call('delegation', { root: environment.path! }, { hostId: environment.hostId }),
+      bb.sdk.providers.list({ environmentId: environment.id }).catch(() => []),
+      bb.sdk.threads.list({ parentThreadId: threadId, limit: 20 }).catch(() => []),
+    ]);
+    return { ...state,
+      providers: providers.filter(p => p.available).map(p => ({ id: p.id, name: p.displayName })),
+      children: children.map(c => ({ id: c.id, title: c.title ?? null, status: c.status, providerId: c.providerId ?? null, updatedAt: String(c.updatedAt) })) };
+  }
+  async function setDelegation(threadId: string, choice: DelegationChoice) {
+    const { environment } = await context(threadId);
+    await host.call('setDelegation', { root: environment.path!, choice }, { hostId: environment.hostId });
+    cache.invalidate(key => !!watchers.get(key)?.has(threadId));
+    bb.realtime.publish('changed', { threadId });
+    return delegationView(threadId);
+  }
   bb.rpc.register(rpcContract, {
     status: input => status(input, input.checkUpdates, input.force),
     suggestions: async input => (await suggested(input.threadId)).view,
+    delegation: input => delegationView(input.threadId),
+    setDelegation: input => serial(`delegation:${input.threadId}`, () => setDelegation(input.threadId, input.choice)),
+    providerModels: async input => {
+      const { environment } = await context(input.threadId);
+      const result = await bb.sdk.providers.models({ environmentId: environment.id, providerId: input.providerId });
+      return result.models.slice(0, 100).map(m => ({ id: m.model || m.id, name: m.displayName || m.model || m.id, isDefault: m.isDefault,
+        efforts: m.supportedReasoningEfforts.map(e => e.reasoningEffort), defaultEffort: m.defaultReasoningEffort || null }));
+    },
     dismissSuggestion: input => serial(input.threadId, async () => {
       const current = await suggested(input.threadId);
       if (current.view.sourceKey !== input.sourceKey || !current.ids.includes(input.commandId)) throw new Error('Предложения изменились. Обновите их.');

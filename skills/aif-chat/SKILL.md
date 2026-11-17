@@ -55,6 +55,10 @@ The supported command is singular `ai-factory extension update` (all registered 
 
 **Запустить aif** is used without AIFHub; **Запустить aif-analyze** is selected for a healthy installed `aifhub-extension`. A missing setup skill stays disabled. Setup never receives the selected plan as an argument.
 
+## Code delegation
+
+The panel's **Исполнитель кода** block lets the owner pick who writes code for plan tasks: this chat's agent or another BB provider/model/reasoning level. Saving writes `.ai-factory.json` → `phases.implement` (`agent: "bb"`, `model: "provider/model[:effort]"`), `dispatch: "auto"`, `dispatchAgents.bb`, the runner `.ai-factory/bin/bb-aif-run.mjs` and a managed block in `.ai-factory/skill-context/aif-implement/SKILL.md`. That block tells `/aif-implement` how to delegate: `start --prompt-file`, then `wait <threadId>` (returns within 8 minutes, repeat while running), review the diff, verify, then mark the task. One worker at a time; workers share the chat's workspace and never edit the plan, commit or push. The config file is the source of truth: if `phases.implement` no longer says `agent: "bb"`, implement tasks yourself. A `phases.implement` owned by another agent is shown and never overwritten. Switching back to this agent removes only what the plugin added.
+
 ## Optional workflow checks
 
 When the current project Git status confirms uncommitted tracked, staged or non-ignored untracked files, the card offers aif-commit first even after archive, with no active plan or multiple plan candidates. Unknown/clean status does not create this extra offer. This is separate from sourceRepo version dirtiness. Opening the card does not commit anything. A selected commit request must inspect the actual diff, determine the task scope, preserve unrelated files, obey gates and existing commit permissions, and never implicitly authorize push.

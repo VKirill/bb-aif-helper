@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { definePluginApp, useRpc, useRealtime, useComposer, type PluginMessageDirectiveProps, type ExperimentalThreadContextCardProps, type ExperimentalThreadTabProps, type ExperimentalCodeFenceRendererProps } from '@get-bb/plugin-sdk/app';
-import type { rpcContract } from './contract.ts';
+import { definePluginApp, useRpc, useRealtime, useComposer, useBbNavigate, type PluginMessageDirectiveProps, type ExperimentalThreadContextCardProps, type ExperimentalThreadTabProps, type ExperimentalCodeFenceRendererProps } from '@get-bb/plugin-sdk/app';
+import type { rpcContract, DelegationView, ModelOption } from './contract.ts';
+import type { DelegationChoice } from './delegation.ts';
 import { phaseSchema, type Snapshot, type Phase, type Action, type Suggestions } from './model.ts';
 import { parseReplyGate } from './gate.ts';
 import { rowActions, supplementaryChecks } from './check-actions.ts';
@@ -25,8 +26,8 @@ function GateData({ code, status, Original }: ExperimentalCodeFenceRendererProps
   </div>;
 }
 
-function WorkflowCard({ threadId, initialTarget = '', phase = 'unknown', openFile, compact = false }: {
-  threadId: string; initialTarget?: string; phase?: Phase; openFile?: ((path: string) => boolean) | null; compact?: boolean;
+function WorkflowCard({ threadId, initialTarget = '', phase = 'unknown', openFile, compact = false, delegation = false }: {
+  threadId: string; initialTarget?: string; phase?: Phase; openFile?: ((path: string) => boolean) | null; compact?: boolean; delegation?: boolean;
 }) {
   const rpc = useRpc<typeof rpcContract>();
   const [target, setTarget] = useState(initialTarget);
@@ -73,12 +74,15 @@ function WorkflowCard({ threadId, initialTarget = '', phase = 'unknown', openFil
   const tasks = snapshot?.target?.tasks ?? [];
   const completed = tasks.filter(t => t.done).length;
   const nextVersionCheck = snapshot?.upstream.checkedAt ? Date.parse(snapshot.upstream.checkedAt) + VERSION_TTL : 0;
+  // One primary action per card: the first "next" step. Everything else is secondary.
+  const primaryId = snapshot && (snapshot.actions.find(a => a.group === 'next' && a.available)
+    ?? snapshot.actions.find(a => a.group === 'maintenance' && a.available && !updateInVersionDetails(snapshot, a.id) && !contextSetupInDetails(snapshot, a.id)))?.id;
   const renderAction = (a: Action) => <button key={a.id} type="button"
-    className={a.group === 'next' ? 'aif-action' : 'aif-action aif-secondary'} disabled={sending || busy || !a.available}
+    className={a.id === primaryId ? 'aif-action' : 'aif-action aif-secondary'} disabled={sending || busy || !a.available}
     title={`${a.reason}\n${a.command}`} onClick={() => void run(a)}>{a.label}{!a.available && (a.disabledReason === 'unchanged' ? ' · без изменений' : ' · не установлен')}</button>;
   const renderActions = (actions: Action[]) => <div className="aif-actions">{actions.map(renderAction)}</div>;
   return <section className={`aif-card${compact ? ' aif-compact' : ''}`} aria-label="AI Factory workflow">
-    <header className="aif-heading"><strong><span aria-hidden="true">◈</span> AI Factory</strong>
+    <header className="aif-heading"><span className="aif-logo" aria-hidden="true">◈</span><strong>AI Factory</strong>
       {snapshot && <span className="aif-profile">{profileNames[snapshot.profile]}</span>}
       <button className="aif-refresh" type="button" onClick={() => void refresh(false, true)} aria-label="Обновить статус AI Factory" title="Перечитать задачи и проверки; версии CLI/Git и GitHub кэшируются на сутки">↻</button>
     </header>
@@ -89,7 +93,8 @@ function WorkflowCard({ threadId, initialTarget = '', phase = 'unknown', openFil
       <div className="aif-versions"><span>CLI <b>{snapshot.versions.globalCli ?? 'не найден'}</b></span><span>Проект <b>{snapshot.versions.installed ?? 'не указан'}</b></span>
         {snapshot.versions.sourceVersion && <span>Git <b>{snapshot.versions.sourceVersion}</b><small> @{snapshot.versions.sourceSha?.slice(0, 7)}{snapshot.versions.sourceDirty ? ' · изменён' : ''}</small></span>}
         {snapshot.extensions.map(e => <span key={e.name} title={e.installedVersion ? 'Установленная версия расширения' : 'Записанная версия; установленные файлы не подтверждены'}>{e.name} <b>{e.installedVersion ?? e.recordedVersion ?? 'неизвестна'}</b>{!e.installedVersion && <small> · не подтверждена</small>}</span>)}</div>
-      <div className="aif-maintenance" role="group" aria-label="Обновление и настройка AI Factory">{renderActions(snapshot.actions.filter(a => a.group === 'maintenance' && !updateInVersionDetails(snapshot, a.id) && !contextSetupInDetails(snapshot, a.id)))}</div>
+      <section className="aif-section" aria-label="Текущий этап">
+      <h3 className="aif-section-title">Сейчас</h3>
       <p className="aif-stage" title={snapshot.phaseSource}>{busy ? <span className="aif-live-dot" aria-hidden="true" /> : <span className="aif-idle-dot" aria-hidden="true" />} {phaseNames[snapshot.phase]}
         <span className="aif-muted"> · {snapshot.pendingQuestions ? `ожидаю ответы: ${snapshot.pendingQuestions}` : busy ? 'агент занят' : snapshot.threadState === 'error' ? 'ошибка выполнения BB' : 'агент свободен'}</span></p>
       {usesBasicWorkflow(snapshot) && <p className="aif-muted" aria-label="Базовый workflow">Без AI Factory доступен встроенный flow: исследование → план → выполнение → проверка → коммит. Установка — отдельная кнопка; планы сохраняются в .bb-aif-helper/plans/.</p>}
@@ -104,10 +109,13 @@ function WorkflowCard({ threadId, initialTarget = '', phase = 'unknown', openFil
           {!tasks.length && <p className="aif-muted">Чекбоксы задач не найдены; прогресс неизвестен.</p>}</details>
       </div>}
       {renderActions(snapshot.actions.filter(a => a.group === 'next').slice(0, 3))}
+      <div className="aif-maintenance" role="group" aria-label="Обновление и настройка AI Factory">{renderActions(snapshot.actions.filter(a => a.group === 'maintenance' && !updateInVersionDetails(snapshot, a.id) && !contextSetupInDetails(snapshot, a.id)))}</div>
       {snapshot.actions.some(a => contextSetupInDetails(snapshot, a.id)) && <details className="aif-context-setup"><summary>Настройка контекста проекта</summary>
         <p className="aif-muted aif-small">Выполнение плана уже начато. Настройка контекста запускается отдельно и не продолжает выбранный план.</p>
         {renderActions(snapshot.actions.filter(a => contextSetupInDetails(snapshot, a.id)))}
       </details>}
+      </section>
+      {delegation && snapshot.configured && <DelegationSection threadId={threadId} busy={busy} />}
       {snapshot.target && snapshot.checks.length > 0 && <details className="aif-checks"><summary>Что проверить <span className="aif-muted">· из чата: {snapshot.checks.filter(c => c.chat).length} · отчётов PASS: {snapshot.checks.filter(c => c.state === 'reported-pass').length}</span></summary>
         <p className="aif-muted aif-small">Дополнительные проверки — по выбору. Правила проекта и обязательные gates могут требовать их перед завершением; блокирующий FAIL сохраняет силу.</p>
         <p className="aif-muted aif-small">Галочки задач и результаты проверок независимы. Актуальность evidence подтверждает владелец workflow.</p>
@@ -144,13 +152,128 @@ function WorkflowCard({ threadId, initialTarget = '', phase = 'unknown', openFil
     </>}
   </section>;
 }
+const childStatus: Record<string, { label: string; tone: 'live' | 'done' | 'error' | 'idle' }> = {
+  pending: { label: 'в очереди', tone: 'idle' }, starting: { label: 'запускается', tone: 'live' }, active: { label: 'пишет код', tone: 'live' },
+  stopping: { label: 'останавливается', tone: 'live' }, idle: { label: 'готово', tone: 'done' }, error: { label: 'ошибка', tone: 'error' },
+};
+type Draft = { mode: 'self' | 'bb'; providerId: string; model: string; effort: string };
+const toDraft = (c: DelegationChoice): Draft => c.mode === 'bb' ? { mode: 'bb', providerId: c.providerId, model: c.model, effort: c.effort ?? '' } : { mode: 'self', providerId: '', model: '', effort: '' };
+const toChoice = (d: Draft): DelegationChoice | null => d.mode === 'self' ? { mode: 'self' }
+  : d.providerId && d.model ? { mode: 'bb', providerId: d.providerId, model: d.model, ...(d.effort ? { effort: d.effort } : {}) } : null;
+
+function DelegationSection({ threadId, busy }: { threadId: string; busy: boolean }) {
+  const rpc = useRpc<typeof rpcContract>();
+  const navigate = useBbNavigate();
+  const [view, setView] = useState<DelegationView | null>(null);
+  const [draft, setDraft] = useState<Draft | null>(null);
+  const [models, setModels] = useState<ModelOption[] | null>(null);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState('');
+  const [notice, setNotice] = useState('');
+  const mounted = useRef(true);
+  useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
+  const load = useCallback(async () => {
+    try {
+      const next = await rpc.call('delegation', { threadId });
+      if (!mounted.current) return;
+      setView(next); setError('');
+      setDraft(current => current ?? toDraft(next.choice));
+    } catch (e) { if (mounted.current) setError(e instanceof Error ? e.message : String(e)); }
+  }, [rpc, threadId]);
+  useEffect(() => {
+    void load();
+    const timer = window.setInterval(() => { if (document.visibilityState === 'visible') void load(); }, 15000);
+    return () => window.clearInterval(timer);
+  }, [load]);
+  useRealtime('changed', (payload: unknown) => { if ((payload as { threadId?: string })?.threadId === threadId) void load(); });
+  const providerId = draft?.mode === 'bb' ? draft.providerId : '';
+  useEffect(() => {
+    if (!providerId) { setModels(null); return; }
+    let live = true; setModels(null);
+    rpc.call('providerModels', { threadId, providerId }).then(list => { if (live && mounted.current) setModels(list); },
+      e => { if (live && mounted.current) { setModels([]); setError(e instanceof Error ? e.message : String(e)); } });
+    return () => { live = false; };
+  }, [rpc, threadId, providerId]);
+  if (!view || !draft) return <section className="aif-section" aria-label="Исполнитель кода"><h3 className="aif-section-title">Исполнитель кода</h3>
+    {error ? <p className="aif-muted aif-small">Настройка недоступна: {error}</p> : <div className="aif-skeleton" aria-hidden="true" />}</section>;
+  const model = models?.find(m => m.id === draft.model);
+  const choice = toChoice(draft);
+  const saved = JSON.stringify(view.choice);
+  const dirty = !!choice && JSON.stringify(choice) !== saved;
+  const set = (patch: Partial<Draft>) => { setNotice(''); setError(''); setDraft({ ...draft, ...patch }); };
+  async function save() {
+    if (!choice) return;
+    setSaving(true); setError(''); setNotice('');
+    try {
+      const next = await rpc.call('setDelegation', { threadId, choice });
+      if (!mounted.current) return;
+      setView(next); setDraft(toDraft(next.choice));
+      setNotice(next.choice.mode === 'bb' ? '/aif-implement будет передавать задачи выбранной модели.' : 'Код снова пишет агент этого чата.');
+    } catch (e) { if (mounted.current) setError(e instanceof Error ? e.message : String(e)); }
+    finally { if (mounted.current) setSaving(false); }
+  }
+  const active = view.choice;
+  const savedLabel = active.mode === 'bb'
+    ? [view.providers.find(p => p.id === active.providerId)?.name ?? active.providerId, active.model, active.effort].filter(Boolean).join(' · ')
+    : 'агент этого чата';
+  return <section className="aif-section" aria-label="Исполнитель кода">
+    <div className="aif-section-head"><h3 className="aif-section-title">Исполнитель кода</h3><span className="aif-chip">{savedLabel}</span></div>
+    {view.foreign && <p className="aif-callout">phases.implement в .ai-factory.json настроен на агента «{view.foreign}». Панель его не меняет.</p>}
+    {view.error && <p className="aif-callout aif-callout-error">{view.error}</p>}
+    <div className="aif-segmented" role="radiogroup" aria-label="Кто пишет код">
+      {(['self', 'bb'] as const).map(mode => <button key={mode} type="button" role="radio" aria-checked={draft.mode === mode} disabled={saving || !!view.foreign}
+        className={draft.mode === mode ? 'aif-segment aif-segment-on' : 'aif-segment'} onClick={() => set({ mode })}>{mode === 'self' ? 'Этот агент' : 'Другая модель'}</button>)}
+    </div>
+    {draft.mode === 'bb' && <div className="aif-fields">
+      <label className="aif-field"><span>Провайдер</span>
+        <select value={draft.providerId} disabled={saving} onChange={e => set({ providerId: e.target.value, model: '', effort: '' })}>
+          <option value="">Выберите</option>
+          {view.providers.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
+        </select></label>
+      <label className="aif-field"><span>Модель</span>
+        <select value={draft.model} disabled={saving || !draft.providerId || !models} onChange={e => {
+          const next = models?.find(m => m.id === e.target.value);
+          set({ model: e.target.value, effort: next?.defaultEffort && next.efforts.includes(next.defaultEffort) ? next.defaultEffort : '' });
+        }}>
+          <option value="">{draft.providerId && !models ? 'Загружаю…' : 'Выберите'}</option>
+          {draft.model && models && !model && <option value={draft.model}>{draft.model}</option>}
+          {models?.map(m => <option key={m.id} value={m.id}>{m.name}{m.isDefault ? ' · по умолчанию' : ''}</option>)}
+        </select></label>
+      <label className="aif-field"><span>Рассуждение</span>
+        <select value={draft.effort} disabled={saving || !draft.model || !!model && !model.efforts.length} onChange={e => set({ effort: e.target.value })}>
+          <option value="">Как у модели</option>
+          {(model?.efforts ?? (draft.effort ? [draft.effort] : [])).map(e => <option key={e} value={e}>{e}</option>)}
+        </select></label>
+    </div>}
+    <div className="aif-actions">
+      <button type="button" className="aif-action" disabled={!dirty || saving || busy || !!view.foreign} onClick={() => void save()}
+        title={busy ? 'Дождитесь, пока агент закончит текущую работу' : 'Записать выбор в .ai-factory.json'}>{saving ? 'Сохраняю…' : 'Сохранить'}</button>
+      {dirty && <button type="button" className="aif-action aif-secondary" disabled={saving} onClick={() => { setDraft(toDraft(view.choice)); setNotice(''); }}>Отменить</button>}
+    </div>
+    {error && <p className="aif-callout aif-callout-error" role="status">{error}</p>}
+    {notice && <p className="aif-notice" role="status">{notice}</p>}
+    <p className="aif-muted aif-small">Выбор хранится в .ai-factory.json → phases.implement. /aif-implement отдаёт каждую задачу дочернему треду на этой модели, затем сам проверяет diff и отмечает задачу в плане.</p>
+    {view.children.length > 0 && <div className="aif-children">
+      <h4 className="aif-subtitle">Дочерние треды · {view.children.length}</h4>
+      <ul>{view.children.map(c => {
+        const st = childStatus[c.status] ?? { label: c.status, tone: 'idle' as const };
+        return <li key={c.id}>
+          <span className={`aif-dot aif-dot-${st.tone}`} aria-hidden="true" />
+          <span className="aif-child-title">{c.title || 'Без названия'}</span>
+          <span className="aif-muted aif-small">{[view.providers.find(p => p.id === c.providerId)?.name ?? c.providerId, st.label].filter(Boolean).join(' · ')}</span>
+          <button type="button" className="aif-link" onClick={() => navigate.toThread(c.id, { split: true })}>Открыть</button>
+        </li>;
+      })}</ul>
+    </div>}
+  </section>;
+}
 function Directive(props: PluginMessageDirectiveProps) {
   const parsed = phaseSchema.safeParse(props.attributes.phase ?? 'unknown');
   if (!parsed.success || (props.attributes.target?.length ?? 0) > 1000) return <p className="aif-error">Некорректная карточка AI Factory.</p>;
   return <WorkflowCard threadId={props.message.threadId} initialTarget={props.attributes.target ?? ''} phase={parsed.data} openFile={props.openWorkspaceFile} />;
 }
 function ContextCard({ threadId }: ExperimentalThreadContextCardProps) { return <WorkflowCard threadId={threadId} compact />; }
-function WorkflowPanel({ threadId }: ExperimentalThreadTabProps) { return <div className="aif-panel"><WorkflowCard key={threadId} threadId={threadId} compact /></div>; }
+function WorkflowPanel({ threadId }: ExperimentalThreadTabProps) { return <div className="aif-panel"><WorkflowCard key={threadId} threadId={threadId} compact delegation /></div>; }
 function SuggestedCommands() {
   const composer = useComposer();
   return composer.scope.kind === 'thread' ? <SuggestionBar key={composer.scope.threadId} threadId={composer.scope.threadId} composerBusy={composer.isRunning || composer.isSubmitting} /> : null;

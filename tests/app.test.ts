@@ -25,7 +25,7 @@ test('matching updater buttons are inside version details, with extension versio
   const slot = renderSlot(app.messageDirectives[0], props, { rpc: { status: () => s } });
   try {
     const setup = await slot.findByRole('button', { name: 'Запустить aif-analyze' });
-    const card = setup.closest('section')!;
+    const card = setup.closest('.aif-card')!;
     assert.match(card.querySelector('.aif-versions')!.textContent!, /aifhub-extension.*1.8.1/);
     const update = slot.getByRole('button', { name: 'Обновить AI Factory', hidden: true });
     assert(update.closest('.aif-details')); assert(!setup.closest('.aif-details'));
