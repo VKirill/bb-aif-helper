@@ -7,7 +7,7 @@ test('production code and tests use only the public SDK and declared libraries',
   const result = experimental_scanPublicSdkOnly(fileURLToPath(new URL('../', import.meta.url)), {
     allow: [/^react(?:-dom)?(?:\/.*)?$/, /^yaml$/, /^jsdom$/, /^@testing-library\/react$/, /^@radix-ui\//, /^class-variance-authority$/, /^clsx$/, /^tailwind-merge$/, /^sonner$/, /^@\//],
   });
-  // The scanner walks the whole checkout; agent tooling (AI Factory skills in .claude/, .ai-factory/) is not plugin code.
-  assert.deepEqual(result.violations.filter((v) => !/^\.(claude|ai-factory)\//.test(v.file)), []);
+  // The scanner walks the whole checkout; agent tooling (AI Factory skills in .claude/, .ai-factory/, the GitNexus index in .gitnexus/) is not plugin code.
+  assert.deepEqual(result.violations.filter((v) => !/^\.(claude|ai-factory|gitnexus)\//.test(v.file)), []);
   assert.deepEqual(result.privateDependencies, []);
 });
