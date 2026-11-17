@@ -299,7 +299,7 @@ function Directive(props: PluginMessageDirectiveProps) {
   return <WorkflowCard threadId={props.message.threadId} initialTarget={props.attributes.target ?? ''} phase={parsed.data} openFile={props.openWorkspaceFile} />;
 }
 function ContextCard({ threadId }: ExperimentalThreadContextCardProps) { return <WorkflowCard threadId={threadId} compact />; }
-function WorkflowPanel({ threadId, environment }: ExperimentalThreadTabProps) { return <div className="aif-panel p-4 pb-8"><WorkflowCard key={threadId} threadId={threadId} environmentId={environment?.id ?? null} compact delegation /></div>; }
+function WorkflowPanel({ threadId, environment }: ExperimentalThreadTabProps) { return <div className="aif-panel h-full min-h-0 overflow-y-auto overscroll-contain p-4 pb-8"><WorkflowCard key={threadId} threadId={threadId} environmentId={environment?.id ?? null} compact delegation /></div>; }
 function SuggestedCommands() {
   const composer = useComposer();
   return composer.scope.kind === 'thread' ? <SuggestionBar key={composer.scope.threadId} threadId={composer.scope.threadId} composer={composer} composerBusy={composer.isRunning || composer.isSubmitting} /> : null;
