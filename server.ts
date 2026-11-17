@@ -255,7 +255,8 @@ export default async function plugin(bb: BbPluginApi) {
   }
   async function setDelegation(threadId: string, choice: DelegationChoice) {
     const { environment } = await context(threadId);
-    await host.call('setDelegation', { root: environment.path!, choice }, { hostId: environment.hostId });
+    const state = await host.call('setDelegation', { root: environment.path!, choice }, { hostId: environment.hostId });
+    if (state.removedLegacy) bb.log.info(`aif-chat: removed legacy runner root=${environment.path}`);
     cache.invalidate(key => !!watchers.get(key)?.has(threadId));
     bb.realtime.publish('changed', { threadId });
     return delegationView(threadId);
@@ -392,6 +393,7 @@ export default async function plugin(bb: BbPluginApi) {
       cache.invalidate(key => !!watchers.get(key)?.has(thread.id) || !!thread.environmentId && key.includes(thread.environmentId));
     }
     bb.realtime.publish('changed', { threadId: thread.id });
+    if (thread.parentThreadId) bb.realtime.publish('changed', { threadId: thread.parentThreadId });
   });
   bb.events.on('thread.idle', async ({ thread, lastAssistantText }) => {
     const updating = await bb.storage.kv.get<{ key: string }>(`updating-versions:${thread.id}`);

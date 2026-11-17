@@ -3,8 +3,9 @@ import assert from 'node:assert/strict';
 import { mkdtemp, readFile, writeFile, mkdir, access } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { execFileSync } from 'node:child_process';
-import { CONTEXT_PATH, RUNNER_PATH, RUNNER_SOURCE, mergeContextBlock, parseSpec, readDelegation, writeDelegation } from '../delegation.ts';
+import { CONTEXT_PATH, mergeContextBlock, parseSpec, readDelegation, writeDelegation } from '../delegation.ts';
+
+const LEGACY_RUNNER = '.ai-factory/bin/bb-aif-run.mjs';
 
 async function project(config: object | null = { version: '2.23.0', agents: [{ id: 'claude' }] }) {
   const root = await mkdtemp(join(tmpdir(), 'aif-delegation-'));
@@ -13,6 +14,12 @@ async function project(config: object | null = { version: '2.23.0', agents: [{ i
 }
 const json = async (root: string) => JSON.parse(await readFile(join(root, '.ai-factory.json'), 'utf8'));
 const exists = (path: string) => access(path).then(() => true, () => false);
+const managedBlock = async (root: string) => {
+  const content = await readFile(join(root, CONTEXT_PATH), 'utf8');
+  const start = content.indexOf('delegation:start');
+  const end = content.indexOf('delegation:end');
+  return content.slice(start, end);
+};
 
 test('parseSpec round-trips provider/model?reasoning&tier, including slashes and colons in the model', () => {
   assert.deepEqual(parseSpec('codex/gpt-6.2-sol?reasoning=high&tier=fast'), { mode: 'bb', providerId: 'codex', model: 'gpt-6.2-sol', reasoning: 'high', tier: 'fast' });
@@ -21,7 +28,7 @@ test('parseSpec round-trips provider/model?reasoning&tier, including slashes and
   for (const bad of ['sonnet', 'a/b c', '', 42, 'a/b?reasoning=x y', 'a/b?tier=$(x)']) assert.equal(parseSpec(bad), null);
 });
 
-test('bb choice writes AI Factory dispatch config, runner and skill-context; self removes only what it added', async () => {
+test('bb choice writes AI Factory dispatch config and skill-context; self removes only what it added', async () => {
   const root = await project({ version: '2.23.0', agents: [{ id: 'claude' }], phases: { review: { agent: 'gemini-cli' } }, dispatchAgents: { other: { command: 'x {prompt}' } } });
   await mkdir(join(root, '.ai-factory/skill-context/aif-implement'), { recursive: true });
   await writeFile(join(root, CONTEXT_PATH), 'Owner rule: keep commits small.\n');
@@ -29,16 +36,17 @@ test('bb choice writes AI Factory dispatch config, runner and skill-context; sel
   const state = await writeDelegation(root, { mode: 'bb', providerId: 'codex', model: 'gpt-6.2-sol', reasoning: 'high', tier: 'fast' });
   assert.deepEqual(state.choice, { mode: 'bb', providerId: 'codex', model: 'gpt-6.2-sol', reasoning: 'high', tier: 'fast' });
   const config = await json(root);
-  assert.equal(config.dispatch, 'auto');
+  assert.equal(config.dispatch, undefined);
   assert.deepEqual(config.phases.implement, { agent: 'bb', model: 'codex/gpt-6.2-sol?reasoning=high&tier=fast', timeoutMs: 14400000 });
   assert.deepEqual(config.phases.review, { agent: 'gemini-cli' });
-  assert.equal(config.dispatchAgents.bb.command, `node ${RUNNER_PATH} run {model} {prompt}`);
+  assert.equal(config.dispatchAgents.bb, undefined);
   assert.ok(config.dispatchAgents.other);
   assert.deepEqual(config.agents, [{ id: 'claude' }]);
   const context = await readFile(join(root, CONTEXT_PATH), 'utf8');
   assert.match(context, /^Owner rule: keep commits small\.\n\n<!-- bb-aif-helper:delegation:start -->/);
   assert.match(context, /codex\/gpt-6\.2-sol\?reasoning=high&tier=fast/);
-  assert.ok(await exists(join(root, RUNNER_PATH)));
+  assert.match(context, /bb thread spawn/);
+  assert.equal(await exists(join(root, LEGACY_RUNNER)), false);
 
   // Switching model replaces the block instead of stacking a second one.
   await writeDelegation(root, { mode: 'bb', providerId: 'claude-code', model: 'sonnet' });
@@ -53,7 +61,48 @@ test('bb choice writes AI Factory dispatch config, runner and skill-context; sel
   assert.deepEqual(restored.phases.review, { agent: 'gemini-cli' });
   assert.equal(restored.dispatchAgents.bb, undefined);
   assert.equal(await readFile(join(root, CONTEXT_PATH), 'utf8'), 'Owner rule: keep commits small.\n');
-  assert.equal(await exists(join(root, RUNNER_PATH)), false);
+  assert.equal(await exists(join(root, LEGACY_RUNNER)), false);
+});
+
+test('context block spawns workers with native bb thread commands and quoted flags', async () => {
+  const root = await project();
+  await writeDelegation(root, { mode: 'bb', providerId: 'codex', model: 'gpt-6.2-sol', reasoning: 'high', tier: 'fast' });
+  const text = await managedBlock(root);
+  for (const flag of ['bb thread spawn', '--parent-self', '--lifecycle-owner-thread "$BB_THREAD_ID"', '--parent-notifications off',
+    "--provider 'codex'", "--model 'gpt-6.2-sol'", "--reasoning-level 'high'", "--service-tier 'fast'"])
+    assert.ok(text.includes(flag), flag);
+  assert.match(text, /bb thread list --parent-thread/);
+  assert.match(text, /AIF · /);
+  assert.ok(!text.includes('node ')); assert.ok(!text.includes('aif_delegate_task'));
+
+  await writeDelegation(root, { mode: 'bb', providerId: 'codex', model: 'm', tier: 'default' });
+  assert.ok(!(await managedBlock(root)).includes('--service-tier'));
+  await writeDelegation(root, { mode: 'bb', providerId: 'codex', model: 'm' });
+  assert.ok(!(await managedBlock(root)).includes('--service-tier'));
+});
+
+test('a model with shell metacharacters reaches the block only single-quoted', async () => {
+  const root = await project();
+  await writeDelegation(root, { mode: 'bb', providerId: 'codex', model: "a'b;rm" });
+  const text = await managedBlock(root);
+  assert.ok(text.includes("--model 'a'\\''b;rm'"));
+  assert.ok(!text.includes("--model a'b;rm"));
+  assert.ok(!text.includes("--model 'a'b;rm'"));
+});
+
+test('saving over the legacy runner install removes its script, dispatchAgents.bb and dispatch', async () => {
+  const root = await project({ version: '2.23.0', agents: [], dispatch: 'auto',
+    dispatchAgents: { bb: { command: 'node .ai-factory/bin/bb-aif-run.mjs run {model} {prompt}' }, other: { command: 'x {prompt}' } },
+    phases: { implement: { agent: 'bb', model: 'codex/gpt-6.2-sol', timeoutMs: 14400000 } } });
+  await mkdir(join(root, '.ai-factory/bin'), { recursive: true });
+  await writeFile(join(root, LEGACY_RUNNER), '#!/usr/bin/env node\n');
+  const state = await writeDelegation(root, { mode: 'bb', providerId: 'codex', model: 'gpt-6.2-sol' });
+  assert.equal(state.removedLegacy, true);
+  assert.equal(await exists(join(root, LEGACY_RUNNER)), false);
+  const config = await json(root);
+  assert.equal(config.dispatch, undefined);
+  assert.equal(config.dispatchAgents.bb, undefined);
+  assert.ok(config.dispatchAgents.other);
 });
 
 test('self on a project with nothing else removes dispatch keys and the empty context file', async () => {
@@ -89,15 +138,15 @@ test('mergeContextBlock keeps owner text around the managed block', () => {
   assert.equal(mergeContextBlock('', null), '');
 });
 
-test('runner is valid JavaScript and explains usage without BB', async () => {
+test('choosing self removes the managed block and leaves only owner text', async () => {
   const root = await project();
-  const file = join(root, 'runner.mjs');
-  await writeFile(file, RUNNER_SOURCE);
-  execFileSync(process.execPath, ['--check', file]);
-  const env = { ...process.env, BB_THREAD_ID: '', BB_ENVIRONMENT_ID: '', BB_PROJECT_ID: '' };
-  const stderr = (args: string[]) => { try { execFileSync(process.execPath, [file, ...args], { encoding: 'utf8', stdio: 'pipe', env, cwd: root }); return ''; } catch (e) { return String((e as { stderr?: unknown }).stderr); } };
-  const usage = stderr([]);
-  assert.match(usage, /usage: bb-aif-run/);
-  const outside = stderr(['run', 'codex/gpt', 'hi']);
-  assert.match(outside, /run inside a BB thread/);
+  await mkdir(join(root, '.ai-factory/skill-context/aif-implement'), { recursive: true });
+  await writeFile(join(root, CONTEXT_PATH), 'Owner notes.\n');
+  await writeDelegation(root, { mode: 'bb', providerId: 'codex', model: 'gpt-6.2-sol' });
+  assert.match(await managedBlock(root), /bb thread spawn/);
+  await writeDelegation(root, { mode: 'self' });
+  const content = await readFile(join(root, CONTEXT_PATH), 'utf8');
+  assert.ok(!content.includes('delegation:start'));
+  assert.ok(!content.includes('delegation:end'));
+  assert.equal(content, 'Owner notes.\n');
 });

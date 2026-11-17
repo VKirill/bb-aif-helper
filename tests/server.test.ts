@@ -594,3 +594,12 @@ test('a blocking last-answer gate also stops advancing from a workflow card with
     await h.harness.behavior.callRpc('run', { ...runInput(), actionId: 'check-verify' }); assert.equal(h.sends, 1);
   } finally { await h.harness.lifecycle.dispose(); }
 });
+
+test('a child thread going idle publishes changed for its parent thread', async () => {
+  const h = await setup(); try {
+    await h.harness.behavior.emitThreadEvent('thread.idle', { thread: makeThreadResponse({ id: 'thr_child', parentThreadId: 'thr_test' }), lastAssistantText: null });
+    const targets = h.harness.realtimeSignals.filter(s => s.channel === 'changed').map(s => (s.payload as { threadId?: string }).threadId);
+    assert.ok(targets.includes('thr_child'));
+    assert.ok(targets.includes('thr_test'));
+  } finally { await h.harness.lifecycle.dispose(); }
+});

@@ -230,11 +230,7 @@ function DelegationSection({ threadId, environmentId, busy }: { threadId: string
       setPick(current => current ?? (next.choice.mode === 'bb' ? toPicker(next.choice) : null));
     } catch (e) { if (mounted.current) setError(e instanceof Error ? e.message : String(e)); }
   }, [rpc, threadId]);
-  useEffect(() => {
-    void load();
-    const timer = window.setInterval(() => { if (document.visibilityState === 'visible') void load(); }, 15000);
-    return () => window.clearInterval(timer);
-  }, [load]);
+  useEffect(() => { void load(); }, [load]);
   useRealtime('changed', (payload: unknown) => { if ((payload as { threadId?: string })?.threadId === threadId) void load(); });
   if (!view || !mode) return <Section label="Исполнитель кода" title="Исполнитель кода">
     {error ? <p className="m-0 text-xs text-muted-foreground">Настройка недоступна: {error}</p> : <div className="h-20 animate-pulse rounded-md bg-muted motion-reduce:animate-none" aria-hidden="true" />}
