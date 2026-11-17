@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { definePluginApp, useRpc, useRealtime, useComposer, useBbNavigate, experimental_ProviderModelPicker as ProviderModelPicker, type ExperimentalProviderModelPickerValue as PickerValue, type PluginMessageDirectiveProps, type ExperimentalThreadContextCardProps, type ExperimentalThreadTabProps, type ExperimentalCodeFenceRendererProps } from '@get-bb/plugin-sdk/app';
+import { definePluginApp, useRpc, useRealtime, useComposer, useBbNavigate, experimental_ProviderModelPicker as ProviderModelPicker, type ExperimentalProviderModelPickerValue as PickerValue, type PluginMessageDirectiveProps, type ExperimentalThreadContextCardProps, type ExperimentalThreadTabProps, type ExperimentalCodeFenceRendererProps, type PluginComposerApi } from '@get-bb/plugin-sdk/app';
 import type { rpcContract, DelegationView } from './contract.ts';
 import type { DelegationChoice } from './delegation.ts';
 import { phaseSchema, type Snapshot, type Phase, type Action, type Suggestions } from './model.ts';
@@ -7,6 +7,7 @@ import { parseReplyGate } from './gate.ts';
 import { rowActions, supplementaryChecks } from './check-actions.ts';
 import { updateInVersionDetails, VERSION_TTL } from './versions.ts';
 import { contextSetupInDetails } from './workflow.ts';
+import { chipDraft } from './suggestions.ts';
 import { BASIC_PLAN_ROOT, usesBasicWorkflow } from './basic-workflow.ts';
 import { toast } from 'sonner';
 import { Button } from '@/components/ui/button';
@@ -301,9 +302,9 @@ function ContextCard({ threadId }: ExperimentalThreadContextCardProps) { return 
 function WorkflowPanel({ threadId, environment }: ExperimentalThreadTabProps) { return <div className="aif-panel p-4 pb-8"><WorkflowCard key={threadId} threadId={threadId} environmentId={environment?.id ?? null} compact delegation /></div>; }
 function SuggestedCommands() {
   const composer = useComposer();
-  return composer.scope.kind === 'thread' ? <SuggestionBar key={composer.scope.threadId} threadId={composer.scope.threadId} composerBusy={composer.isRunning || composer.isSubmitting} /> : null;
+  return composer.scope.kind === 'thread' ? <SuggestionBar key={composer.scope.threadId} threadId={composer.scope.threadId} composer={composer} composerBusy={composer.isRunning || composer.isSubmitting} /> : null;
 }
-function SuggestionBar({ threadId, composerBusy }: { threadId: string; composerBusy: boolean }) {
+function SuggestionBar({ threadId, composer, composerBusy }: { threadId: string; composer: PluginComposerApi; composerBusy: boolean }) {
   const rpc = useRpc<typeof rpcContract>();
   const [data, setData] = useState<Suggestions | null>(null);
   const [error, setError] = useState('');
@@ -333,7 +334,13 @@ function SuggestionBar({ threadId, composerBusy }: { threadId: string; composerB
       if (dismiss) await rpc.call('dismissSuggestion', input);
       else {
         const result = await rpc.call('runSuggestion', { ...input, fingerprint: data.fingerprint, requestId: crypto.randomUUID() });
-        if (mounted.current) setNotice(result.message);
+        if (result.stale || !result.command) { if (mounted.current) setNotice(result.message); return; }
+        const next = chipDraft(composer.draft, result.command, id);
+        composer.replace({ text: next.text, mentions: next.mentions });
+        if (next.submit) await composer.submit({ experimental_mode: 'queue-if-active', experimental_data: result.data ?? null });
+        else composer.focus();
+        await rpc.call('dismissSuggestion', input);
+        if (mounted.current && !next.submit) setNotice(result.message);
       }
     } catch (e) { if (mounted.current) setError(e instanceof Error ? e.message : String(e)); }
     finally { await refresh(); operation.current = false; if (mounted.current) setWorking(false); }
@@ -351,7 +358,10 @@ function SuggestionBar({ threadId, composerBusy }: { threadId: string; composerB
       {data.gateError && <p className="aif-error" role="alert">Некорректный gate: {data.gateError}</p>}
     </div>}
     {!!data?.items.length && <><span className="aif-suggestions-label">Из ответа агента</span><div className="aif-suggestion-list">{data.items.map(item => <div className="aif-suggestion" key={item.id}>
-      <button type="button" className="aif-suggestion-run" disabled={working || busy || !item.available} title={busy ? 'Дождитесь завершения текущей работы' : item.reason} onClick={() => void act(item.id, false)}>{item.command}</button>
+      <button type="button" className="aif-suggestion-run" disabled={working || busy || !item.available}
+        title={busy ? 'Дождитесь завершения текущей работы' : composer.isEmpty ? item.reason : `${item.command} + ваш текст из поля`}
+        aria-label={composer.isEmpty ? undefined : `${item.command} + ваш текст из поля`}
+        onClick={() => void act(item.id, false)}>{item.command}</button>
       <button type="button" className="aif-suggestion-dismiss" disabled={working} aria-label={`Удалить предложение ${item.command}`} title="Убрать из предложений этого ответа" onClick={() => void act(item.id, true)}>×</button>
     </div>)}</div></>}
     {error && <p className="aif-error" role="alert">{error}</p>}

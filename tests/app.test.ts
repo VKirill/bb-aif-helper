@@ -330,28 +330,93 @@ test('composer suggestions have a separate dismiss control and never dispatch du
   const slot = renderSlot(banner, {}, { composer: { scope: { kind: 'thread', threadId: 'thr_test' }, text: 'Мой черновик' }, rpc: {
     suggestions: () => current,
     dismissSuggestion: (input: any) => { current = { ...current, items: current.items.filter(i => i.id !== input.commandId) }; return { dismissed: true }; },
-    runSuggestion: () => { sends++; return { sent: true, message: 'Отправлено' }; },
+    runSuggestion: () => { sends++; return { sent: false, stale: true, message: 'Не должно вызываться' }; },
   } });
   try {
-    await slot.findByRole('button', { name: '$aif-architecture' });
-    await slot.findByRole('button', { name: '$aif-roadmap' });
+    await slot.findByRole('button', { name: '$aif-architecture + ваш текст из поля' });
+    await slot.findByRole('button', { name: '$aif-roadmap + ваш текст из поля' });
     fireEvent.click(slot.getByRole('button', { name: 'Удалить предложение $aif-architecture' }));
-    await waitFor(() => assert(!slot.queryByRole('button', { name: '$aif-architecture' })));
-    assert(slot.getByRole('button', { name: '$aif-roadmap' })); assert.equal(sends, 0);
+    await waitFor(() => assert(!slot.queryByRole('button', { name: '$aif-architecture + ваш текст из поля' })));
+    assert(slot.getByRole('button', { name: '$aif-roadmap + ваш текст из поля' })); assert.equal(sends, 0);
     await slot.behavior.emitRealtime('changed', { threadId: 'thr_test' });
-    assert.equal(slot.queryByRole('button', { name: '$aif-architecture' }), null);
+    assert.equal(slot.queryByRole('button', { name: '$aif-architecture + ваш текст из поля' }), null);
     assert.equal(slot.inspection.composer.text, 'Мой черновик');
   } finally { slot.lifecycle.unmount(); }
 });
-test('suggested command dispatch is click-only and guarded against double clicks without replacing a draft', async () => {
-  let sends = 0;
+test('suggested command submits the composer draft once and a double click cannot send twice', async () => {
+  let calls = 0; let dismissals = 0;
   const slot = renderSlot(banner, {}, { composer: { scope: { kind: 'thread', threadId: 'thr_test' }, text: 'Keep draft' }, rpc: {
-    suggestions: () => suggestedData(), runSuggestion: (input: any) => { assert.equal(input.commandId, 'aif-roadmap'); assert.equal(input.threadId, 'thr_test'); sends++; return { sent: true, message: 'Отправлено' }; },
+    suggestions: () => suggestedData(),
+    runSuggestion: (input: any) => { assert.equal(input.commandId, 'aif-roadmap'); assert.equal(input.threadId, 'thr_test'); calls++;
+      return { sent: false, message: 'Команда подставлена в поле ввода.', command: '$aif-roadmap',
+        data: { source: 'aif-chat', sourceKey: 'c'.repeat(64), commandId: 'aif-roadmap', fingerprint: 'a'.repeat(64), gate: null } }; },
+    dismissSuggestion: () => { dismissals++; return { dismissed: true }; },
   } });
   try {
-    const button = await slot.findByRole('button', { name: '$aif-roadmap' }); assert.equal(sends, 0);
-    fireEvent.click(button); fireEvent.click(button); await waitFor(() => assert.equal(sends, 1));
+    const button = await slot.findByRole('button', { name: '$aif-roadmap + ваш текст из поля' }); assert.equal(calls, 0);
+    fireEvent.click(button); fireEvent.click(button);
+    await waitFor(() => assert.equal(calls, 1));
+    await waitFor(() => assert.equal(slot.inspection.composer.submits.length, 1));
+    const submit = slot.inspection.composer.submits[0];
+    assert.equal(submit.experimental_mode, 'queue-if-active');
+    assert.equal((submit.experimental_data as any).source, 'aif-chat');
+    assert.equal((submit.experimental_data as any).commandId, 'aif-roadmap');
+    await waitFor(() => assert.equal(dismissals, 1));
+    assert.equal(slot.inspection.composer.text, '');
+  } finally { slot.lifecycle.unmount(); }
+});
+test('empty composer plus a topic chip fills the draft and focuses without submitting', async () => {
+  let dismissals = 0;
+  const slot = renderSlot(banner, {}, { composer: { scope: { kind: 'thread', threadId: 'thr_test' } }, rpc: {
+    suggestions: () => ({ ...suggestedData(), items: [{ id: 'aif-plan', command: '/aif-plan', available: true, reason: 'Из последнего ответа' }] }),
+    runSuggestion: () => ({ sent: false, message: 'Команда подставлена в поле ввода.', command: '/aif-plan',
+      data: { source: 'aif-chat', sourceKey: 'c'.repeat(64), commandId: 'aif-plan', fingerprint: 'a'.repeat(64), gate: null } }),
+    dismissSuggestion: () => { dismissals++; return { dismissed: true }; },
+  } });
+  try {
+    const button = await slot.findByRole('button', { name: '/aif-plan' });
+    const focusBefore = slot.inspection.composer.focusCount;
+    fireEvent.click(button);
+    await waitFor(() => assert.equal(slot.inspection.composer.text, '/aif-plan '));
+    await waitFor(() => assert.equal(dismissals, 1));
+    assert.equal(slot.inspection.composer.focusCount, focusBefore + 1);
+    assert.equal(slot.inspection.composer.submits.length, 0);
+    await slot.findByText('Команда подставлена в поле ввода.');
+  } finally { slot.lifecycle.unmount(); }
+});
+test('composer with text plus a chip submits the command with the draft as the topic', async () => {
+  const slot = renderSlot(banner, {}, { composer: { scope: { kind: 'thread', threadId: 'thr_test' }, text: 'добавь логин' }, rpc: {
+    suggestions: () => ({ ...suggestedData(), items: [{ id: 'aif-verify', command: '/aif-verify', available: true, reason: 'Из последнего ответа' }] }),
+    runSuggestion: () => ({ sent: false, message: 'Отправлено', command: '/aif-verify',
+      data: { source: 'aif-chat', sourceKey: 'c'.repeat(64), commandId: 'aif-verify', fingerprint: 'a'.repeat(64), gate: null } }),
+    dismissSuggestion: () => ({ dismissed: true }),
+  } });
+  try {
+    const button = await slot.findByRole('button', { name: '/aif-verify + ваш текст из поля' });
+    fireEvent.click(button);
+    await waitFor(() => assert.equal(slot.inspection.composer.submits.length, 1));
+    const submit = slot.inspection.composer.submits[0];
+    assert.equal(submit.experimental_mode, 'queue-if-active');
+    assert.equal((submit.experimental_data as any).source, 'aif-chat');
+    assert.equal((submit.experimental_data as any).commandId, 'aif-verify');
+    assert.equal(slot.inspection.composer.text, '');
+  } finally { slot.lifecycle.unmount(); }
+});
+test('stale chip result shows a notice without touching the composer or dismissing', async () => {
+  let dismissals = 0;
+  const slot = renderSlot(banner, {}, { composer: { scope: { kind: 'thread', threadId: 'thr_test' }, text: 'Keep draft' }, rpc: {
+    suggestions: () => suggestedData(),
+    runSuggestion: () => ({ sent: false, stale: true, message: 'Карточка обновилась. Проверьте задачу и нажмите ещё раз.' }),
+    dismissSuggestion: () => { dismissals++; return { dismissed: true }; },
+  } });
+  try {
+    const button = await slot.findByRole('button', { name: '$aif-roadmap + ваш текст из поля' });
+    fireEvent.click(button);
+    await slot.findByText('Карточка обновилась. Проверьте задачу и нажмите ещё раз.');
     assert.equal(slot.inspection.composer.text, 'Keep draft');
+    assert.equal(slot.inspection.composer.submits.length, 0);
+    assert.equal(slot.inspection.composer.focusCount, 0);
+    assert.equal(dismissals, 0);
   } finally { slot.lifecycle.unmount(); }
 });
 test('busy composer disables command launch but allows removing a suggestion', async () => {
