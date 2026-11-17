@@ -233,14 +233,13 @@ test('panel picks the code model and saves exactly the chosen provider, model an
   try {
     await slot.findByText('Задача 1');
     assert.ok(slot.getByText(/Codex · пишет код/));
-    const save = slot.getByRole('button', { name: 'Сохранить' }) as HTMLButtonElement;
-    assert.equal(save.disabled, true);
+    assert.equal(slot.queryByRole('button', { name: 'Сохранить' }), null);
     fireEvent.click(slot.getByRole('radio', { name: 'Другая модель' }));
     fireEvent.change(slot.getByLabelText('Провайдер'), { target: { value: 'codex' } });
     await waitFor(() => assert.ok(slot.getByRole('option', { name: 'GPT-6.2-Sol · по умолчанию' })));
     fireEvent.change(slot.getByLabelText('Модель'), { target: { value: 'gpt-6.2-sol' } });
     assert.equal((slot.getByLabelText('Рассуждение') as HTMLSelectElement).value, 'high');
-    fireEvent.click(save);
+    fireEvent.click(slot.getByRole('button', { name: 'Сохранить' }));
     await slot.findByText('/aif-implement будет передавать задачи выбранной модели.');
     assert.deepEqual(saved, [{ threadId: 'thr_panel', choice: { mode: 'bb', providerId: 'codex', model: 'gpt-6.2-sol', effort: 'high' } }]);
     assert.ok(slot.getByText('Codex · gpt-6.2-sol · high'));

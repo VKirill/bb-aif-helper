@@ -3,7 +3,7 @@
    Spacing scale: 4 · 8 · 12 · 16 · 24 · 32. Radius: 8 outer, 6 inner (8 − 2px inset), 4 for chips.
    Type scale: 12/16 (meta) · 14/20 (body, controls) · 16/24 (title). One accent: --primary. */
 
-.aif-card,.aif-suggestions,.aif-gate-data{
+.aif-panel,.aif-card,.aif-suggestions,.aif-gate-data{
   --aif-1:4px;--aif-2:8px;--aif-3:12px;--aif-4:16px;--aif-5:24px;--aif-6:32px;
   --aif-r:8px;--aif-r-in:6px;--aif-r-xs:4px;
   --aif-ease:cubic-bezier(.22,1,.36,1);

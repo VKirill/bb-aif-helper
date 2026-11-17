@@ -245,11 +245,11 @@ function DelegationSection({ threadId, busy }: { threadId: string; busy: boolean
           {(model?.efforts ?? (draft.effort ? [draft.effort] : [])).map(e => <option key={e} value={e}>{e}</option>)}
         </select></label>
     </div>}
-    <div className="aif-actions">
-      <button type="button" className="aif-action" disabled={!dirty || saving || busy || !!view.foreign} onClick={() => void save()}
+    {dirty && <div className="aif-actions">
+      <button type="button" className="aif-action" disabled={saving || busy || !!view.foreign} onClick={() => void save()}
         title={busy ? 'Дождитесь, пока агент закончит текущую работу' : 'Записать выбор в .ai-factory.json'}>{saving ? 'Сохраняю…' : 'Сохранить'}</button>
-      {dirty && <button type="button" className="aif-action aif-secondary" disabled={saving} onClick={() => { setDraft(toDraft(view.choice)); setNotice(''); }}>Отменить</button>}
-    </div>
+      <button type="button" className="aif-action aif-secondary" disabled={saving} onClick={() => { setDraft(toDraft(view.choice)); setNotice(''); }}>Отменить</button>
+    </div>}
     {error && <p className="aif-callout aif-callout-error" role="status">{error}</p>}
     {notice && <p className="aif-notice" role="status">{notice}</p>}
     <p className="aif-muted aif-small">Выбор хранится в .ai-factory.json → phases.implement. /aif-implement отдаёт каждую задачу дочернему треду на этой модели, затем сам проверяет diff и отмечает задачу в плане.</p>
