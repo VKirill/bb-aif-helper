@@ -219,6 +219,33 @@ test('workflow panel reads its owning thread and exposes maintenance without a t
     assert.deepEqual(readThreads, ['thr_panel']); assert.equal(runs, 0);
   } finally { slot.lifecycle.unmount(); }
 });
+test('panel picks the code model and saves exactly the chosen provider, model and reasoning', async () => {
+  const tab = app.tabs.find(t => t.id === 'workflow')!;
+  const saved: unknown[] = [];
+  const view = (choice: unknown) => ({ choice, configured: true, foreign: null, error: null, providers: [{ id: 'codex', name: 'Codex' }],
+    children: [{ id: 'thr_child', title: 'Задача 1', status: 'active', providerId: 'codex', updatedAt: '2026-11-17T00:00:00Z' }] });
+  const slot = renderSlot(tab as any, { threadId: 'thr_panel', environment: { id: 'env_panel' } }, { rpc: {
+    status: () => data(),
+    delegation: () => view({ mode: 'self' }),
+    providerModels: () => [{ id: 'gpt-6.2-sol', name: 'GPT-6.2-Sol', isDefault: true, efforts: ['low', 'high'], defaultEffort: 'high' }],
+    setDelegation: (input: any) => { saved.push(input); return view(input.choice); },
+  } });
+  try {
+    await slot.findByText('Задача 1');
+    assert.ok(slot.getByText(/Codex · пишет код/));
+    const save = slot.getByRole('button', { name: 'Сохранить' }) as HTMLButtonElement;
+    assert.equal(save.disabled, true);
+    fireEvent.click(slot.getByRole('radio', { name: 'Другая модель' }));
+    fireEvent.change(slot.getByLabelText('Провайдер'), { target: { value: 'codex' } });
+    await waitFor(() => assert.ok(slot.getByRole('option', { name: 'GPT-6.2-Sol · по умолчанию' })));
+    fireEvent.change(slot.getByLabelText('Модель'), { target: { value: 'gpt-6.2-sol' } });
+    assert.equal((slot.getByLabelText('Рассуждение') as HTMLSelectElement).value, 'high');
+    fireEvent.click(save);
+    await slot.findByText('/aif-implement будет передавать задачи выбранной модели.');
+    assert.deepEqual(saved, [{ threadId: 'thr_panel', choice: { mode: 'bb', providerId: 'codex', model: 'gpt-6.2-sol', effort: 'high' } }]);
+    assert.ok(slot.getByText('Codex · gpt-6.2-sol · high'));
+  } finally { slot.lifecycle.unmount(); }
+});
 test('card renders real buttons, read-only progress and sends selected action once', async () => {
   let runs = 0;
   const slot = renderSlot(app.messageDirectives[0], props, { rpc: { status: () => data(), run: () => { runs++; return { sent: true, message: 'Команда отправлена' }; } } });
