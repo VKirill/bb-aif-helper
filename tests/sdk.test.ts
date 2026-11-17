@@ -5,7 +5,7 @@ import { experimental_scanPublicSdkOnly } from '@get-bb/plugin-sdk/testing';
 
 test('production code and tests use only the public SDK and declared libraries', () => {
   const result = experimental_scanPublicSdkOnly(fileURLToPath(new URL('../', import.meta.url)), {
-    allow: [/^react(?:-dom)?(?:\/.*)?$/, /^yaml$/, /^jsdom$/, /^@testing-library\/react$/, /^@radix-ui\//, /^class-variance-authority$/, /^clsx$/, /^tailwind-merge$/, /^@\//],
+    allow: [/^react(?:-dom)?(?:\/.*)?$/, /^yaml$/, /^jsdom$/, /^@testing-library\/react$/, /^@radix-ui\//, /^class-variance-authority$/, /^clsx$/, /^tailwind-merge$/, /^sonner$/, /^@\//],
   });
   assert.deepEqual(result.violations, []);
   assert.deepEqual(result.privateDependencies, []);

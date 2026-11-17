@@ -14,10 +14,11 @@ async function project(config: object | null = { version: '2.23.0', agents: [{ i
 const json = async (root: string) => JSON.parse(await readFile(join(root, '.ai-factory.json'), 'utf8'));
 const exists = (path: string) => access(path).then(() => true, () => false);
 
-test('parseSpec accepts provider/model[:effort] and rejects the rest', () => {
-  assert.deepEqual(parseSpec('codex/gpt-6.2-sol:high'), { mode: 'bb', providerId: 'codex', model: 'gpt-6.2-sol', effort: 'high' });
+test('parseSpec round-trips provider/model?reasoning&tier, including slashes and colons in the model', () => {
+  assert.deepEqual(parseSpec('codex/gpt-6.2-sol?reasoning=high&tier=fast'), { mode: 'bb', providerId: 'codex', model: 'gpt-6.2-sol', reasoning: 'high', tier: 'fast' });
   assert.deepEqual(parseSpec('claude-code/sonnet'), { mode: 'bb', providerId: 'claude-code', model: 'sonnet' });
-  for (const bad of ['sonnet', 'a/b c', 'a/b/c', '', 42]) assert.equal(parseSpec(bad), null);
+  assert.deepEqual(parseSpec('opencode2/openrouter/qwen:7b?reasoning=low'), { mode: 'bb', providerId: 'opencode2', model: 'openrouter/qwen:7b', reasoning: 'low' });
+  for (const bad of ['sonnet', 'a/b c', '', 42, 'a/b?reasoning=x y', 'a/b?tier=$(x)']) assert.equal(parseSpec(bad), null);
 });
 
 test('bb choice writes AI Factory dispatch config, runner and skill-context; self removes only what it added', async () => {
@@ -25,18 +26,18 @@ test('bb choice writes AI Factory dispatch config, runner and skill-context; sel
   await mkdir(join(root, '.ai-factory/skill-context/aif-implement'), { recursive: true });
   await writeFile(join(root, CONTEXT_PATH), 'Owner rule: keep commits small.\n');
 
-  const state = await writeDelegation(root, { mode: 'bb', providerId: 'codex', model: 'gpt-6.2-sol', effort: 'high' });
-  assert.deepEqual(state.choice, { mode: 'bb', providerId: 'codex', model: 'gpt-6.2-sol', effort: 'high' });
+  const state = await writeDelegation(root, { mode: 'bb', providerId: 'codex', model: 'gpt-6.2-sol', reasoning: 'high', tier: 'fast' });
+  assert.deepEqual(state.choice, { mode: 'bb', providerId: 'codex', model: 'gpt-6.2-sol', reasoning: 'high', tier: 'fast' });
   const config = await json(root);
   assert.equal(config.dispatch, 'auto');
-  assert.deepEqual(config.phases.implement, { agent: 'bb', model: 'codex/gpt-6.2-sol:high', timeoutMs: 14400000 });
+  assert.deepEqual(config.phases.implement, { agent: 'bb', model: 'codex/gpt-6.2-sol?reasoning=high&tier=fast', timeoutMs: 14400000 });
   assert.deepEqual(config.phases.review, { agent: 'gemini-cli' });
   assert.equal(config.dispatchAgents.bb.command, `node ${RUNNER_PATH} run {model} {prompt}`);
   assert.ok(config.dispatchAgents.other);
   assert.deepEqual(config.agents, [{ id: 'claude' }]);
   const context = await readFile(join(root, CONTEXT_PATH), 'utf8');
   assert.match(context, /^Owner rule: keep commits small\.\n\n<!-- bb-aif-helper:delegation:start -->/);
-  assert.match(context, /codex\/gpt-6\.2-sol:high/);
+  assert.match(context, /codex\/gpt-6\.2-sol\?reasoning=high&tier=fast/);
   assert.ok(await exists(join(root, RUNNER_PATH)));
 
   // Switching model replaces the block instead of stacking a second one.

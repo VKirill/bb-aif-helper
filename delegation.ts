@@ -17,7 +17,7 @@ const TIMEOUT_MS = 4 * 60 * 60 * 1000;
 const id = z.string().regex(/^[\w.-]{1,100}$/);
 export const delegationChoiceSchema = z.discriminatedUnion('mode', [
   z.object({ mode: z.literal('self') }).strict(),
-  z.object({ mode: z.literal('bb'), providerId: id, model: z.string().regex(/^[^\s:/]{1,200}$/), effort: id.optional() }).strict(),
+  z.object({ mode: z.literal('bb'), providerId: id, model: z.string().regex(/^[^\s?&#]{1,200}$/), reasoning: id.optional(), tier: id.optional() }).strict(),
 ]);
 export type DelegationChoice = z.infer<typeof delegationChoiceSchema>;
 export const delegationStateSchema = z.object({
@@ -29,10 +29,21 @@ export const delegationStateSchema = z.object({
 });
 export type DelegationState = z.infer<typeof delegationStateSchema>;
 
-export const modelSpec = (c: Extract<DelegationChoice, { mode: 'bb' }>) => `${c.providerId}/${c.model}${c.effort ? `:${c.effort}` : ''}`;
+// AI Factory keeps only agent/model/timeoutMs of a phase, so the whole BB
+// selection lives in `model`: provider/model?reasoning=high&tier=fast.
+// The model part may itself contain "/" or ":" (OpenRouter, Ollama ids).
+export function modelSpec(c: Extract<DelegationChoice, { mode: 'bb' }>) {
+  const query = [c.reasoning && `reasoning=${c.reasoning}`, c.tier && `tier=${c.tier}`].filter(Boolean).join('&');
+  return `${c.providerId}/${c.model}${query ? `?${query}` : ''}`;
+}
 export function parseSpec(value: unknown): DelegationChoice | null {
-  const m = typeof value === 'string' ? /^([\w.-]{1,100})\/([^\s:/]{1,200})(?::([\w.-]{1,100}))?$/.exec(value) : null;
-  return m ? { mode: 'bb', providerId: m[1], model: m[2], ...(m[3] ? { effort: m[3] } : {}) } : null;
+  const m = typeof value === 'string' ? /^([\w.-]{1,100})\/([^\s?&#]{1,200})(?:\?([\w.=&-]{1,200}))?$/.exec(value) : null;
+  if (!m) return null;
+  const params = new URLSearchParams(m[3] ?? '');
+  const reasoning = params.get('reasoning'), tier = params.get('tier');
+  const ok = (v: string | null) => v === null || /^[\w.-]{1,100}$/.test(v);
+  if (!ok(reasoning) || !ok(tier)) return null;
+  return { mode: 'bb', providerId: m[1], model: m[2], ...(reasoning ? { reasoning } : {}), ...(tier ? { tier } : {}) };
 }
 
 type Json = Record<string, unknown>;
@@ -61,7 +72,7 @@ export async function readDelegation(root: string): Promise<DelegationState> {
   const choice = parseSpec(phase.model);
   return choice
     ? { choice, configured: true, foreign: null, error: null }
-    : { choice: { mode: 'self' }, configured: true, foreign: null, error: `phases.implement.model не в формате provider/model[:effort]: ${String(phase.model).slice(0, 100)}` };
+    : { choice: { mode: 'self' }, configured: true, foreign: null, error: `phases.implement.model не в формате provider/model?reasoning=…&tier=…: ${String(phase.model).slice(0, 100)}` };
 }
 
 async function writeAtomic(path: string, content: string) {
@@ -84,7 +95,7 @@ export function mergeContextBlock(existing: string, block: string | null): strin
 export function contextBlock(c: Extract<DelegationChoice, { mode: 'bb' }>) {
   return `## Code delegation (managed by BB AIF Helper)
 
-The project owner chose \`${modelSpec(c)}\` (BB provider/model[:reasoning]) to write the code of plan tasks. The source of truth is \`.ai-factory.json\` → \`phases.implement\`; re-read it before each task. If it no longer has \`"agent": "bb"\`, implement tasks yourself as usual.
+The project owner chose \`${modelSpec(c)}\` (BB provider/model?reasoning&tier) to write the code of plan tasks. The source of truth is \`.ai-factory.json\` → \`phases.implement\`; re-read it before each task. If it no longer has \`"agent": "bb"\`, implement tasks yourself as usual.
 
 You stay the coordinator: you own the plan, its checkboxes, verification and commits. For each plan task, instead of editing the code yourself:
 
@@ -131,7 +142,7 @@ export const RUNNER_SOURCE = String.raw`#!/usr/bin/env node
 // Managed by BB AIF Helper: rewritten when the code model changes in the AI Factory panel.
 // start --prompt-file <path>   spawn a BB child thread on phases.implement.model, print {"threadId"}
 // wait <threadId> [--timeout 8m]  print {"status":"running"} or the finished worker report
-// run <provider/model[:effort]> <prompt>  blocking start+wait, used by "ai-factory dispatch implement"
+// run <provider/model?reasoning=…&tier=…> <prompt>  blocking start+wait, used by "ai-factory dispatch implement"
 import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 
@@ -148,9 +159,10 @@ function bbJson(args, input) {
   return value;
 }
 function spec(value) {
-  const m = /^([\w.-]+)\/([^\s:/]+)(?::([\w.-]+))?$/.exec(value || '');
-  if (!m) throw new Error('model must be provider/model[:effort], got: ' + value);
-  return { provider: m[1], model: m[2], effort: m[3] };
+  const m = /^([\w.-]+)\/([^\s?&#]+)(?:\?([\w.=&-]+))?$/.exec(value || '');
+  if (!m) throw new Error('model must be provider/model?reasoning=…&tier=…, got: ' + value);
+  const q = new URLSearchParams(m[3] || '');
+  return { provider: m[1], model: m[2], reasoning: q.get('reasoning'), tier: q.get('tier') };
 }
 function configured() {
   const phase = (JSON.parse(readFileSync('.ai-factory.json', 'utf8')).phases || {}).implement;
@@ -163,7 +175,8 @@ function start(prompt, model) {
   const s = spec(model);
   const args = ['thread', 'spawn', '--project', BB_PROJECT_ID, '--environment', BB_ENVIRONMENT_ID, '--parent-self',
     '--provider', s.provider, '--model', s.model, '--prompt-file', '-'];
-  if (s.effort) args.push('--reasoning-level', s.effort);
+  if (s.reasoning) args.push('--reasoning-level', s.reasoning);
+  if (s.tier && s.tier !== 'default') args.push('--service-tier', s.tier);
   const thread = bbJson(args, HEADER + prompt);
   return thread.id || thread.thread && thread.thread.id;
 }
@@ -199,7 +212,7 @@ try {
     process.stdout.write((result.output || '') + '\n');
     process.exitCode = result.status === 'idle' ? 0 : 1;
   } else {
-    throw new Error('usage: bb-aif-run start --prompt-file <path> | wait <threadId> [--timeout 8m] | run <provider/model[:effort]> <prompt>');
+    throw new Error('usage: bb-aif-run start --prompt-file <path> | wait <threadId> [--timeout 8m] | run <provider/model?reasoning=…&tier=…> <prompt>');
   }
 } catch (error) {
   process.stderr.write('bb-aif-run: ' + (error && error.message || error) + '\n');

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { definePluginApp, useRpc, useRealtime, useComposer, useBbNavigate, type PluginMessageDirectiveProps, type ExperimentalThreadContextCardProps, type ExperimentalThreadTabProps, type ExperimentalCodeFenceRendererProps } from '@get-bb/plugin-sdk/app';
-import type { rpcContract, DelegationView, ModelOption } from './contract.ts';
+import { definePluginApp, useRpc, useRealtime, useComposer, useBbNavigate, experimental_ProviderModelPicker as ProviderModelPicker, type ExperimentalProviderModelPickerValue as PickerValue, type PluginMessageDirectiveProps, type ExperimentalThreadContextCardProps, type ExperimentalThreadTabProps, type ExperimentalCodeFenceRendererProps } from '@get-bb/plugin-sdk/app';
+import type { rpcContract, DelegationView } from './contract.ts';
 import type { DelegationChoice } from './delegation.ts';
 import { phaseSchema, type Snapshot, type Phase, type Action, type Suggestions } from './model.ts';
 import { parseReplyGate } from './gate.ts';
@@ -8,6 +8,13 @@ import { rowActions, supplementaryChecks } from './check-actions.ts';
 import { updateInVersionDetails, VERSION_TTL } from './versions.ts';
 import { contextSetupInDetails } from './workflow.ts';
 import { BASIC_PLAN_ROOT, usesBasicWorkflow } from './basic-workflow.ts';
+import { toast } from 'sonner';
+import { Button } from '@/components/ui/button';
+import { Badge } from '@/components/ui/badge';
+import { Progress } from '@/components/ui/progress';
+import { Icon } from '@/components/ui/icon';
+import { cn } from '@/lib/utils';
+import { Callout, Disclosure, Hint, Section, StatusDot, type Tone } from '@/components/aif/layout';
 import './aif-chat.css';
 
 const phaseNames: Record<Phase, string> = { unknown: 'Контекст задачи', explore: 'Исследование', plan: 'Планирование', improve: 'Уточнение плана', implement: 'Выполнение плана', verify: 'Проверка', fix: 'Исправление замечаний', done: 'Финализация' };
@@ -26,8 +33,8 @@ function GateData({ code, status, Original }: ExperimentalCodeFenceRendererProps
   </div>;
 }
 
-function WorkflowCard({ threadId, initialTarget = '', phase = 'unknown', openFile, compact = false, delegation = false }: {
-  threadId: string; initialTarget?: string; phase?: Phase; openFile?: ((path: string) => boolean) | null; compact?: boolean; delegation?: boolean;
+function WorkflowCard({ threadId, initialTarget = '', phase = 'unknown', openFile, compact = false, delegation = false, environmentId = null }: {
+  threadId: string; initialTarget?: string; phase?: Phase; openFile?: ((path: string) => boolean) | null; compact?: boolean; delegation?: boolean; environmentId?: string | null;
 }) {
   const rpc = useRpc<typeof rpcContract>();
   const [target, setTarget] = useState(initialTarget);
@@ -74,102 +81,143 @@ function WorkflowCard({ threadId, initialTarget = '', phase = 'unknown', openFil
   const tasks = snapshot?.target?.tasks ?? [];
   const completed = tasks.filter(t => t.done).length;
   const nextVersionCheck = snapshot?.upstream.checkedAt ? Date.parse(snapshot.upstream.checkedAt) + VERSION_TTL : 0;
-  // One primary action per card: the first "next" step. Everything else is secondary.
+  // One primary action per card: the first "next" step. Everything else is outline.
   const primaryId = snapshot && (snapshot.actions.find(a => a.group === 'next' && a.available)
     ?? snapshot.actions.find(a => a.group === 'maintenance' && a.available && !updateInVersionDetails(snapshot, a.id) && !contextSetupInDetails(snapshot, a.id)))?.id;
-  const renderAction = (a: Action) => <button key={a.id} type="button"
-    className={a.id === primaryId ? 'aif-action' : 'aif-action aif-secondary'} disabled={sending || busy || !a.available}
-    title={`${a.reason}\n${a.command}`} onClick={() => void run(a)}>{a.label}{!a.available && (a.disabledReason === 'unchanged' ? ' · без изменений' : ' · не установлен')}</button>;
-  const renderActions = (actions: Action[]) => <div className="aif-actions">{actions.map(renderAction)}</div>;
-  return <section className={`aif-card${compact ? ' aif-compact' : ''}`} aria-label="AI Factory workflow">
-    <header className="aif-heading"><span className="aif-logo" aria-hidden="true">◈</span><strong>AI Factory</strong>
-      {snapshot && <span className="aif-profile">{profileNames[snapshot.profile]}</span>}
-      <button className="aif-refresh" type="button" onClick={() => void refresh(false, true)} aria-label="Обновить статус AI Factory" title="Перечитать задачи и проверки; версии CLI/Git и GitHub кэшируются на сутки">↻</button>
+  const renderAction = (a: Action) => <Hint key={a.id} text={`${a.reason}\n${a.command}`}><Button type="button" size="sm" variant={a.id === primaryId ? 'default' : 'outline'}
+    disabled={sending || busy || !a.available} onClick={() => void run(a)}>
+    {a.label}{!a.available && (a.disabledReason === 'unchanged' ? ' · без изменений' : ' · не установлен')}</Button></Hint>;
+  const renderActions = (actions: Action[]) => actions.length ? <div className="flex flex-wrap gap-2">{actions.map(renderAction)}</div> : null;
+  const stateText = snapshot ? snapshot.pendingQuestions ? `ожидаю ответы: ${snapshot.pendingQuestions}` : busy ? 'агент занят' : snapshot.threadState === 'error' ? 'ошибка выполнения BB' : 'агент свободен' : '';
+  const checkTone = (c: Snapshot['checks'][number]) => {
+    const state = c.chat ? c.chat.result.status : c.state;
+    return state === 'fail' ? 'destructive' : state === 'pass' || state === 'reported-pass' ? 'default' : 'secondary';
+  };
+  return <section aria-label="AI Factory workflow" className={cn('aif-card flex min-w-0 flex-col gap-4 text-sm text-foreground [overflow-wrap:anywhere]',
+    compact ? '' : 'my-3 rounded-xl border border-border bg-card p-4')}>
+    <header className={cn('flex min-h-8 items-center gap-2', delegation && 'sticky top-0 z-10 -mx-4 -mt-4 border-b border-border bg-background/90 px-4 py-3 backdrop-blur')}>
+      <span className="grid size-6 shrink-0 place-items-center rounded-md bg-primary text-primary-foreground"><Icon name="Workflow" className="size-3.5" /></span>
+      <strong className="text-base font-semibold tracking-tight whitespace-nowrap">AI Factory</strong>
+      {snapshot && <Badge variant="secondary" className="truncate font-medium">{profileNames[snapshot.profile]}</Badge>}
+      <span className="ml-auto"><Hint text="Перечитать задачи и проверки; версии CLI/Git и GitHub кэшируются на сутки"><Button type="button" variant="ghost" size="icon" className="size-8 text-muted-foreground" onClick={() => void refresh(false, true)}
+        aria-label="Обновить статус AI Factory"><Icon name="RotateCcw" className="size-4" /></Button></Hint></span>
     </header>
-    {loading && <p role="status" className="aif-muted">Читаю локальный статус…</p>}
-    {error && <p role="alert" className="aif-error">{error}</p>}
-    {notice && <p role="status" className="aif-notice">{notice}</p>}
+    {loading && <div role="status" aria-label="Читаю локальный статус…" className="h-24 animate-pulse rounded-lg bg-muted motion-reduce:animate-none" />}
+    {error && <Callout tone="error" role="alert">{error}</Callout>}
+    {notice && <Callout role="status">{notice}</Callout>}
     {snapshot && <>
-      <div className="aif-versions"><span>CLI <b>{snapshot.versions.globalCli ?? 'не найден'}</b></span><span>Проект <b>{snapshot.versions.installed ?? 'не указан'}</b></span>
-        {snapshot.versions.sourceVersion && <span>Git <b>{snapshot.versions.sourceVersion}</b><small> @{snapshot.versions.sourceSha?.slice(0, 7)}{snapshot.versions.sourceDirty ? ' · изменён' : ''}</small></span>}
-        {snapshot.extensions.map(e => <span key={e.name} title={e.installedVersion ? 'Установленная версия расширения' : 'Записанная версия; установленные файлы не подтверждены'}>{e.name} <b>{e.installedVersion ?? e.recordedVersion ?? 'неизвестна'}</b>{!e.installedVersion && <small> · не подтверждена</small>}</span>)}</div>
-      <section className="aif-section" aria-label="Текущий этап">
-      <h3 className="aif-section-title">Сейчас</h3>
-      <p className="aif-stage" title={snapshot.phaseSource}>{busy ? <span className="aif-live-dot" aria-hidden="true" /> : <span className="aif-idle-dot" aria-hidden="true" />} {phaseNames[snapshot.phase]}
-        <span className="aif-muted"> · {snapshot.pendingQuestions ? `ожидаю ответы: ${snapshot.pendingQuestions}` : busy ? 'агент занят' : snapshot.threadState === 'error' ? 'ошибка выполнения BB' : 'агент свободен'}</span></p>
-      {usesBasicWorkflow(snapshot) && <p className="aif-muted" aria-label="Базовый workflow">Без AI Factory доступен встроенный flow: исследование → план → выполнение → проверка → коммит. Установка — отдельная кнопка; планы сохраняются в .bb-aif-helper/plans/.</p>}
-      {snapshot.candidates.length > 0 && <label className="aif-target">План / change
-        <select aria-label="Выбранный план или change" value={snapshot.target?.path ?? target} onChange={e => { setTarget(e.target.value); setNotice(''); }}>
-          {!snapshot.target && <option value="">Выберите задачу</option>}
-          {snapshot.candidates.map(t => <option key={t.path} value={t.path}>{t.title} · {t.kind}</option>)}
-        </select></label>}
-      {snapshot.target && <div className="aif-progress"><div><strong>{snapshot.target.title}</strong><span>{completed}/{tasks.length} задач</span></div>
-        <progress aria-label="Выполнение задач плана" value={completed} max={Math.max(tasks.length, 1)} />
-        <details><summary>Задачи плана</summary><ul className="aif-tasks">{tasks.map((t, i) => <li key={`${t.id}-${i}`}><span className={t.done ? 'aif-task-done' : 'aif-muted'} aria-label={t.done ? 'Выполнена по плану' : 'Не выполнена'}>{t.done ? '✓' : '□'}</span><span>{t.title}</span></li>)}</ul>
-          {!tasks.length && <p className="aif-muted">Чекбоксы задач не найдены; прогресс неизвестен.</p>}</details>
-      </div>}
-      {renderActions(snapshot.actions.filter(a => a.group === 'next').slice(0, 3))}
-      <div className="aif-maintenance" role="group" aria-label="Обновление и настройка AI Factory">{renderActions(snapshot.actions.filter(a => a.group === 'maintenance' && !updateInVersionDetails(snapshot, a.id) && !contextSetupInDetails(snapshot, a.id)))}</div>
-      {snapshot.actions.some(a => contextSetupInDetails(snapshot, a.id)) && <details className="aif-context-setup"><summary>Настройка контекста проекта</summary>
-        <p className="aif-muted aif-small">Выполнение плана уже начато. Настройка контекста запускается отдельно и не продолжает выбранный план.</p>
-        {renderActions(snapshot.actions.filter(a => contextSetupInDetails(snapshot, a.id)))}
-      </details>}
-      </section>
-      {delegation && snapshot.configured && <DelegationSection threadId={threadId} busy={busy} />}
-      {snapshot.target && snapshot.checks.length > 0 && <details className="aif-checks"><summary>Что проверить <span className="aif-muted">· из чата: {snapshot.checks.filter(c => c.chat).length} · отчётов PASS: {snapshot.checks.filter(c => c.state === 'reported-pass').length}</span></summary>
-        <p className="aif-muted aif-small">Дополнительные проверки — по выбору. Правила проекта и обязательные gates могут требовать их перед завершением; блокирующий FAIL сохраняет силу.</p>
-        <p className="aif-muted aif-small">Галочки задач и результаты проверок независимы. Актуальность evidence подтверждает владелец workflow.</p>
-        <ul>{snapshot.checks.map(c => <li key={c.id}><div><strong>{c.label}</strong>{c.required ? <small className="aif-required">нужно для завершения</small> : supplementaryChecks.has(c.id) && <small className="aif-required" title="Дополнительный шаг flow; действующие правила проекта сохраняют приоритет">по выбору</small>}</div>
-          <span className={`aif-check-state aif-${c.chat ? c.chat.result.status === 'pass' ? 'reported-pass' : c.chat.result.status : c.state}`} title={c.detail}>{c.chat ? `${c.chat.result.status.toUpperCase()} · из чата` : checkLabels[c.state]}</span>
-          {snapshot.actions.filter(a => a.id === rowActions[c.id]).map(renderAction)}
-          {c.path && openFile && <button className="aif-link" onClick={() => { if (!openFile(c.path!)) setError('Просмотр файла недоступен в этой поверхности.'); }}>Отчёт</button>}
-          {c.chat && <small className="aif-check-detail">Gate завершён · {new Date(c.chat.at).toLocaleString('ru')} · сообщение #{c.chat.seq}. {c.chat.freshness === 'unchanged'
+      <div className="aif-versions flex flex-wrap gap-x-4 gap-y-1 text-xs text-muted-foreground tabular-nums">
+        <span>CLI <b className="font-semibold text-foreground">{snapshot.versions.globalCli ?? 'не найден'}</b></span>
+        <span>Проект <b className="font-semibold text-foreground">{snapshot.versions.installed ?? 'не указан'}</b></span>
+        {snapshot.versions.sourceVersion && <span>Git <b className="font-semibold text-foreground">{snapshot.versions.sourceVersion}</b> @{snapshot.versions.sourceSha?.slice(0, 7)}{snapshot.versions.sourceDirty ? ' · изменён' : ''}</span>}
+        {snapshot.extensions.map(e => <span key={e.name} title={e.installedVersion ? 'Установленная версия расширения' : 'Записанная версия; установленные файлы не подтверждены'}>{e.name} <b className="font-semibold text-foreground">{e.installedVersion ?? e.recordedVersion ?? 'неизвестна'}</b>{!e.installedVersion && ' · не подтверждена'}</span>)}
+      </div>
+
+      <Section label="Текущий этап" title="Сейчас">
+        <p className="m-0 flex flex-wrap items-center gap-2" title={snapshot.phaseSource}>
+          <StatusDot tone={busy ? 'live' : snapshot.threadState === 'error' ? 'error' : 'idle'} />
+          <span className="font-medium">{phaseNames[snapshot.phase]} <span className="font-normal text-muted-foreground">· {stateText}</span></span>
+        </p>
+        {usesBasicWorkflow(snapshot) && <p aria-label="Базовый workflow" className="m-0 text-xs text-muted-foreground">Без AI Factory доступен встроенный flow: исследование → план → выполнение → проверка → коммит. Установка — отдельная кнопка; планы сохраняются в .bb-aif-helper/plans/.</p>}
+        {snapshot.candidates.length > 0 && <label className="flex flex-col gap-1 text-xs text-muted-foreground">План / change
+          <select aria-label="Выбранный план или change" value={snapshot.target?.path ?? target} onChange={e => { setTarget(e.target.value); setNotice(''); }}
+            className="h-9 w-full cursor-pointer rounded-md border border-input bg-transparent px-3 text-sm text-foreground outline-none focus-visible:ring-1 focus-visible:ring-ring">
+            {!snapshot.target && <option value="">Выберите задачу</option>}
+            {snapshot.candidates.map(t => <option key={t.path} value={t.path}>{t.title} · {t.kind}</option>)}
+          </select></label>}
+        {snapshot.target && <div className="flex flex-col gap-2">
+          <div className="flex flex-wrap items-baseline justify-between gap-3"><strong className="font-medium">{snapshot.target.title}</strong>
+            <span className="text-xs text-muted-foreground tabular-nums">{completed}/{tasks.length} задач</span></div>
+          <Progress aria-label="Выполнение задач плана" value={tasks.length ? completed / tasks.length * 100 : 0} className="h-1.5 bg-muted" />
+          <Disclosure summary="Задачи плана">
+            {tasks.length ? <ul className="m-0 flex list-none flex-col gap-1.5 p-0">{tasks.map((t, i) => <li key={`${t.id}-${i}`} className="grid grid-cols-[16px_minmax(0,1fr)] gap-2 text-xs">
+              <Icon name={t.done ? 'CircleCheck' : 'Circle'} aria-label={t.done ? 'Выполнена по плану' : 'Не выполнена'} className={cn('mt-px size-4', t.done ? 'text-primary' : 'text-muted-foreground')} />
+              <span className={t.done ? 'text-muted-foreground' : ''}>{t.title}</span></li>)}</ul>
+              : <p className="m-0 text-xs text-muted-foreground">Чекбоксы задач не найдены; прогресс неизвестен.</p>}
+          </Disclosure>
+        </div>}
+        {renderActions(snapshot.actions.filter(a => a.group === 'next').slice(0, 3))}
+        {(() => { const items = snapshot.actions.filter(a => a.group === 'maintenance' && !updateInVersionDetails(snapshot, a.id) && !contextSetupInDetails(snapshot, a.id));
+          return items.length ? <div className="aif-maintenance" role="group" aria-label="Обновление и настройка AI Factory">{renderActions(items)}</div> : null; })()}
+        {snapshot.actions.some(a => contextSetupInDetails(snapshot, a.id)) && <Disclosure className="aif-context-setup" summary="Настройка контекста проекта">
+          <p className="m-0 text-xs text-muted-foreground">Выполнение плана уже начато. Настройка контекста запускается отдельно и не продолжает выбранный план.</p>
+          {renderActions(snapshot.actions.filter(a => contextSetupInDetails(snapshot, a.id)))}
+        </Disclosure>}
+      </Section>
+
+      {delegation && snapshot.configured && <DelegationSection threadId={threadId} environmentId={environmentId} busy={busy} />}
+
+      {snapshot.target && snapshot.checks.length > 0 && <Disclosure className="aif-checks" summary={<>Что проверить <span className="font-normal text-muted-foreground">· из чата: {snapshot.checks.filter(c => c.chat).length} · отчётов PASS: {snapshot.checks.filter(c => c.state === 'reported-pass').length}</span></>}>
+        <p className="m-0 text-xs text-muted-foreground">Дополнительные проверки — по выбору. Правила проекта и обязательные gates могут требовать их перед завершением; блокирующий FAIL сохраняет силу. Галочки задач и результаты проверок независимы. Актуальность evidence подтверждает владелец workflow.</p>
+        <ul className="m-0 flex list-none flex-col divide-y divide-border rounded-lg border border-border p-0">{snapshot.checks.map(c => <li key={c.id} className="flex flex-col gap-2 p-3">
+          <div className="flex flex-wrap items-center gap-2">
+            <strong className="font-medium">{c.label}</strong>
+            {c.required ? <span className="text-xs text-muted-foreground">нужно для завершения</span> : supplementaryChecks.has(c.id) && <span className="text-xs text-muted-foreground" title="Дополнительный шаг flow; действующие правила проекта сохраняют приоритет">по выбору</span>}
+            <Badge variant={checkTone(c)} className="ml-auto" title={c.detail}>{c.chat ? `${c.chat.result.status.toUpperCase()} · из чата` : checkLabels[c.state]}</Badge>
+          </div>
+          <div className="flex flex-wrap items-center gap-2">
+            {snapshot.actions.filter(a => a.id === rowActions[c.id]).map(renderAction)}
+            {c.path && openFile && <Button type="button" variant="link" size="sm" className="h-auto px-0" onClick={() => { if (!openFile(c.path!)) setError('Просмотр файла недоступен в этой поверхности.'); }}>Отчёт</Button>}
+          </div>
+          {c.chat && <p className="m-0 text-xs text-muted-foreground">Gate завершён · {new Date(c.chat.at).toLocaleString('ru')} · сообщение #{c.chat.seq}. {c.chat.freshness === 'unchanged'
             ? 'С момента фиксации результата файлы не изменились. Повторная проверка заблокирована.'
             : c.chat.freshness === 'changed' ? 'Файлы изменились после фиксации результата; можно проверить повторно.' : 'Актуальность для текущих файлов не подтверждена.'}
             {c.chat.result.blocking ? ' Есть блокирующие проблемы.' : ' Блокеров нет.'}
             {c.chat.result.blockers.map(b => <span key={b.id}>{` ${b.id}: ${b.summary}${b.file ? ` (${b.file})` : ''}`}</span>)}
-            {c.chat.result.suggested_next?.reason && <span>{` ${c.chat.result.suggested_next.reason}`}</span>}</small>}
-          <small className="aif-check-detail">{c.chat ? `Файловый отчёт: ${c.path ? checkLabels[c.state] + '. ' + c.detail : 'не найден.'}` : c.detail}</small></li>)}</ul>
-        <details className="aif-setup"><summary>Настройка инструментов</summary>{renderActions(snapshot.actions.filter(a => a.group === 'setup'))}</details>
-      </details>}
-      <details className="aif-details"><summary>Версии и расширения{snapshot.extensions.length ? ` · ${snapshot.extensions.length}` : ''}</summary>
+            {c.chat.result.suggested_next?.reason && <span>{` ${c.chat.result.suggested_next.reason}`}</span>}</p>}
+          <p className="m-0 text-xs text-muted-foreground">{c.chat ? `Файловый отчёт: ${c.path ? checkLabels[c.state] + '. ' + c.detail : 'не найден.'}` : c.detail}</p>
+        </li>)}</ul>
+        <Disclosure summary="Настройка инструментов">{renderActions(snapshot.actions.filter(a => a.group === 'setup'))}</Disclosure>
+      </Disclosure>}
+
+      <Disclosure className="aif-details" summary={<>Версии и расширения{snapshot.extensions.length ? <span className="font-normal text-muted-foreground"> · {snapshot.extensions.length}</span> : null}</>}>
         {renderActions(snapshot.actions.filter(a => a.group === 'maintenance' && updateInVersionDetails(snapshot, a.id)))}
-        {snapshot.versionsCheckedAt && <p className="aif-muted aif-small">Версии CLI/Git: снимок от {new Date(snapshot.versionsCheckedAt).toLocaleString('ru')}. Плановая проверка — раз в сутки.</p>}
-        <dl><dt>Глобальный CLI</dt><dd>{snapshot.versions.globalCli ?? 'Не найден'}{snapshot.versions.globalSource && <small>{snapshot.versions.globalSource}</small>}</dd>
+        {snapshot.versionsCheckedAt && <p className="m-0 text-xs text-muted-foreground">Версии CLI/Git: снимок от {new Date(snapshot.versionsCheckedAt).toLocaleString('ru')}. Плановая проверка — раз в сутки.</p>}
+        <dl className="m-0 grid grid-cols-[minmax(96px,1fr)_minmax(0,2fr)] gap-x-3 gap-y-2 text-xs [&_dd]:m-0 [&_dt]:text-muted-foreground [&_small]:block [&_small]:text-muted-foreground">
+          <dt>Глобальный CLI</dt><dd>{snapshot.versions.globalCli ?? 'Не найден'}{snapshot.versions.globalSource && <small>{snapshot.versions.globalSource}</small>}</dd>
           <dt>Установка проекта</dt><dd>{snapshot.versions.installed ?? 'Не указана'} · {snapshot.runtime}</dd>
           <dt>Исходники Git</dt><dd>{snapshot.versions.sourceVersion ?? 'Checkout не задан'}{snapshot.versions.sourceSha && <small>{snapshot.versions.sourceSha}</small>}
             {snapshot.versions.sourceWorktreeVersion && snapshot.versions.sourceWorktreeVersion !== snapshot.versions.sourceVersion && <small>Рабочее дерево: {snapshot.versions.sourceWorktreeVersion}</small>}</dd>
           <dt>Git upstream</dt><dd>{snapshot.upstream.version ?? 'Не проверен'}{snapshot.upstream.ref && ` · ${snapshot.upstream.ref} @${snapshot.upstream.sha?.slice(0, 7)}`}
-            {snapshot.upstream.checkedAt && <small>Проверено {new Date(snapshot.upstream.checkedAt).toLocaleString()}</small>}{snapshot.upstream.error && <small>{snapshot.upstream.error}</small>}</dd></dl>
-        <button type="button" className="aif-action aif-secondary" disabled={network || nextVersionCheck > Date.now()} title={nextVersionCheck > Date.now() ? `Следующая проверка доступна ${new Date(nextVersionCheck).toLocaleString('ru')}` : 'Проверить upstream; результат сохраняется на сутки'} onClick={async () => { setNetwork(true); try { await refresh(true); } finally { if (mounted.current) setNetwork(false); } }}>{network ? 'Проверяю GitHub…' : 'Проверить версию в GitHub'}</button>
-        {nextVersionCheck > Date.now() && <p className="aif-muted aif-small">Следующая проверка GitHub — {new Date(nextVersionCheck).toLocaleString('ru')}.</p>}
-        {snapshot.extensions.length ? <ul className="aif-extensions">{snapshot.extensions.map(e => <li key={e.name}><strong>{e.name}</strong> {e.installedVersion ?? 'файлы отсутствуют'} <span className="aif-muted">· {e.state}</span>
-          <small>Записано: {e.recordedVersion ?? 'не указано'} · {e.source}</small>{e.contributions.length > 0 && <small>Настроенные injections: {e.contributions.join(', ')}. Это не подтверждение загрузки в текущую сессию.</small>}</li>)}</ul> : <p className="aif-muted">Расширения не зарегистрированы в этом проекте.</p>}
-      </details>
-      {snapshot.diagnostics.length > 0 && <details className="aif-diagnostics"><summary>Примечания · {snapshot.diagnostics.length}</summary><ul>{snapshot.diagnostics.map((d, i) => <li key={i}>{d}</li>)}</ul></details>}
-      <footer className="aif-muted aif-small">{snapshot.cache?.source === 'saved' ? 'Сохранённые данные' : snapshot.cache?.source === 'memory' ? 'Данные из кэша' : 'Локальный статус'} · {new Date(snapshot.collectedAt).toLocaleTimeString()}
-        {snapshot.cache?.refreshing && ' · обновляются в фоне…'}{snapshot.cache?.refreshError && ' · обновление не удалось; нажмите ↻ для повторного чтения'} · {busy ? 'действия доступны после завершения работы' : 'кнопки отправляют выбранную команду в этот чат'}</footer>
+            {snapshot.upstream.checkedAt && <small>Проверено {new Date(snapshot.upstream.checkedAt).toLocaleString()}</small>}{snapshot.upstream.error && <small>{snapshot.upstream.error}</small>}</dd>
+        </dl>
+        <div className="flex flex-wrap items-center gap-2">
+          <Hint text={nextVersionCheck > Date.now() ? `Следующая проверка доступна ${new Date(nextVersionCheck).toLocaleString('ru')}` : 'Проверить upstream; результат сохраняется на сутки'}><Button type="button" variant="outline" size="sm" disabled={network || nextVersionCheck > Date.now()}
+            onClick={async () => { setNetwork(true); try { await refresh(true); } finally { if (mounted.current) setNetwork(false); } }}>{network ? 'Проверяю GitHub…' : 'Проверить версию в GitHub'}</Button></Hint>
+          {nextVersionCheck > Date.now() && <span className="text-xs text-muted-foreground">Следующая проверка GitHub — {new Date(nextVersionCheck).toLocaleString('ru')}.</span>}
+        </div>
+        {snapshot.extensions.length ? <ul className="m-0 flex list-none flex-col gap-3 p-0 text-xs">{snapshot.extensions.map(e => <li key={e.name}><strong className="font-medium">{e.name}</strong> {e.installedVersion ?? 'файлы отсутствуют'} <span className="text-muted-foreground">· {e.state}</span>
+          <small className="block text-muted-foreground">Записано: {e.recordedVersion ?? 'не указано'} · {e.source}</small>{e.contributions.length > 0 && <small className="block text-muted-foreground">Настроенные injections: {e.contributions.join(', ')}. Это не подтверждение загрузки в текущую сессию.</small>}</li>)}</ul>
+          : <p className="m-0 text-xs text-muted-foreground">Расширения не зарегистрированы в этом проекте.</p>}
+      </Disclosure>
+      {snapshot.diagnostics.length > 0 && <Disclosure summary={`Примечания · ${snapshot.diagnostics.length}`}>
+        <ul className="m-0 flex list-none flex-col gap-2 p-0 text-xs text-muted-foreground">{snapshot.diagnostics.map((d, i) => <li key={i}>{d}</li>)}</ul>
+      </Disclosure>}
+      <footer className="border-t border-border pt-3 text-xs text-muted-foreground">{snapshot.cache?.source === 'saved' ? 'Сохранённые данные' : snapshot.cache?.source === 'memory' ? 'Данные из кэша' : 'Локальный статус'} · {new Date(snapshot.collectedAt).toLocaleTimeString()}
+        {snapshot.cache?.refreshing && ' · обновляются в фоне…'}{snapshot.cache?.refreshError && ' · обновление не удалось; нажмите обновить для повторного чтения'} · {busy ? 'действия доступны после завершения работы' : 'кнопки отправляют выбранную команду в этот чат'}</footer>
     </>}
   </section>;
 }
-const childStatus: Record<string, { label: string; tone: 'live' | 'done' | 'error' | 'idle' }> = {
+
+const childStatus: Record<string, { label: string; tone: Tone }> = {
   pending: { label: 'в очереди', tone: 'idle' }, starting: { label: 'запускается', tone: 'live' }, active: { label: 'пишет код', tone: 'live' },
   stopping: { label: 'останавливается', tone: 'live' }, idle: { label: 'готово', tone: 'done' }, error: { label: 'ошибка', tone: 'error' },
 };
-type Draft = { mode: 'self' | 'bb'; providerId: string; model: string; effort: string };
-const toDraft = (c: DelegationChoice): Draft => c.mode === 'bb' ? { mode: 'bb', providerId: c.providerId, model: c.model, effort: c.effort ?? '' } : { mode: 'self', providerId: '', model: '', effort: '' };
-const toChoice = (d: Draft): DelegationChoice | null => d.mode === 'self' ? { mode: 'self' }
-  : d.providerId && d.model ? { mode: 'bb', providerId: d.providerId, model: d.model, ...(d.effort ? { effort: d.effort } : {}) } : null;
+const toPicker = (c: Extract<DelegationChoice, { mode: 'bb' }>): PickerValue =>
+  ({ providerId: c.providerId, model: c.model, reasoningLevel: (c.reasoning ?? 'medium') as PickerValue['reasoningLevel'], ...(c.tier ? { serviceTier: c.tier as PickerValue['serviceTier'] } : {}) });
+const fromPicker = (v: PickerValue): DelegationChoice =>
+  ({ mode: 'bb', providerId: v.providerId, model: v.model, ...(v.reasoningLevel ? { reasoning: v.reasoningLevel } : {}), ...(v.serviceTier && v.serviceTier !== 'default' ? { tier: v.serviceTier } : {}) });
+// Starting point for the picker; it immediately reconciles to a real model from the live catalog.
+const pickerSeed: PickerValue = { providerId: 'codex', model: '', reasoningLevel: 'high' as PickerValue['reasoningLevel'] };
 
-function DelegationSection({ threadId, busy }: { threadId: string; busy: boolean }) {
+function DelegationSection({ threadId, environmentId, busy }: { threadId: string; environmentId: string | null; busy: boolean }) {
   const rpc = useRpc<typeof rpcContract>();
   const navigate = useBbNavigate();
   const [view, setView] = useState<DelegationView | null>(null);
-  const [draft, setDraft] = useState<Draft | null>(null);
-  const [models, setModels] = useState<ModelOption[] | null>(null);
+  const [mode, setMode] = useState<'self' | 'bb' | null>(null);
+  const [pick, setPick] = useState<PickerValue | null>(null);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
-  const [notice, setNotice] = useState('');
   const mounted = useRef(true);
   useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
   const load = useCallback(async () => {
@@ -177,7 +225,8 @@ function DelegationSection({ threadId, busy }: { threadId: string; busy: boolean
       const next = await rpc.call('delegation', { threadId });
       if (!mounted.current) return;
       setView(next); setError('');
-      setDraft(current => current ?? toDraft(next.choice));
+      setMode(current => current ?? next.choice.mode);
+      setPick(current => current ?? (next.choice.mode === 'bb' ? toPicker(next.choice) : null));
     } catch (e) { if (mounted.current) setError(e instanceof Error ? e.message : String(e)); }
   }, [rpc, threadId]);
   useEffect(() => {
@@ -186,94 +235,70 @@ function DelegationSection({ threadId, busy }: { threadId: string; busy: boolean
     return () => window.clearInterval(timer);
   }, [load]);
   useRealtime('changed', (payload: unknown) => { if ((payload as { threadId?: string })?.threadId === threadId) void load(); });
-  const providerId = draft?.mode === 'bb' ? draft.providerId : '';
-  useEffect(() => {
-    if (!providerId) { setModels(null); return; }
-    let live = true; setModels(null);
-    rpc.call('providerModels', { threadId, providerId }).then(list => { if (live && mounted.current) setModels(list); },
-      e => { if (live && mounted.current) { setModels([]); setError(e instanceof Error ? e.message : String(e)); } });
-    return () => { live = false; };
-  }, [rpc, threadId, providerId]);
-  if (!view || !draft) return <section className="aif-section" aria-label="Исполнитель кода"><h3 className="aif-section-title">Исполнитель кода</h3>
-    {error ? <p className="aif-muted aif-small">Настройка недоступна: {error}</p> : <div className="aif-skeleton" aria-hidden="true" />}</section>;
-  const model = models?.find(m => m.id === draft.model);
-  const choice = toChoice(draft);
-  const saved = JSON.stringify(view.choice);
-  const dirty = !!choice && JSON.stringify(choice) !== saved;
-  const set = (patch: Partial<Draft>) => { setNotice(''); setError(''); setDraft({ ...draft, ...patch }); };
+  if (!view || !mode) return <Section label="Исполнитель кода" title="Исполнитель кода">
+    {error ? <p className="m-0 text-xs text-muted-foreground">Настройка недоступна: {error}</p> : <div className="h-20 animate-pulse rounded-md bg-muted motion-reduce:animate-none" aria-hidden="true" />}
+  </Section>;
+  const choice: DelegationChoice | null = mode === 'self' ? { mode: 'self' } : pick?.model ? fromPicker(pick) : null;
+  const dirty = !!choice && JSON.stringify(choice) !== JSON.stringify(view.choice);
+  const providerName = (id: string | null) => view.providers.find(p => p.id === id)?.name ?? id;
+  const active = view.choice;
+  const savedLabel = active.mode === 'bb' ? [providerName(active.providerId), active.model, active.reasoning].filter(Boolean).join(' · ') : 'агент этого чата';
+  const reset = () => { setMode(view.choice.mode); setPick(view.choice.mode === 'bb' ? toPicker(view.choice) : null); setError(''); };
   async function save() {
     if (!choice) return;
-    setSaving(true); setError(''); setNotice('');
+    setSaving(true); setError('');
     try {
       const next = await rpc.call('setDelegation', { threadId, choice });
       if (!mounted.current) return;
-      setView(next); setDraft(toDraft(next.choice));
-      setNotice(next.choice.mode === 'bb' ? '/aif-implement будет передавать задачи выбранной модели.' : 'Код снова пишет агент этого чата.');
+      setView(next); setMode(next.choice.mode); setPick(next.choice.mode === 'bb' ? toPicker(next.choice) : null);
+      toast.success(next.choice.mode === 'bb' ? '/aif-implement будет передавать задачи выбранной модели.' : 'Код снова пишет агент этого чата.');
     } catch (e) { if (mounted.current) setError(e instanceof Error ? e.message : String(e)); }
     finally { if (mounted.current) setSaving(false); }
   }
-  const active = view.choice;
-  const savedLabel = active.mode === 'bb'
-    ? [view.providers.find(p => p.id === active.providerId)?.name ?? active.providerId, active.model, active.effort].filter(Boolean).join(' · ')
-    : 'агент этого чата';
-  return <section className="aif-section" aria-label="Исполнитель кода">
-    <div className="aif-section-head"><h3 className="aif-section-title">Исполнитель кода</h3><span className="aif-chip">{savedLabel}</span></div>
-    {view.foreign && <p className="aif-callout">phases.implement в .ai-factory.json настроен на агента «{view.foreign}». Панель его не меняет.</p>}
-    {view.error && <p className="aif-callout aif-callout-error">{view.error}</p>}
-    <div className="aif-segmented" role="radiogroup" aria-label="Кто пишет код">
-      {(['self', 'bb'] as const).map(mode => <button key={mode} type="button" role="radio" aria-checked={draft.mode === mode} disabled={saving || !!view.foreign}
-        className={draft.mode === mode ? 'aif-segment aif-segment-on' : 'aif-segment'} onClick={() => set({ mode })}>{mode === 'self' ? 'Этот агент' : 'Другая модель'}</button>)}
+  const locked = saving || !!view.foreign;
+  return <Section label="Исполнитель кода" title="Исполнитель кода" aside={<Badge variant="secondary" className="max-w-[60%] truncate font-medium">{savedLabel}</Badge>}>
+    {view.foreign && <Callout>phases.implement в .ai-factory.json настроен на агента «{view.foreign}». Панель его не меняет.</Callout>}
+    {view.error && <Callout tone="error">{view.error}</Callout>}
+    <div role="radiogroup" aria-label="Кто пишет код" className="grid grid-cols-2 gap-0.5 rounded-lg bg-muted p-0.5">
+      {(['self', 'bb'] as const).map(m => <button key={m} type="button" role="radio" aria-checked={mode === m} disabled={locked}
+        onClick={() => { setError(''); setMode(m); if (m === 'bb' && !pick) setPick(pickerSeed); }}
+        className={cn('h-8 cursor-pointer rounded-md px-3 text-sm font-medium transition-colors outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-default disabled:opacity-50',
+          mode === m ? 'bg-background text-foreground shadow-xs' : 'text-muted-foreground hover:text-foreground')}>{m === 'self' ? 'Этот агент' : 'Другая модель'}</button>)}
     </div>
-    {draft.mode === 'bb' && <div className="aif-fields">
-      <label className="aif-field"><span>Провайдер</span>
-        <select value={draft.providerId} disabled={saving} onChange={e => set({ providerId: e.target.value, model: '', effort: '' })}>
-          <option value="">Выберите</option>
-          {view.providers.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
-        </select></label>
-      <label className="aif-field"><span>Модель</span>
-        <select value={draft.model} disabled={saving || !draft.providerId || !models} onChange={e => {
-          const next = models?.find(m => m.id === e.target.value);
-          set({ model: e.target.value, effort: next?.defaultEffort && next.efforts.includes(next.defaultEffort) ? next.defaultEffort : '' });
-        }}>
-          <option value="">{draft.providerId && !models ? 'Загружаю…' : 'Выберите'}</option>
-          {draft.model && models && !model && <option value={draft.model}>{draft.model}</option>}
-          {models?.map(m => <option key={m.id} value={m.id}>{m.name}{m.isDefault ? ' · по умолчанию' : ''}</option>)}
-        </select></label>
-      <label className="aif-field"><span>Рассуждение</span>
-        <select value={draft.effort} disabled={saving || !draft.model || !!model && !model.efforts.length} onChange={e => set({ effort: e.target.value })}>
-          <option value="">Как у модели</option>
-          {(model?.efforts ?? (draft.effort ? [draft.effort] : [])).map(e => <option key={e} value={e}>{e}</option>)}
-        </select></label>
+    {mode === 'bb' && pick && <div className="flex min-w-0 flex-col gap-1">
+      <span className="text-xs text-muted-foreground">Провайдер и модель</span>
+      <ProviderModelPicker value={pick} onChange={setPick} disabled={locked} align="start"
+        routing={environmentId ? { kind: 'environment', environmentId } : undefined} className="max-w-full" />
     </div>}
-    {dirty && <div className="aif-actions">
-      <button type="button" className="aif-action" disabled={saving || busy || !!view.foreign} onClick={() => void save()}
-        title={busy ? 'Дождитесь, пока агент закончит текущую работу' : 'Записать выбор в .ai-factory.json'}>{saving ? 'Сохраняю…' : 'Сохранить'}</button>
-      <button type="button" className="aif-action aif-secondary" disabled={saving} onClick={() => { setDraft(toDraft(view.choice)); setNotice(''); }}>Отменить</button>
+    {dirty && <div className="flex flex-wrap gap-2">
+      <Hint text={busy ? 'Дождитесь, пока агент закончит текущую работу' : 'Записать выбор в .ai-factory.json'}><Button type="button" size="sm" disabled={saving || busy || !!view.foreign} onClick={() => void save()}>{saving ? 'Сохраняю…' : 'Сохранить'}</Button></Hint>
+      <Button type="button" size="sm" variant="outline" disabled={saving} onClick={reset}>Отменить</Button>
     </div>}
-    {error && <p className="aif-callout aif-callout-error" role="status">{error}</p>}
-    {notice && <p className="aif-notice" role="status">{notice}</p>}
-    <p className="aif-muted aif-small">Выбор хранится в .ai-factory.json → phases.implement. /aif-implement отдаёт каждую задачу дочернему треду на этой модели, затем сам проверяет diff и отмечает задачу в плане.</p>
-    {view.children.length > 0 && <div className="aif-children">
-      <h4 className="aif-subtitle">Дочерние треды · {view.children.length}</h4>
-      <ul>{view.children.map(c => {
+    {error && <Callout tone="error" role="status">{error}</Callout>}
+    <p className="m-0 text-xs text-muted-foreground">Выбор хранится в .ai-factory.json → phases.implement. /aif-implement отдаёт каждую задачу дочернему треду на этой модели, затем сам проверяет diff и отмечает задачу в плане.</p>
+    {view.children.length > 0 && <div className="flex flex-col gap-2">
+      <h4 className="m-0 text-xs font-medium text-muted-foreground">Дочерние треды · {view.children.length}</h4>
+      <ul className="m-0 flex list-none flex-col divide-y divide-border rounded-md border border-border p-0">{view.children.map(c => {
         const st = childStatus[c.status] ?? { label: c.status, tone: 'idle' as const };
-        return <li key={c.id}>
-          <span className={`aif-dot aif-dot-${st.tone}`} aria-hidden="true" />
-          <span className="aif-child-title">{c.title || 'Без названия'}</span>
-          <span className="aif-muted aif-small">{[view.providers.find(p => p.id === c.providerId)?.name ?? c.providerId, st.label].filter(Boolean).join(' · ')}</span>
-          <button type="button" className="aif-link" onClick={() => navigate.toThread(c.id, { split: true })}>Открыть</button>
+        return <li key={c.id} className="grid min-h-10 grid-cols-[8px_minmax(0,1fr)_auto] items-center gap-3 px-3 py-2">
+          <StatusDot tone={st.tone} />
+          <span className="min-w-0"><span className="block truncate">{c.title || 'Без названия'}</span>
+            <span className="block truncate text-xs text-muted-foreground">{[providerName(c.providerId), st.label].filter(Boolean).join(' · ')}</span></span>
+          <Button type="button" variant="ghost" size="sm" className="h-7 gap-1 px-2 text-xs" onClick={() => navigate.toThread(c.id, { split: true })}>
+            Открыть<Icon name="ExternalLink" className="size-3.5" /></Button>
         </li>;
       })}</ul>
     </div>}
-  </section>;
+  </Section>;
 }
+
 function Directive(props: PluginMessageDirectiveProps) {
   const parsed = phaseSchema.safeParse(props.attributes.phase ?? 'unknown');
   if (!parsed.success || (props.attributes.target?.length ?? 0) > 1000) return <p className="aif-error">Некорректная карточка AI Factory.</p>;
   return <WorkflowCard threadId={props.message.threadId} initialTarget={props.attributes.target ?? ''} phase={parsed.data} openFile={props.openWorkspaceFile} />;
 }
 function ContextCard({ threadId }: ExperimentalThreadContextCardProps) { return <WorkflowCard threadId={threadId} compact />; }
-function WorkflowPanel({ threadId }: ExperimentalThreadTabProps) { return <div className="aif-panel"><WorkflowCard key={threadId} threadId={threadId} compact delegation /></div>; }
+function WorkflowPanel({ threadId, environment }: ExperimentalThreadTabProps) { return <div className="aif-panel p-4 pb-8"><WorkflowCard key={threadId} threadId={threadId} environmentId={environment?.id ?? null} compact delegation /></div>; }
 function SuggestedCommands() {
   const composer = useComposer();
   return composer.scope.kind === 'thread' ? <SuggestionBar key={composer.scope.threadId} threadId={composer.scope.threadId} composerBusy={composer.isRunning || composer.isSubmitting} /> : null;

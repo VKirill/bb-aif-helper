@@ -265,12 +265,6 @@ export default async function plugin(bb: BbPluginApi) {
     suggestions: async input => (await suggested(input.threadId)).view,
     delegation: input => delegationView(input.threadId),
     setDelegation: input => serial(`delegation:${input.threadId}`, () => setDelegation(input.threadId, input.choice)),
-    providerModels: async input => {
-      const { environment } = await context(input.threadId);
-      const result = await bb.sdk.providers.models({ environmentId: environment.id, providerId: input.providerId });
-      return result.models.slice(0, 100).map(m => ({ id: m.model || m.id, name: m.displayName || m.model || m.id, isDefault: m.isDefault,
-        efforts: m.supportedReasoningEfforts.map(e => e.reasoningEffort), defaultEffort: m.defaultReasoningEffort || null }));
-    },
     dismissSuggestion: input => serial(input.threadId, async () => {
       const current = await suggested(input.threadId);
       if (current.view.sourceKey !== input.sourceKey || !current.ids.includes(input.commandId)) throw new Error('Предложения изменились. Обновите их.');
