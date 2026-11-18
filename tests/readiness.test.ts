@@ -11,7 +11,7 @@ const contextFiles = {
 
 test('steps follow the required order and an unconfigured project starts at install', () => {
   const steps = readinessSteps(facts({ configured: false, contextSkill: false }));
-  assert.deepEqual(steps.map(s => s.id), ['install', 'context', 'architecture', 'quality', 'ci']);
+  assert.deepEqual(steps.map(s => s.id), ['install', 'context', 'architecture', 'quality', 'ci', 'docs', 'rules', 'build', 'docker']);
   const s = byId(steps);
   assert.equal(s.install.state, 'todo'); assert.equal(s.install.actionId, 'basic-install');
   assert.deepEqual(s.install.missing, ['.ai-factory.json']);
@@ -58,8 +58,9 @@ test('skipped applies only to skippable todo steps and never overrides done', ()
 
 test('skipped quality and CI complete the checklist; the next step is the first todo', () => {
   const files = { ...contextFiles, '.ai-factory/ARCHITECTURE.md': true };
-  const steps = readinessSteps(facts({ files }), ['quality', 'ci']);
+  const steps = readinessSteps(facts({ files }), ['quality', 'ci', 'docs', 'rules', 'build', 'docker']);
   assert.equal(readinessComplete(steps), true);
+  assert.equal(readinessComplete(readinessSteps(facts({ files }), ['quality', 'ci'])), false, 'optional steps still wait for run or skip');
   assert.equal(nextReadinessStep(steps), undefined);
   assert.equal(nextReadinessStep(readinessSteps(facts({ files })))?.id, 'quality');
   const s = byId(readinessSteps(facts()));
@@ -69,8 +70,18 @@ test('skipped quality and CI complete the checklist; the next step is the first 
 test('detected artifacts complete their steps', () => {
   const files = {
     ...contextFiles, '.ai-factory/ARCHITECTURE.md': true, 'lefthook.yml': true, '.github/workflows/ci.yml': true,
+    'docs/usage.md': true, '.ai-factory/RULES.md': true, 'Makefile': true, 'compose.yml': true,
   };
   const s = byId(readinessSteps(facts({ files })));
   assert(Object.values(s).every(v => v.state === 'done'));
   assert.equal(readinessComplete(Object.values(s)), true);
+});
+
+test('docs, rules, build and docker follow config.yaml paths and any-of file lists', () => {
+  const s = byId(readinessSteps(facts({ files: { 'manual/intro.md': true, 'rules.md': true, 'Justfile': true, 'Dockerfile': true }, paths: { docs: 'manual/', rulesFile: 'rules.md' } })));
+  for (const id of ['docs', 'rules', 'build', 'docker']) assert.equal(s[id].state, 'done', id);
+  const empty = byId(readinessSteps(facts()));
+  assert.deepEqual(empty.docs.missing, ['docs/']); assert.deepEqual(empty.rules.missing, ['.ai-factory/RULES.md']);
+  assert.equal(empty.build.anyOf, true); assert.equal(empty.docker.anyOf, true);
+  for (const id of ['docs', 'rules', 'build', 'docker']) assert.equal(empty[id].skippable, true, id);
 });

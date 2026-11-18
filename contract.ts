@@ -2,6 +2,7 @@ import { defineRpcContract } from '@get-bb/plugin-sdk';
 import { z } from 'zod';
 import { delegationChoiceSchema, delegationStateSchema } from './delegation.ts';
 import { requestSchema, runSchema, snapshotSchema, hostInputSchema, suggestionRequestSchema, suggestionActionSchema, suggestionsSchema, gateResultSchema } from './model.ts';
+import { SKIPPABLE_STEPS } from './readiness.ts';
 export const delegationViewSchema = delegationStateSchema.extend({
   providers: z.array(z.object({ id: z.string(), name: z.string() })),
   children: z.array(z.object({ id: z.string(), title: z.string().nullable(), status: z.string(), providerId: z.string().nullable(), updatedAt: z.string() })),
@@ -19,7 +20,7 @@ export const rpcContract = defineRpcContract({
   dismissSuggestion: { input: suggestionActionSchema, output: z.object({ dismissed: z.literal(true) }) },
   delegation: { input: z.object({ threadId: z.string().min(1).max(200) }).strict(), output: delegationViewSchema },
   setDelegation: { input: z.object({ threadId: z.string().min(1).max(200), choice: delegationChoiceSchema }).strict(), output: delegationViewSchema },
-  setReadinessSkip: { input: z.object({ threadId: z.string().min(1).max(200), stepId: z.enum(['quality', 'ci']), skipped: z.boolean() }).strict(), output: z.object({ ok: z.literal(true) }) },
+  setReadinessSkip: { input: z.object({ threadId: z.string().min(1).max(200), stepId: z.enum(SKIPPABLE_STEPS), skipped: z.boolean() }).strict(), output: z.object({ ok: z.literal(true) }) },
   runSuggestion: { input: suggestionActionSchema.extend({ fingerprint: z.string().length(64), requestId: z.string().uuid() }), output: z.object({ sent: z.boolean(), stale: z.boolean().optional(), message: z.string(),
     command: z.string().optional(),
     data: z.object({ source: z.literal('aif-chat'), sourceKey: z.string(), commandId: z.string(), fingerprint: z.string(), gate: gateResultSchema.nullable() }).optional() }) },

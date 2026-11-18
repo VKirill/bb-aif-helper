@@ -3,7 +3,7 @@ import { definePluginApp, useRpc, useRealtime, useComposer, useBbNavigate, exper
 import type { rpcContract, DelegationView } from './contract.ts';
 import type { DelegationChoice } from './delegation.ts';
 import { phaseSchema, type Snapshot, type Phase, type Action, type ReadinessStep, type Suggestions } from './model.ts';
-import { readinessComplete, nextReadinessStep, readinessHelp } from './readiness.ts';
+import { readinessComplete, nextReadinessStep, readinessHelp, type SkippableStepId } from './readiness.ts';
 import { parseReplyGate } from './gate.ts';
 import { checkHelp, rowActions, supplementaryChecks, toolHelp } from './check-actions.ts';
 import { updateInVersionDetails, VERSION_TTL } from './versions.ts';
@@ -90,7 +90,7 @@ function WorkflowCard({ threadId, initialTarget = '', phase = 'unknown', openFil
     } catch (e) { if (mounted.current) setError(e instanceof Error ? e.message : String(e)); }
     finally { sendingRef.current = false; if (mounted.current) { setSending(false); void refresh(); } }
   }
-  const setReadinessSkip = async (stepId: 'quality' | 'ci', skipped: boolean) => {
+  const setReadinessSkip = async (stepId: SkippableStepId, skipped: boolean) => {
     try { await rpc.call('setReadinessSkip', { threadId, stepId, skipped }); }
     catch (e) { setError(e instanceof Error ? e.message : String(e)); return; }
     await refresh();
@@ -328,7 +328,7 @@ function ToolsSection({ actions, renderAction }: { actions: Action[]; renderActi
 
 function ReadinessSection({ snapshot, run, busy, sending, setReadinessSkip }: {
   snapshot: Snapshot; run: (action: Action) => void; busy: boolean; sending: boolean;
-  setReadinessSkip: (stepId: 'quality' | 'ci', skipped: boolean) => Promise<void>;
+  setReadinessSkip: (stepId: SkippableStepId, skipped: boolean) => Promise<void>;
 }) {
   const [pendingSkip, setPendingSkip] = useState<string | null>(null);
   const [help, setHelp] = useState<string | null>(null);
@@ -340,7 +340,7 @@ function ReadinessSection({ snapshot, run, busy, sending, setReadinessSkip }: {
   async function toggleSkip(s: ReadinessStep, skipped: boolean) {
     if (pendingSkip) return;
     setPendingSkip(s.id);
-    try { await setReadinessSkip(s.id as 'quality' | 'ci', skipped); }
+    try { await setReadinessSkip(s.id as SkippableStepId, skipped); }
     finally { setPendingSkip(null); }
   }
   function stepRow(s: ReadinessStep, n: number, isNext: boolean) {

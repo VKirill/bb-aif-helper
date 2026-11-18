@@ -492,7 +492,7 @@ test('readiness block in the tab: one run button on the first todo step, skip RP
     fireEvent.click(slot.getAllByRole('button', { name: 'Пропустить' })[1]);
     await waitFor(() => assert.deepEqual(skips, [{ threadId: 'thr_panel', stepId: 'ci', skipped: true }]));
   } finally { slot.lifecycle.unmount(); }
-  const files = Object.fromEntries(['.ai-factory/DESCRIPTION.md', '.ai-factory/config.yaml', '.ai-factory/rules/base.md', 'AGENTS.md', '.ai-factory/ARCHITECTURE.md', 'lefthook.yml', 'Jenkinsfile'].map(f => [f, true]));
+  const files = Object.fromEntries(['.ai-factory/DESCRIPTION.md', '.ai-factory/config.yaml', '.ai-factory/rules/base.md', 'AGENTS.md', '.ai-factory/ARCHITECTURE.md', 'lefthook.yml', 'Jenkinsfile', 'docs/index.md', '.ai-factory/RULES.md', 'Makefile', 'Dockerfile'].map(f => [f, true]));
   s.readiness = readinessSteps({ configured: true, contextSkill: true, files, paths: {} });
   slot = renderSlot(tab as any, { threadId: 'thr_panel', environment: { id: 'env_panel' } }, { rpc });
   try {
@@ -543,7 +543,7 @@ test('each readiness step has a «?» button that explains the step without runn
   } finally { slot.lifecycle.unmount(); }
 });
 
-test('«Другие команды» in the tab offers /aif-docs and friends with a «?» each', async () => {
+test('«Другие команды» in the tab offers roadmap and archive with a «?» each', async () => {
   const { toolHelp } = await import('../check-actions.ts');
   const tab = app.tabs.find(t => t.id === 'workflow')!;
   const s = data(); s.skills = [...s.skills, 'aif-docs', 'aif-roadmap', 'aif-rules', 'aif-build-automation', 'aif-dockerize', 'aif-archive'];
@@ -551,16 +551,16 @@ test('«Другие команды» in the tab offers /aif-docs and friends wi
   const tools = s.actions.filter(a => toolHelp[a.id]);
   assert.deepEqual(tools.map(a => a.id), Object.keys(toolHelp));
   assert.ok(tools.every(a => a.available && a.group === 'setup'));
-  assert.match(tools.find(a => a.id === 'docs-setup')!.command, /^[/$]aif-docs$/);
+  assert.match(tools.find(a => a.id === 'roadmap-setup')!.command, /^[/$]aif-roadmap$/);
   const runs: string[] = [];
   const slot = renderSlot(tab as any, { threadId: 'thr_panel', environment: { id: 'env_panel' } }, { rpc: { status: () => s, run: (input: any) => { runs.push(input.actionId); return { sent: true, message: 'Отправлено' }; } } });
   try {
     fireEvent.click(await slot.findByText('Другие команды', { selector: '*' }));
-    const help = await slot.findByRole('button', { name: 'Что делает «Документация»' });
+    const help = await slot.findByRole('button', { name: 'Что делает «Roadmap»' });
     fireEvent.click(help);
-    await slot.findByText(toolHelp['docs-setup']);
+    await slot.findByText(toolHelp['roadmap-setup']);
     assert.deepEqual(runs, []);
-    fireEvent.click(await slot.findByRole('button', { name: 'Документация' }));
-    await waitFor(() => assert.deepEqual(runs, ['docs-setup']));
+    fireEvent.click(await slot.findByRole('button', { name: 'Roadmap' }));
+    await waitFor(() => assert.deepEqual(runs, ['roadmap-setup']));
   } finally { slot.lifecycle.unmount(); }
 });

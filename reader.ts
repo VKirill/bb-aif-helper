@@ -6,7 +6,7 @@ import { promisify } from 'node:util';
 import { parseDocument } from 'yaml';
 import { snapshotSchema, type HostInput, type Snapshot } from './model.ts';
 import { workflowActions } from './workflow.ts';
-import { readinessSteps, type ReadinessFacts } from './readiness.ts';
+import { BUILD_FILES, DOCKER_FILES, readinessSteps, type ReadinessFacts } from './readiness.ts';
 import { BASIC_PLAN_ROOT, usesBasicWorkflow } from './basic-workflow.ts';
 
 const exec = promisify(execFile);
@@ -289,14 +289,18 @@ export async function collectSnapshot(input: HostInput, signal?: AbortSignal): P
   const description = str(paths.description) ?? '.ai-factory/DESCRIPTION.md';
   const architecture = str(paths.architecture) ?? '.ai-factory/ARCHITECTURE.md';
   const rulesBase = str(obj(config.rules).base) ?? '.ai-factory/rules/base.md';
+  const docs = str(paths.docs) ?? 'docs';
+  const rulesFile = str(paths.rules_file) ?? '.ai-factory/RULES.md';
   for (const rel of [description, '.ai-factory/config.yaml', architecture, rulesBase, 'AGENTS.md',
     'lefthook.yml', '.lefthook.yml', '.pre-commit-config.yaml',
-    '.gitlab-ci.yml', '.circleci/config.yml', 'Jenkinsfile', 'bitbucket-pipelines.yml']) await probe(rel);
+    '.gitlab-ci.yml', '.circleci/config.yml', 'Jenkinsfile', 'bitbucket-pipelines.yml',
+    rulesFile, ...BUILD_FILES, ...DOCKER_FILES]) await probe(rel);
   await probeDir('.husky');
+  await probeDir(docs);
   await probeDir('.github/workflows', item => !item.directory && /\.ya?ml$/i.test(item.name));
   const readinessFacts: ReadinessFacts = { configured: s.configured,
     contextSkill: s.skills.includes('aif') || s.skills.includes('aif-analyze'),
-    files, paths: { description, architecture, rulesBase } };
+    files, paths: { description, architecture, rulesBase, docs, rulesFile } };
   const branch = await git(root, ['branch', '--show-current'], signal);
   const head = await git(root, ['rev-parse', 'HEAD'], signal);
   const dirtyDiff = await git(root, ['diff', '--no-ext-diff', '--no-textconv', '--binary', 'HEAD', '--', '.'], signal);

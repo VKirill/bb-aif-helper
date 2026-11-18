@@ -21,11 +21,7 @@ export const checkHelp: Record<string, string> = {
 };
 /** Optional project commands offered in the tab's «Другие команды» list, with their «?» text. */
 export const toolHelp: Record<string, string> = {
-  'docs-setup': '/aif-docs создаёт или обновляет документацию проекта: короткий README как стартовую страницу и подробные страницы по темам в папке docs/.',
-  'roadmap-setup': '/aif-roadmap составляет или обновляет план развития проекта по этапам (ROADMAP.md). По нему /aif-roadmap-next подсказывает, что делать дальше.',
-  'rules-setup': '/aif-rules добавляет правила кода для проекта или отдельных его областей (rules/*.md). Их потом проверяет /aif-rules-check.',
-  'build-setup': '/aif-build-automation создаёт или улучшает файл команд сборки (Makefile, Taskfile, Justfile), чтобы типовые действия запускались одной командой.',
-  'docker-setup': '/aif-dockerize готовит Docker: Dockerfile, compose для разработки и продакшена, .dockerignore, и проверяет безопасность продакшен-образа.',
+  'roadmap-setup': '/aif-roadmap составляет или обновляет план развития проекта по этапам (ROADMAP.md). По нему /aif-roadmap-next подсказывает, какую задачу планировать следующей, а /aif-plan привязывает планы к этапам. Нужен, когда впереди много этапов.',
   'archive-plans': '/aif-archive переносит выполненные планы в архив и при желании убирает закрытые этапы из ROADMAP.md, чтобы в списке задач остались только актуальные.',
 };
 
