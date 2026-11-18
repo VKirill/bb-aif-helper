@@ -30,6 +30,12 @@ export function workflowActions(s: Snapshot): Action[] {
   addSetup('setup-architecture', 'Описать архитектуру', 'aif-architecture', 'Сформировать архитектурные правила проекта');
   addSetup('quality-setup', 'Настроить проверки', 'aif-quality-setup', 'Отдельная настройка подходящих quality tools', ' setup');
   addSetup('ci-setup', 'Настроить CI', 'aif-ci', 'Создание/аудит pipeline не означает успешный CI-run');
+  addSetup('docs-setup', 'Документация', 'aif-docs', 'Создать или обновить README и docs/');
+  addSetup('roadmap-setup', 'Roadmap', 'aif-roadmap', 'Составить или обновить ROADMAP.md');
+  addSetup('rules-setup', 'Правила кода', 'aif-rules', 'Добавить правила проекта или области');
+  addSetup('build-setup', 'Команды сборки', 'aif-build-automation', 'Makefile, Taskfile или Justfile');
+  addSetup('docker-setup', 'Docker', 'aif-dockerize', 'Dockerfile и compose');
+  addSetup('archive-plans', 'Архив планов', 'aif-archive', 'Убрать выполненные планы в архив');
   if (s.extensions.length) maintenance.push({ id: 'update-extensions', label: 'Обновить расширения', command: 'ai-factory extension update', group: 'maintenance',
     reason: 'Сначала обновить AI Factory и установку проекта, затем зарегистрированные расширения и проверить версии/команды; без --force', available: s.configured });
   // Maintenance can repair an outdated installation even when a selected plan
@@ -109,7 +115,7 @@ export function actionPrompt(s: Snapshot, action: Action): string {
     '4. Проверка результата. Выполни ai-factory extension list для инициализированного проекта; сравни записанные версии расширений в .ai-factory.json с установленными extension.json. Проверь наличие объявленных extension-команд и SKILL.md (в том числе aif-analyze, если расширение его предоставляет) для текущего runtime, не запуская сами workflow-команды. Отдельно сообщи результаты CLI, проекта, каждого расширения и доступности команд: updated/unchanged/skipped/failed/unknown. Код 0 не заменяет проверку skipped/failed и отсутствующих файлов. Если список расширений пуст, отметь это и пропусти этап 3.',
     'После операции обнови карточку через aif_chat_status с принудительным чтением. Не запускай реализацию или проверки приложения.',
   ].join('\n');
-  if (action.id === 'setup-context' || action.group === 'setup') return `${action.command}\n\nПользователь нажал шаг подготовки проекта «${action.label}». Примени ${action.command} по контракту skill. Не выполняй план и не начинай реализацию. По завершении обнови карточку через aif_chat_status. Выбранный ранее план не является аргументом этой команды.`;
+  if (action.id === 'setup-context' || action.group === 'setup') return `${action.command}\n\nПользователь нажал «${action.label}» на вкладке AI Factory (подготовка проекта или другие команды). Примени ${action.command} по контракту skill. Не выполняй план и не начинай реализацию. По завершении обнови карточку через aif_chat_status. Выбранный ранее план не является аргументом этой команды.`;
   if (action.id === 'commit') return `${action.command}\n\nКонтекст кнопки AI Factory: ${JSON.stringify({ target: s.target?.path ?? null, profile: s.profile, expectedFingerprint: s.fingerprint })}.\nПользователь выбрал подготовку коммита. Примени установленный aif-commit в текущем проекте: сначала перечитай правила, git status и diff, определи относящиеся к задаче изменения и сообщение коммита. Незакоммиченные файлы не означают, что все они согласованы для включения: сохрани несвязанные изменения и не добавляй все файлы автоматически. Соблюдай действующие gates и разрешения на коммит; не выполняй push или публикацию без отдельного разрешения. Активный план может отсутствовать после архивации. После действия обнови карточку через aif_chat_status.`;
   return `${action.command}\n\nКонтекст кнопки AI Factory: ${JSON.stringify({ target: s.target?.path ?? null, profile: s.profile, expectedFingerprint: s.fingerprint })}.\nВыполни выбранное действие в текущей задаче. Сначала перечитай выбранный план/change и действующие правила. Для новой задачи без описания запроси её описание. Не расширяй scope. Не считай старые отчёты актуальным PASS без проверки evidence. После этапа обнови карточку через aif_chat_status или bb plugin run aif-chat show. Нажатие этой кнопки не разрешает другие действия workflow.`;
 }

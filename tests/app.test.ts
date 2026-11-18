@@ -541,3 +541,25 @@ test('each readiness step has a «?» button that explains the step without runn
     assert.equal(runs, 0);
   } finally { slot.lifecycle.unmount(); }
 });
+
+test('«Другие команды» in the tab offers /aif-docs and friends with a «?» each', async () => {
+  const { toolHelp } = await import('../check-actions.ts');
+  const tab = app.tabs.find(t => t.id === 'workflow')!;
+  const s = data(); s.skills = [...s.skills, 'aif-docs', 'aif-roadmap', 'aif-rules', 'aif-build-automation', 'aif-dockerize', 'aif-archive'];
+  s.actions = workflowActions(s);
+  const tools = s.actions.filter(a => toolHelp[a.id]);
+  assert.deepEqual(tools.map(a => a.id), Object.keys(toolHelp));
+  assert.ok(tools.every(a => a.available && a.group === 'setup'));
+  assert.match(tools.find(a => a.id === 'docs-setup')!.command, /^[/$]aif-docs$/);
+  const runs: string[] = [];
+  const slot = renderSlot(tab as any, { threadId: 'thr_panel', environment: { id: 'env_panel' } }, { rpc: { status: () => s, run: (input: any) => { runs.push(input.actionId); return { sent: true, message: 'Отправлено' }; } } });
+  try {
+    fireEvent.click(await slot.findByText('Другие команды', { selector: '*' }));
+    const help = await slot.findByRole('button', { name: 'Что делает «Документация»' });
+    fireEvent.click(help);
+    await slot.findByText(toolHelp['docs-setup']);
+    assert.deepEqual(runs, []);
+    fireEvent.click(await slot.findByRole('button', { name: 'Документация' }));
+    await waitFor(() => assert.deepEqual(runs, ['docs-setup']));
+  } finally { slot.lifecycle.unmount(); }
+});

@@ -1,11 +1,11 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
 import { definePluginApp, useRpc, useRealtime, useComposer, useBbNavigate, experimental_ProviderModelPicker as ProviderModelPicker, type ExperimentalProviderModelPickerValue as PickerValue, type PluginMessageDirectiveProps, type ExperimentalThreadContextCardProps, type ExperimentalThreadTabProps, type ExperimentalCodeFenceRendererProps, type PluginComposerApi } from '@get-bb/plugin-sdk/app';
 import type { rpcContract, DelegationView } from './contract.ts';
 import type { DelegationChoice } from './delegation.ts';
 import { phaseSchema, type Snapshot, type Phase, type Action, type ReadinessStep, type Suggestions } from './model.ts';
 import { readinessComplete, nextReadinessStep, readinessHelp } from './readiness.ts';
 import { parseReplyGate } from './gate.ts';
-import { checkHelp, rowActions, supplementaryChecks } from './check-actions.ts';
+import { checkHelp, rowActions, supplementaryChecks, toolHelp } from './check-actions.ts';
 import { updateInVersionDetails, VERSION_TTL } from './versions.ts';
 import { contextSetupInDetails } from './workflow.ts';
 import { chipDraft } from './suggestions.ts';
@@ -193,6 +193,8 @@ function WorkflowCard({ threadId, initialTarget = '', phase = 'unknown', openFil
         <Disclosure summary="Настройка инструментов">{renderActions(snapshot.actions.filter(a => a.group === 'setup' && (a.id === 'quality-setup' || a.id === 'ci-setup')))}</Disclosure>
       </Disclosure>}
 
+      {delegation && <ToolsSection actions={snapshot.actions.filter(a => a.group === 'setup' && toolHelp[a.id])} renderAction={renderAction} />}
+
       <Disclosure className="aif-details" summary={<>Версии и расширения{snapshot.extensions.length ? <span className="font-normal text-muted-foreground"> · {snapshot.extensions.length}</span> : null}</>}>
         {renderActions(snapshot.actions.filter(a => a.group === 'maintenance' && updateInVersionDetails(snapshot, a.id)))}
         {snapshot.versionsCheckedAt && <p className="m-0 text-xs text-muted-foreground">Версии CLI/Git: снимок от {new Date(snapshot.versionsCheckedAt).toLocaleString('ru')}. Плановая проверка — раз в сутки.</p>}
@@ -309,6 +311,19 @@ function DelegationSection({ threadId, environmentId, busy }: { threadId: string
       })}</ul>
     </div>}
   </Section>;
+}
+
+/** Optional AI Factory commands that are not part of readiness: docs, roadmap, rules, build, docker, archive. */
+function ToolsSection({ actions, renderAction }: { actions: Action[]; renderAction: (action: Action) => ReactNode }) {
+  const [help, setHelp] = useState<string | null>(null);
+  if (!actions.length) return null;
+  return <Disclosure className="aif-tools" summary="Другие команды">
+    <p className="m-0 text-xs text-muted-foreground">По необходимости, в любом порядке. Кнопка отправляет команду в этот чат.</p>
+    <ul className="m-0 flex list-none flex-col gap-2 p-0">{actions.map(a => <li key={a.id} className="flex flex-col gap-1">
+      <span className="flex items-center">{renderAction(a)}<HelpMark label={`Что делает «${a.label}»`} open={help === a.id} onToggle={() => setHelp(help === a.id ? null : a.id)} /></span>
+      {help === a.id && <p className="m-0 rounded-md bg-muted px-3 py-2 text-xs">{toolHelp[a.id]}</p>}
+    </li>)}</ul>
+  </Disclosure>;
 }
 
 function ReadinessSection({ snapshot, run, busy, sending, setReadinessSkip }: {
