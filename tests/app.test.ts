@@ -12,7 +12,7 @@ for (const key of ['window', 'document', 'navigator', 'HTMLElement', 'Element', 
 registerHooks({ load(url, context, next) { return url.endsWith('.css') ? { format: 'module', source: '', shortCircuit: true } : next(url, context); } });
 const { loadPluginApp, renderSlot } = await import('@get-bb/plugin-sdk/testing/app');
 const { experimental_makePanelController } = await import('@get-bb/plugin-sdk/testing');
-const { fireEvent, waitFor } = await import('@testing-library/react');
+const { fireEvent, waitFor, within } = await import('@testing-library/react');
 const app = await loadPluginApp(() => import('../app.tsx'));
 const props = { attributes: { phase: 'plan' }, source: '::aif-chat{phase="plan"}', message: { id: 'msg_1', threadId: 'thr_test', turnId: 'turn_1', projectId: 'proj_test' }, openWorkspaceFile: null };
 function data() { const s = snapshot(); s.actions = workflowActions(s); return s; }
@@ -227,18 +227,19 @@ test('workflow panel reads its owning thread and exposes maintenance without a t
 test('panel uses the BB provider/model picker and saves exactly its selection', async () => {
   const tab = app.tabs.find(t => t.id === 'workflow')!;
   const saved: unknown[] = [];
-  const view = (choice: unknown) => ({ choice, configured: true, foreign: null, error: null, providers: [{ id: 'codex', name: 'Codex' }],
+  const view = (choice: unknown, research: unknown = { mode: 'self' }) => ({ choice, research, configured: true, foreign: null, error: null, providers: [{ id: 'codex', name: 'Codex' }],
     children: [{ id: 'thr_child', title: 'Задача 1', status: 'active', providerId: 'codex', updatedAt: '2026-11-17T00:00:00Z' }] });
   const slot = renderSlot(tab as any, { threadId: 'thr_panel', environment: { id: 'env_panel' } }, { rpc: {
     status: () => data(),
     delegation: () => view({ mode: 'self' }),
-    setDelegation: (input: any) => { saved.push(input); return view(input.choice); },
+    setDelegation: (input: any) => { saved.push(input); return input.role === 'research' ? view({ mode: 'self' }, input.choice) : view(input.choice); },
   } });
   try {
     await slot.findByText('Задача 1');
-    assert.ok(slot.getByText(/Codex · пишет код/));
+    assert.ok(slot.getByText(/Codex · работает/));
     assert.equal(slot.queryByRole('button', { name: 'Сохранить' }), null);
-    fireEvent.click(slot.getByRole('radio', { name: 'Другая модель' }));
+    assert.equal(slot.getAllByRole('radiogroup').length, 2, 'code and research each have their own choice');
+    fireEvent.click(within(slot.getByRole('radiogroup', { name: 'Кто пишет код' })).getByRole('radio', { name: 'Другая модель' }));
     const picker = await slot.findByTestId('bb-provider-model-picker');
     assert.equal(picker.dataset.routingKind, 'environment'); assert.equal(picker.dataset.routingId, 'env_panel');
     fireEvent.change(slot.getByLabelText('Provider ID'), { target: { value: 'codex' } });
@@ -248,8 +249,18 @@ test('panel uses the BB provider/model picker and saves exactly its selection', 
     fireEvent.click(slot.getByRole('button', { name: 'Apply execution selection' }));
     fireEvent.click(await slot.findByRole('button', { name: 'Сохранить' }));
     await waitFor(() => assert.equal(saved.length, 1));
-    assert.deepEqual(saved, [{ threadId: 'thr_panel', choice: { mode: 'bb', providerId: 'codex', model: 'gpt-6.2-sol', reasoning: 'high', tier: 'fast' } }]);
+    assert.deepEqual(saved, [{ threadId: 'thr_panel', role: 'implement', choice: { mode: 'bb', providerId: 'codex', model: 'gpt-6.2-sol', reasoning: 'high', tier: 'fast' } }]);
     await slot.findByText('Codex · gpt-6.2-sol · high');
+    fireEvent.click(within(slot.getByRole('radiogroup', { name: 'Кто исследует код' })).getByRole('radio', { name: 'Другая модель' }));
+    await waitFor(() => assert.equal(slot.getAllByTestId('bb-provider-model-picker').length, 2));
+    const research = within(slot.getAllByTestId('bb-provider-model-picker')[1]);
+    fireEvent.change(research.getByLabelText('Provider ID'), { target: { value: 'codex' } });
+    fireEvent.change(research.getByLabelText('Model'), { target: { value: 'gpt-6.2-luna' } });
+    fireEvent.click(research.getByRole('button', { name: 'Apply execution selection' }));
+    fireEvent.click(await slot.findByRole('button', { name: 'Сохранить' }));
+    await waitFor(() => assert.equal(saved.length, 2));
+    assert.equal((saved[1] as any).role, 'research'); assert.equal((saved[1] as any).choice.model, 'gpt-6.2-luna');
+    await slot.findByText(/Codex · gpt-6\.2-luna/);
   } finally { slot.lifecycle.unmount(); }
 });
 test('card renders real buttons, read-only progress and sends selected action once', async () => {

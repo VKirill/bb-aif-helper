@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
 import { definePluginApp, useRpc, useRealtime, useComposer, useBbNavigate, experimental_ProviderModelPicker as ProviderModelPicker, type ExperimentalProviderModelPickerValue as PickerValue, type PluginMessageDirectiveProps, type ExperimentalThreadContextCardProps, type ExperimentalThreadTabProps, type ExperimentalCodeFenceRendererProps, type PluginComposerApi } from '@get-bb/plugin-sdk/app';
 import type { rpcContract, DelegationView } from './contract.ts';
-import type { DelegationChoice } from './delegation.ts';
+import type { DelegationChoice, DelegationRole } from './delegation.ts';
 import { phaseSchema, type Snapshot, type Phase, type Action, type ReadinessStep, type Suggestions } from './model.ts';
 import { readinessComplete, nextReadinessStep, readinessHelp, type SkippableStepId } from './readiness.ts';
 import { parseReplyGate } from './gate.ts';
@@ -225,7 +225,7 @@ function WorkflowCard({ threadId, initialTarget = '', phase = 'unknown', openFil
 }
 
 const childStatus: Record<string, { label: string; tone: Tone }> = {
-  pending: { label: 'в очереди', tone: 'idle' }, starting: { label: 'запускается', tone: 'live' }, active: { label: 'пишет код', tone: 'live' },
+  pending: { label: 'в очереди', tone: 'idle' }, starting: { label: 'запускается', tone: 'live' }, active: { label: 'работает', tone: 'live' },
   stopping: { label: 'останавливается', tone: 'live' }, idle: { label: 'готово', tone: 'done' }, error: { label: 'ошибка', tone: 'error' },
 };
 const toPicker = (c: Extract<DelegationChoice, { mode: 'bb' }>): PickerValue =>
@@ -235,54 +235,45 @@ const fromPicker = (v: PickerValue): DelegationChoice =>
 // Starting point for the picker; it immediately reconciles to a real model from the live catalog.
 const pickerSeed: PickerValue = { providerId: 'codex', model: '', reasoningLevel: 'high' as PickerValue['reasoningLevel'] };
 
-function DelegationSection({ threadId, environmentId, busy }: { threadId: string; environmentId: string | null; busy: boolean }) {
-  const rpc = useRpc<typeof rpcContract>();
-  const navigate = useBbNavigate();
-  const [view, setView] = useState<DelegationView | null>(null);
-  const [mode, setMode] = useState<'self' | 'bb' | null>(null);
-  const [pick, setPick] = useState<PickerValue | null>(null);
+const roleText = {
+  implement: { title: 'Код', skills: '/aif-implement', group: 'Кто пишет код',
+    saved: '/aif-implement будет передавать задачи выбранной модели.', self: 'Код снова пишет агент этого чата.',
+    note: 'Хранится в .ai-factory.json → phases.implement. /aif-implement отдаёт каждую задачу дочернему треду на этой модели, затем сам проверяет diff и отмечает задачу в плане.' },
+  research: { title: 'Разведка', skills: '/aif-plan, /aif-fix, /aif-qa', group: 'Кто исследует код',
+    saved: 'Разведчики AI Factory будут запускаться дочерними тредами на выбранной модели.', self: 'Разведку снова делают встроенные помощники агента.',
+    note: 'Хранится в .ai-factory/skill-context/global-skill-context.md. Когда навык просит разведчиков (Explore), агент запускает их дочерними тредами на этой модели параллельно и собирает их отчёты.' },
+} as const;
+
+/** «Этот агент / Другая модель» for one role; saves through setDelegation. */
+function ModelChoice({ role, saved, providerName, environmentId, busy, locked: lockedOuter, onSave }: {
+  role: DelegationRole; saved: DelegationChoice; providerName: (id: string | null) => string | null; environmentId: string | null; busy: boolean; locked: boolean;
+  onSave: (choice: DelegationChoice) => Promise<void>;
+}) {
+  const text = roleText[role];
+  const [mode, setMode] = useState<'self' | 'bb'>(saved.mode);
+  const [pick, setPick] = useState<PickerValue | null>(saved.mode === 'bb' ? toPicker(saved) : null);
   const [saving, setSaving] = useState(false);
-  const [error, setError] = useState('');
-  const mounted = useRef(true);
-  useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
-  const load = useCallback(async () => {
-    try {
-      const next = await rpc.call('delegation', { threadId });
-      if (!mounted.current) return;
-      setView(next); setError('');
-      setMode(current => current ?? next.choice.mode);
-      setPick(current => current ?? (next.choice.mode === 'bb' ? toPicker(next.choice) : null));
-    } catch (e) { if (mounted.current) setError(e instanceof Error ? e.message : String(e)); }
-  }, [rpc, threadId]);
-  useEffect(() => { void load(); }, [load]);
-  useRealtime('changed', (payload: unknown) => { if ((payload as { threadId?: string })?.threadId === threadId) void load(); });
-  if (!view || !mode) return <Section label="Исполнитель кода" title="Исполнитель кода">
-    {error ? <p className="m-0 text-xs text-muted-foreground">Настройка недоступна: {error}</p> : <div className="h-20 animate-pulse rounded-md bg-muted motion-reduce:animate-none" aria-hidden="true" />}
-  </Section>;
+  const savedKey = JSON.stringify(saved);
+  useEffect(() => { setMode(saved.mode); setPick(saved.mode === 'bb' ? toPicker(saved) : null); }, [savedKey]); // eslint-disable-line react-hooks/exhaustive-deps
   const choice: DelegationChoice | null = mode === 'self' ? { mode: 'self' } : pick?.model ? fromPicker(pick) : null;
-  const dirty = !!choice && JSON.stringify(choice) !== JSON.stringify(view.choice);
-  const providerName = (id: string | null) => view.providers.find(p => p.id === id)?.name ?? id;
-  const active = view.choice;
-  const savedLabel = active.mode === 'bb' ? [providerName(active.providerId), active.model, active.reasoning].filter(Boolean).join(' · ') : 'агент этого чата';
-  const reset = () => { setMode(view.choice.mode); setPick(view.choice.mode === 'bb' ? toPicker(view.choice) : null); setError(''); };
+  const dirty = !!choice && JSON.stringify(choice) !== savedKey;
+  const locked = saving || lockedOuter;
+  const savedLabel = saved.mode === 'bb' ? [providerName(saved.providerId), saved.model, saved.reasoning].filter(Boolean).join(' · ') : 'агент этого чата';
   async function save() {
     if (!choice) return;
-    setSaving(true); setError('');
-    try {
-      const next = await rpc.call('setDelegation', { threadId, choice });
-      if (!mounted.current) return;
-      setView(next); setMode(next.choice.mode); setPick(next.choice.mode === 'bb' ? toPicker(next.choice) : null);
-      toast.success(next.choice.mode === 'bb' ? '/aif-implement будет передавать задачи выбранной модели.' : 'Код снова пишет агент этого чата.');
-    } catch (e) { if (mounted.current) setError(e instanceof Error ? e.message : String(e)); }
-    finally { if (mounted.current) setSaving(false); }
+    setSaving(true);
+    try { await onSave(choice); toast.success(choice.mode === 'bb' ? text.saved : text.self); }
+    finally { setSaving(false); }
   }
-  const locked = saving || !!view.foreign;
-  return <Section label="Исполнитель кода" title="Исполнитель кода" aside={<Badge variant="secondary" className="max-w-[60%] truncate font-medium">{savedLabel}</Badge>}>
-    {view.foreign && <Callout>phases.implement в .ai-factory.json настроен на агента «{view.foreign}». Панель его не меняет.</Callout>}
-    {view.error && <Callout tone="error">{view.error}</Callout>}
-    <div role="radiogroup" aria-label="Кто пишет код" className="grid grid-cols-2 gap-0.5 rounded-lg bg-muted p-0.5">
+  return <div className="flex min-w-0 flex-col gap-2">
+    <div className="flex min-w-0 items-center gap-2">
+      <h4 className="m-0 text-sm font-medium">{text.title}</h4>
+      <span className="truncate text-xs text-muted-foreground">{text.skills}</span>
+      <Badge variant="secondary" className="ml-auto max-w-[55%] truncate font-medium">{savedLabel}</Badge>
+    </div>
+    <div role="radiogroup" aria-label={text.group} className="grid grid-cols-2 gap-0.5 rounded-lg bg-muted p-0.5">
       {(['self', 'bb'] as const).map(m => <button key={m} type="button" role="radio" aria-checked={mode === m} disabled={locked}
-        onClick={() => { setError(''); setMode(m); if (m === 'bb' && !pick) setPick(pickerSeed); }}
+        onClick={() => { setMode(m); if (m === 'bb' && !pick) setPick(pickerSeed); }}
         className={cn('h-8 cursor-pointer rounded-md px-3 text-sm font-medium transition-colors outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-default disabled:opacity-50',
           mode === m ? 'bg-background text-foreground shadow-xs' : 'text-muted-foreground hover:text-foreground')}>{m === 'self' ? 'Этот агент' : 'Другая модель'}</button>)}
     </div>
@@ -292,11 +283,46 @@ function DelegationSection({ threadId, environmentId, busy }: { threadId: string
         routing={environmentId ? { kind: 'environment', environmentId } : undefined} className="max-w-full" />
     </div>}
     {dirty && <div className="flex flex-wrap gap-2">
-      <Hint text={busy ? 'Дождитесь, пока агент закончит текущую работу' : 'Записать выбор в .ai-factory.json'}><Button type="button" size="sm" disabled={saving || busy || !!view.foreign} onClick={() => void save()}>{saving ? 'Сохраняю…' : 'Сохранить'}</Button></Hint>
-      <Button type="button" size="sm" variant="outline" disabled={saving} onClick={reset}>Отменить</Button>
+      <Hint text={busy ? 'Дождитесь, пока агент закончит текущую работу' : 'Сохранить выбор в проекте'}><Button type="button" size="sm" disabled={locked || busy} onClick={() => void save()}>{saving ? 'Сохраняю…' : 'Сохранить'}</Button></Hint>
+      <Button type="button" size="sm" variant="outline" disabled={saving} onClick={() => { setMode(saved.mode); setPick(saved.mode === 'bb' ? toPicker(saved) : null); }}>Отменить</Button>
     </div>}
+    <p className="m-0 text-xs text-muted-foreground">{text.note}</p>
+  </div>;
+}
+
+function DelegationSection({ threadId, environmentId, busy }: { threadId: string; environmentId: string | null; busy: boolean }) {
+  const rpc = useRpc<typeof rpcContract>();
+  const navigate = useBbNavigate();
+  const [view, setView] = useState<DelegationView | null>(null);
+  const [error, setError] = useState('');
+  const mounted = useRef(true);
+  useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
+  const load = useCallback(async () => {
+    try {
+      const next = await rpc.call('delegation', { threadId });
+      if (mounted.current) { setView(next); setError(''); }
+    } catch (e) { if (mounted.current) setError(e instanceof Error ? e.message : String(e)); }
+  }, [rpc, threadId]);
+  useEffect(() => { void load(); }, [load]);
+  useRealtime('changed', (payload: unknown) => { if ((payload as { threadId?: string })?.threadId === threadId) void load(); });
+  if (!view) return <Section label="Исполнители" title="Исполнители">
+    {error ? <p className="m-0 text-xs text-muted-foreground">Настройка недоступна: {error}</p> : <div className="h-20 animate-pulse rounded-md bg-muted motion-reduce:animate-none" aria-hidden="true" />}
+  </Section>;
+  const providerName = (id: string | null) => view.providers.find(p => p.id === id)?.name ?? id;
+  const save = (role: DelegationRole) => async (choice: DelegationChoice) => {
+    setError('');
+    try {
+      const next = await rpc.call('setDelegation', { threadId, choice, role });
+      if (mounted.current) setView(next);
+    } catch (e) { if (mounted.current) setError(e instanceof Error ? e.message : String(e)); throw e; }
+  };
+  return <Section label="Исполнители" title="Исполнители">
+    {view.foreign && <Callout>phases.implement в .ai-factory.json настроен на агента «{view.foreign}». Панель его не меняет.</Callout>}
+    {view.error && <Callout tone="error">{view.error}</Callout>}
+    <ModelChoice role="implement" saved={view.choice} providerName={providerName} environmentId={environmentId} busy={busy} locked={!!view.foreign} onSave={save('implement')} />
+    <div className="border-t border-border" />
+    <ModelChoice role="research" saved={view.research} providerName={providerName} environmentId={environmentId} busy={busy} locked={false} onSave={save('research')} />
     {error && <Callout tone="error" role="status">{error}</Callout>}
-    <p className="m-0 text-xs text-muted-foreground">Выбор хранится в .ai-factory.json → phases.implement. /aif-implement отдаёт каждую задачу дочернему треду на этой модели, затем сам проверяет diff и отмечает задачу в плане.</p>
     {view.children.length > 0 && <div className="flex flex-col gap-2">
       <h4 className="m-0 text-xs font-medium text-muted-foreground">Дочерние треды · {view.children.length}</h4>
       <ul className="m-0 flex list-none flex-col divide-y divide-border rounded-md border border-border p-0">{view.children.map(c => {

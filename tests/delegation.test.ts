@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtemp, readFile, writeFile, mkdir, access } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { CONTEXT_PATH, mergeContextBlock, parseSpec, readDelegation, writeDelegation } from '../delegation.ts';
+import { CONTEXT_PATH, RESEARCH_PATH, mergeContextBlock, parseSpec, readDelegation, writeDelegation } from '../delegation.ts';
 
 const LEGACY_RUNNER = '.ai-factory/bin/bb-aif-run.mjs';
 
@@ -149,4 +149,30 @@ test('choosing self removes the managed block and leaves only owner text', async
   assert.ok(!content.includes('delegation:start'));
   assert.ok(!content.includes('delegation:end'));
   assert.equal(content, 'Owner notes.\n');
+});
+
+test('research choice lives in a managed block of the global skill-context and leaves .ai-factory.json alone', async () => {
+  const root = await project();
+  const before = await json(root);
+  await mkdir(join(root, '.ai-factory/skill-context'), { recursive: true });
+  await writeFile(join(root, RESEARCH_PATH), '# Owner notes\nKeep answers short.\n');
+  assert.deepEqual((await readDelegation(root)).research, { mode: 'self' });
+  const choice = { mode: 'bb' as const, providerId: 'codex', model: "gpt-6.2-luna'x", reasoning: 'medium' };
+  const state = await writeDelegation(root, choice, 'research');
+  assert.deepEqual(state.research, choice);
+  assert.deepEqual(state.choice, { mode: 'self' }, 'code delegation is untouched');
+  assert.deepEqual(await json(root), before);
+  const text = await readFile(join(root, RESEARCH_PATH), 'utf8');
+  assert.match(text, /^# Owner notes\nKeep answers short\.\n\n<!-- bb-aif-helper:research:start -->/);
+  assert.match(text, /Task\(subagent_type: Explore/);
+  assert.match(text, /--parent-self --lifecycle-owner-thread "\$BB_THREAD_ID"/);
+  assert.match(text, /--model 'gpt-6\.2-luna'\\''x'/, 'model id is single-quoted for the shell');
+  assert.ok(!(await exists(join(root, CONTEXT_PATH))), 'research does not create the aif-implement context');
+  const back = await writeDelegation(root, { mode: 'self' }, 'research');
+  assert.deepEqual(back.research, { mode: 'self' });
+  assert.equal(await readFile(join(root, RESEARCH_PATH), 'utf8'), '# Owner notes\nKeep answers short.\n');
+  const bare = await project();
+  await writeDelegation(bare, choice, 'research');
+  await writeDelegation(bare, { mode: 'self' }, 'research');
+  assert.ok(!(await exists(join(bare, RESEARCH_PATH))), 'an otherwise empty context file is removed');
 });

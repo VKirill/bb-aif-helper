@@ -2,7 +2,7 @@ import type { BbPluginApi } from '@get-bb/plugin-sdk';
 import { createHash } from 'node:crypto';
 import { z } from 'zod';
 import { hostContract, rpcContract, type DelegationView } from './contract.ts';
-import type { DelegationChoice } from './delegation.ts';
+import type { DelegationChoice, DelegationRole } from './delegation.ts';
 import { requestSchema, phaseSchema, snapshotSchema, type CardRequest, type Snapshot, type Phase, type Suggestions } from './model.ts';
 import { actionPrompt, workflowActions } from './workflow.ts';
 import { applyRan, applySkipped, RUN_CONFIRMED_STEPS } from './readiness.ts';
@@ -257,9 +257,10 @@ export default async function plugin(bb: BbPluginApi) {
       providers: providers.filter(p => p.available).map(p => ({ id: p.id, name: p.displayName })),
       children: children.map(c => ({ id: c.id, title: c.title ?? null, status: c.status, providerId: c.providerId ?? null, updatedAt: String(c.updatedAt) })) };
   }
-  async function setDelegation(threadId: string, choice: DelegationChoice) {
+  async function setDelegation(threadId: string, choice: DelegationChoice, role: DelegationRole = 'implement') {
     const { environment } = await context(threadId);
-    const state = await host.call('setDelegation', { root: environment.path!, choice }, { hostId: environment.hostId });
+    const state = await host.call('setDelegation', { root: environment.path!, choice, role }, { hostId: environment.hostId });
+    bb.log.info(`aif-chat: delegation saved threadId=${threadId} role=${role} mode=${choice.mode}`);
     if (state.removedLegacy) bb.log.info(`aif-chat: removed legacy runner root=${environment.path}`);
     cache.invalidate(key => !!watchers.get(key)?.has(threadId));
     bb.realtime.publish('changed', { threadId });
@@ -269,7 +270,7 @@ export default async function plugin(bb: BbPluginApi) {
     status: input => status(input, input.checkUpdates, input.force),
     suggestions: async input => (await suggested(input.threadId)).view,
     delegation: input => delegationView(input.threadId),
-    setDelegation: input => serial(`delegation:${input.threadId}`, () => setDelegation(input.threadId, input.choice)),
+    setDelegation: input => serial(`delegation:${input.threadId}`, () => setDelegation(input.threadId, input.choice, input.role)),
     setReadinessSkip: async input => {
       const { environment } = await context(input.threadId);
       const key = `readiness-skip:${environment.hostId}:${environment.path!}`;

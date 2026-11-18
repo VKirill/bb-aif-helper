@@ -11,6 +11,15 @@ import { z } from 'zod';
 export const CONTEXT_PATH = '.ai-factory/skill-context/aif-implement/SKILL.md';
 const START = '<!-- bb-aif-helper:delegation:start -->';
 const END = '<!-- bb-aif-helper:delegation:end -->';
+// Research: every AI Factory skill reads the global skill-context, so Explore-style
+// subagents of /aif-plan, /aif-fix, /aif-qa… run as BB threads on the chosen model.
+// The block itself is the source of truth: its first line records the model spec.
+export const RESEARCH_PATH = '.ai-factory/skill-context/global-skill-context.md';
+const RESEARCH_START = '<!-- bb-aif-helper:research:start -->';
+const RESEARCH_END = '<!-- bb-aif-helper:research:end -->';
+const RESEARCH_SPEC = /<!-- research-model: (\S{1,400}) -->/;
+export const delegationRoleSchema = z.enum(['implement', 'research']);
+export type DelegationRole = z.infer<typeof delegationRoleSchema>;
 const AGENT = 'bb';
 const TIMEOUT_MS = 4 * 60 * 60 * 1000;
 
@@ -22,6 +31,8 @@ export const delegationChoiceSchema = z.discriminatedUnion('mode', [
 export type DelegationChoice = z.infer<typeof delegationChoiceSchema>;
 export const delegationStateSchema = z.object({
   choice: delegationChoiceSchema,
+  /** Model for research subagents (Explore) of every AI Factory skill; self = the agent's own subagents. */
+  research: delegationChoiceSchema,
   configured: z.boolean(),
   // phases.implement points at an agent this plugin does not manage.
   foreign: z.string().nullable(),
@@ -62,7 +73,25 @@ async function readConfig(root: string): Promise<Json | null> {
   }
 }
 
+async function readText(path: string): Promise<string> {
+  try { return await readFile(path, 'utf8'); } catch (e) { if ((e as NodeJS.ErrnoException).code === 'ENOENT') return ''; throw e; }
+}
+
+/** The research choice recorded in the managed block of the global skill-context; self when absent or malformed. */
+export function parseResearch(text: string): DelegationChoice {
+  const start = text.indexOf(RESEARCH_START), end = text.indexOf(RESEARCH_END);
+  if (start < 0 || end < start) return { mode: 'self' };
+  return parseSpec(RESEARCH_SPEC.exec(text.slice(start, end))?.[1]) ?? { mode: 'self' };
+}
+
 export async function readDelegation(root: string): Promise<DelegationState> {
+  let research: DelegationChoice = { mode: 'self' };
+  try { research = parseResearch(await readText(join(root, RESEARCH_PATH))); } catch { /* unreadable context: research stays self */ }
+  const base = await readImplement(root);
+  return { ...base, research };
+}
+
+async function readImplement(root: string): Promise<Omit<DelegationState, 'research'>> {
   let config: Json | null;
   try { config = await readConfig(root); } catch (e) {
     return { choice: { mode: 'self' }, configured: false, foreign: null, error: `Не читается .ai-factory.json: ${(e as Error).message.slice(0, 200)}` };
@@ -85,26 +114,54 @@ async function writeAtomic(path: string, content: string) {
 }
 
 /** Replace or remove the managed block; text outside the markers is the owner's. */
-export function mergeContextBlock(existing: string, block: string | null): string {
-  const start = existing.indexOf(START);
-  const end = existing.indexOf(END);
-  const outside = start >= 0 && end > start ? existing.slice(0, start) + existing.slice(end + END.length) : existing;
+export function mergeContextBlock(existing: string, block: string | null, start_ = START, end_ = END): string {
+  const start = existing.indexOf(start_);
+  const end = existing.indexOf(end_);
+  const outside = start >= 0 && end > start ? existing.slice(0, start) + existing.slice(end + end_.length) : existing;
   const rest = outside.replace(/\n{3,}/g, '\n\n').trim();
   if (!block) return rest ? rest + '\n' : '';
-  return `${rest ? rest + '\n\n' : ''}${START}\n${block.trim()}\n${END}\n`;
+  return `${rest ? rest + '\n\n' : ''}${start_}\n${block.trim()}\n${end_}\n`;
 }
 
 // parseSpec lets ', ", $, ` and ; through the model id; the block embeds the
 // values in shell commands, so every substitution is single-quoted.
 const shellQuote = (value: string) => `'${value.replace(/'/g, `'\\''`)}'`;
 
+const spawnFlags = (c: Extract<DelegationChoice, { mode: 'bb' }>) => [
+  `--provider ${shellQuote(c.providerId)}`,
+  `--model ${shellQuote(c.model)}`,
+  ...(c.reasoning ? [`--reasoning-level ${shellQuote(c.reasoning)}`] : []),
+  ...(c.tier && c.tier !== 'default' ? [`--service-tier ${shellQuote(c.tier)}`] : []),
+].join(' ');
+
+export function researchBlock(c: Extract<DelegationChoice, { mode: 'bb' }>) {
+  return `<!-- research-model: ${modelSpec(c)} -->
+## Research delegation (managed by BB AIF Helper)
+
+The project owner chose \`${modelSpec(c)}\` (BB provider/model?reasoning&tier) for research subagents. Whenever an AI Factory skill tells you to launch exploration or research subagents — for example \`Task(subagent_type: Explore, …)\` in /aif-plan, /aif-fix or /aif-qa — or you would use your own native subagents for read-only codebase research, start them as BB threads on that model instead. Ignore any model the skill names for those subagents.
+
+1. Write each research prompt to its own temporary file. It starts with these rules (replace \`<thread-id>\` with your own \`BB_THREAD_ID\`), then gives the exact question, the paths to look at and the thoroughness the skill asked for:
+
+\`\`\`
+You are a read-only research worker for an AI Factory skill run by BB thread <thread-id>.
+Investigate the current workspace and answer the question below. Do not create, edit or delete files, do not commit, and do not start AI Factory skills.
+Finish with a concise structured report: the relevant files and symbols with paths, the patterns and integration points you found, and open questions. No full file contents.
+\`\`\`
+
+2. Spawn all research workers at once — they only read, so they may run in parallel — and take each thread id from the JSON answer:
+
+\`\`\`bash
+bb thread spawn --project "$BB_PROJECT_ID" --environment "$BB_ENVIRONMENT_ID" --parent-self --lifecycle-owner-thread "$BB_THREAD_ID" --parent-notifications off ${spawnFlags(c)} --title 'AIF research · <skill> · <topic>' --prompt-file <prompt> --json
+\`\`\`
+
+3. Wait for each: \`bb thread wait <id> --status idle --timeout 8m\`, repeating while it still works. The report is \`bb thread output <id>\`.
+4. Use the reports exactly as the skill uses its subagent results and continue the skill. Its rules on artifacts, questions and approvals do not change.
+
+If \`bb thread spawn\` fails, say so and do that research yourself; do not repeat the same error. Use no \`node\` commands in this flow.`;
+}
+
 export function contextBlock(c: Extract<DelegationChoice, { mode: 'bb' }>) {
-  const flags = [
-    `--provider ${shellQuote(c.providerId)}`,
-    `--model ${shellQuote(c.model)}`,
-    ...(c.reasoning ? [`--reasoning-level ${shellQuote(c.reasoning)}`] : []),
-    ...(c.tier && c.tier !== 'default' ? [`--service-tier ${shellQuote(c.tier)}`] : []),
-  ].join(' ');
+  const flags = spawnFlags(c);
   return `## Code delegation (managed by BB AIF Helper)
 
 The project owner chose \`${modelSpec(c)}\` (BB provider/model?reasoning&tier) to write the code of plan tasks. The source of truth is \`.ai-factory.json\` → \`phases.implement\`; re-read it before each task. If it no longer has \`"agent": "bb"\`, implement tasks yourself as usual.
@@ -135,9 +192,15 @@ bb thread spawn --project "$BB_PROJECT_ID" --environment "$BB_ENVIRONMENT_ID" --
 If \`bb thread spawn\` returns an error, report it and implement that task yourself; do not repeat the same error. Use no \`node\` commands in this flow.`;
 }
 
-export async function writeDelegation(root: string, choice: DelegationChoice): Promise<DelegationState> {
+export async function writeDelegation(root: string, choice: DelegationChoice, role: DelegationRole = 'implement'): Promise<DelegationState> {
   const config = await readConfig(root);
   if (!config) throw new Error('В проекте нет .ai-factory.json: сначала установите AI Factory.');
+  if (role === 'research') {
+    const file = join(root, RESEARCH_PATH);
+    const next = mergeContextBlock(await readText(file), choice.mode === 'bb' ? researchBlock(choice) : null, RESEARCH_START, RESEARCH_END);
+    if (next) await writeAtomic(file, next); else await rm(file, { force: true });
+    return readDelegation(root);
+  }
   const phases: Json = isObject(config.phases) ? { ...config.phases } : {};
   const agents: Json = isObject(config.dispatchAgents) ? { ...config.dispatchAgents } : {};
   const current = isObject(phases.implement) ? phases.implement : null;

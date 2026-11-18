@@ -7,6 +7,6 @@ export default experimental_defineHostEntry({
   handlers: {
     collect: (input, context) => collectSnapshot(input, context.signal),
     delegation: input => readDelegation(input.root),
-    setDelegation: input => writeDelegation(input.root, input.choice),
+    setDelegation: input => writeDelegation(input.root, input.choice, input.role),
   },
 });
