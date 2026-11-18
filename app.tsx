@@ -1,17 +1,39 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { definePluginApp, useRpc, useRealtime, useComposer, type PluginMessageDirectiveProps, type ExperimentalThreadContextCardProps, type ExperimentalThreadTabProps, type ExperimentalCodeFenceRendererProps } from '@get-bb/plugin-sdk/app';
+import { definePluginApp, useRpc, useRealtime, useComposer, Markdown, experimental_Icon as Icon, experimental_FileLink as FileLink, type PluginMessageDirectiveProps, type ExperimentalThreadContextCardProps, type ExperimentalThreadTabProps, type ExperimentalCodeFenceRendererProps } from '@get-bb/plugin-sdk/app';
 import type { rpcContract } from './contract.ts';
-import { phaseSchema, type Snapshot, type Phase, type Action, type Suggestions } from './model.ts';
+import { phaseSchema, cardIdSchema, RESEARCH_TASK_MAX_LENGTH, type Snapshot, type Phase, type Action, type Suggestions } from './model.ts';
+import { sessionBriefBlocked } from './session-brief.ts';
 import { parseReplyGate } from './gate.ts';
 import { rowActions, supplementaryChecks } from './check-actions.ts';
 import { updateInVersionDetails, VERSION_TTL } from './versions.ts';
 import { contextSetupInDetails } from './workflow.ts';
-import { BASIC_PLAN_ROOT, usesBasicWorkflow } from './basic-workflow.ts';
+import { isBasicPlanPath, usesBasicWorkflow, isCompletedPlan } from './basic-workflow.ts';
 import './aif-chat.css';
+import { mountPlanPresentation } from './plan-presentation.ts';
+import { preparationCommands } from './project-preparation.ts';
 
 const phaseNames: Record<Phase, string> = { unknown: 'Контекст задачи', explore: 'Исследование', plan: 'Планирование', improve: 'Уточнение плана', implement: 'Выполнение плана', verify: 'Проверка', fix: 'Исправление замечаний', done: 'Финализация' };
 const profileNames: Record<Snapshot['profile'], string> = { none: 'Нет установки', upstream: 'AI Factory', 'aifhub-classic': 'AIFHub · classic', 'aifhub-openspec': 'AIFHub · OpenSpec', 'aifhub-ultra': 'AIFHub · legacy ultra', invalid: 'Проверьте конфигурацию' };
 const checkLabels = { notrun: 'Нет evidence', 'reported-pass': 'PASS в отчёте', warn: 'С замечаниями', fail: 'Ошибка', unknown: 'Не подтверждено' };
+
+const actionIcons: Record<string, string> = {
+  commit: 'GitCommit', fix: 'Wrench', 'fix-new': 'Wrench', 'fix-findings': 'Wrench', 'execute-fix': 'Wrench',
+  verify: 'RotateCw', 'check-verify': 'ListChecks', implement: 'Play', 'implement-proposed': 'Play',
+  explore: 'Search', plan: 'ListTodo', improve: 'Sparkles', 'apply-improvements': 'CheckCheck',
+  done: 'Archive', 'ultra-receipt': 'FileCheck', sync: 'RefreshCw', 'context-sync': 'RefreshCw',
+  'context-compile': 'FileText', 'setup-context': 'Settings', analyze: 'Search', init: 'Download',
+  install: 'Download', 'install-factory': 'Download', 'update-factory': 'Download', 'update-extensions': 'Package',
+  'check-rules': 'ScrollText', 'rules-check': 'ScrollText', 'check-security': 'ShieldCheck', 'security-checklist': 'ShieldCheck',
+  'check-review': 'GitPullRequest', review: 'GitPullRequest', 'check-mode': 'Settings', mode: 'Settings',
+  'check-worktree': 'FolderCheck', 'check-coupling': 'Network', 'qa-prepare': 'ClipboardList', qa: 'ClipboardList',
+  'qa-run': 'ListChecks', 'qa-check': 'ListChecks', quality: 'CheckCheck', 'quality-setup': 'Settings',
+  ci: 'Workflow', 'ci-setup': 'Settings',
+};
+function ActionIcon({ id, command = '' }: { id: string; command?: string }) {
+  const skill = command.match(/(?:^|[\s$/])aif-([a-z][a-z0-9-]*)\b/)?.[1];
+  if (id.startsWith('prep-')) return <Icon name={preparationCommands[id.slice(5)]?.icon ?? 'Settings'} className="aif-button-icon" aria-hidden="true" />;
+  return <Icon name={actionIcons[id.replace(/^basic-/, '')] ?? actionIcons[skill ?? ''] ?? 'ArrowRight'} className="aif-button-icon" aria-hidden="true" />;
+}
 
 function GateData({ code, status, Original }: ExperimentalCodeFenceRendererProps) {
   const parsed = status === 'closed' ? parseReplyGate(`\`\`\`aif-gate-result\n${code}\n\`\`\``) : null;
@@ -25,62 +47,139 @@ function GateData({ code, status, Original }: ExperimentalCodeFenceRendererProps
   </div>;
 }
 
-function WorkflowCard({ threadId, initialTarget = '', phase = 'unknown', openFile, compact = false }: {
-  threadId: string; initialTarget?: string; phase?: Phase; openFile?: ((path: string) => boolean) | null; compact?: boolean;
+function PlanDocument({ code, status, message }: ExperimentalCodeFenceRendererProps) {
+  const rpc = useRpc<typeof rpcContract>();
+  const [saved, setSaved] = useState<{ path: string; seq: number; hash: string; environmentId: string } | null>(null);
+  const [error, setError] = useState('');
+  const generation = useRef(0);
+  const refresh = useCallback(async () => {
+    const id = ++generation.current;
+    if (status !== 'closed' || !code.trim()) { setSaved(null); return; }
+    try {
+      const value = await rpc.call('planDocument', { threadId: message.threadId, text: code.trim() });
+      if (generation.current === id) { setSaved(value); setError(''); }
+    } catch (e) { if (generation.current === id) { setSaved(null); setError(e instanceof Error ? e.message : String(e)); } }
+  }, [rpc, message.threadId, code, status]);
+  useEffect(() => { void refresh(); return () => { generation.current++; }; }, [refresh]);
+  useRealtime('changed', (payload: unknown) => { if ((payload as { threadId?: string })?.threadId === message.threadId) void refresh(); });
+  return <section className="aif-plan-document" data-aif-plan-document="true" aria-label="Документ плана">
+    <header className="aif-plan-heading"><strong>План реализации</strong><span className="aif-profile">{status === 'streaming' ? 'Генерируется' : status === 'unclosed' ? 'Не завершён' : saved ? 'Сохранён' : 'Ожидает сохранения'}</span></header>
+    <Markdown content={code} className="aif-plan-markdown" />
+    {saved && <p className="aif-plan-file"><FileLink target={{ kind: 'workspace', environmentId: saved.environmentId, path: saved.path }}>Открыть файл плана</FileLink><small>{saved.path}</small></p>}
+    {status === 'unclosed' && <p className="aif-error">Генерация прервана. Неполный план не сохранён и не запускается.</p>}
+    {error && <div><p className="aif-error" role="alert">Не удалось сохранить план: {error}</p><button type="button" className="aif-action aif-secondary" onClick={() => void refresh()}><ActionIcon id="verify" />Повторить сохранение</button></div>}
+    {status === 'closed' && !saved && !error && <p className="aif-muted aif-small">Действия появятся после завершения генерации и сохранения файла.</p>}
+    {saved && <div className="aif-plan-controls" aria-label="Действия после плана"><WorkflowCard key={`${message.threadId}:${saved.path}`} threadId={message.threadId} initialTarget={saved.path} phase="plan" compact /></div>}
+  </section>;
+}
+
+function WorkflowCard({ threadId, initialTarget = '', phase = 'unknown', openFile, compact = false, inline = false }: {
+  threadId: string; initialTarget?: string; phase?: Phase; openFile?: ((path: string) => boolean) | null; compact?: boolean; inline?: boolean;
 }) {
   const rpc = useRpc<typeof rpcContract>();
   const [target, setTarget] = useState(initialTarget);
+  const [newTask, setNewTask] = useState(false);
+  const [showCompleted, setShowCompleted] = useState(false);
   const [snapshot, setSnapshot] = useState<Snapshot | null>(null);
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
   const [loading, setLoading] = useState(true);
   const [sending, setSending] = useState(false);
   const [network, setNetwork] = useState(false);
+  const [researchOpen, setResearchOpen] = useState(false);
+  const [researchTask, setResearchTask] = useState('');
+  const [researchError, setResearchError] = useState('');
   const sequence = useRef(0);
   const mounted = useRef(true);
   const sendingRef = useRef(false);
   useEffect(() => { mounted.current = true; return () => { mounted.current = false; sequence.current++; }; }, []);
-  useEffect(() => { setTarget(initialTarget); setSnapshot(null); }, [initialTarget, threadId]);
+  useEffect(() => { setTarget(initialTarget); setNewTask(false); setShowCompleted(false); setSnapshot(null); setResearchOpen(false); setResearchTask(''); setResearchError(''); }, [initialTarget, threadId]);
   const refresh = useCallback(async (checkUpdates = false, force = false) => {
     const id = ++sequence.current;
     try {
-      const value = await rpc.call('status', { threadId, target, phase, checkUpdates, force });
+      const value = await rpc.call('status', { threadId, target: newTask ? '' : target, phase: newTask ? 'unknown' : phase,
+        ...(newTask ? { newTask: true } : {}), checkUpdates, force });
       if (mounted.current && id === sequence.current) {
         setSnapshot(value); setError('');
-        if (value.configured && target.startsWith(BASIC_PLAN_ROOT + '/')) setTarget('');
+        if (value.selectionReset) { setTarget(''); setNewTask(true); }
+        if (value.configured && isBasicPlanPath(target)) setTarget('');
       }
     } catch (e) {
       if (mounted.current && id === sequence.current) { setError(e instanceof Error ? e.message : String(e)); setSnapshot(null); }
     } finally { if (mounted.current && id === sequence.current) setLoading(false); }
-  }, [rpc, threadId, target, phase]);
+  }, [rpc, threadId, target, phase, newTask]);
   useEffect(() => {
     setLoading(true); void refresh();
     const interval = window.setInterval(() => { if (document.visibilityState === 'visible') void refresh(); }, 15000);
     return () => window.clearInterval(interval);
   }, [refresh]);
   useRealtime('changed', (payload: unknown) => { if ((payload as { threadId?: string })?.threadId === threadId) void refresh(); });
-  async function run(action: Action) {
+  async function run(action: Action, task?: string) {
     if (!snapshot || sendingRef.current) return;
     sendingRef.current = true; setSending(true); setError(''); setNotice('');
+    if (action.id === 'basic-explore') setResearchError('');
     try {
       const result = await rpc.call('run', { threadId, target: snapshot.target?.path ?? target, phase: snapshot.phase,
-        fingerprint: snapshot.fingerprint, actionId: action.id, requestId: crypto.randomUUID() });
-      if (mounted.current) setNotice(result.message);
-    } catch (e) { if (mounted.current) setError(e instanceof Error ? e.message : String(e)); }
+        fingerprint: snapshot.fingerprint, actionId: action.id, requestId: crypto.randomUUID(), ...(newTask ? { newTask: true } : {}), ...(task === undefined ? {} : { researchTask: task }) });
+      if (mounted.current) {
+        setNotice(result.message);
+        if (result.sent && action.id === 'basic-explore') { setResearchOpen(false); setResearchTask(''); }
+        if (result.sent && result.newTask) { setTarget(''); setNewTask(true); setSnapshot(null); }
+      }
+    } catch (e) { if (mounted.current) {
+      const message = e instanceof Error ? e.message : String(e);
+      if (action.id === 'basic-explore') setResearchError(message); else setError(message);
+    } }
     finally { sendingRef.current = false; if (mounted.current) { setSending(false); void refresh(); } }
   }
-  const busy = !!snapshot && !['idle', 'error'].includes(snapshot.threadState);
+  const busy = !!snapshot && (!['idle', 'error'].includes(snapshot.threadState) || !!snapshot.pendingQuestions || snapshot.pendingConfirmation !== false);
   const tasks = snapshot?.target?.tasks ?? [];
   const completed = tasks.filter(t => t.done).length;
+  const hiddenPlans = snapshot?.candidates.filter(isCompletedPlan) ?? [];
+  const visiblePlans = snapshot?.candidates.filter(candidate => showCompleted || !isCompletedPlan(candidate)) ?? [];
   const nextVersionCheck = snapshot?.upstream.checkedAt ? Date.parse(snapshot.upstream.checkedAt) + VERSION_TTL : 0;
+  const researchAction = snapshot?.actions.find(a => a.id === 'basic-explore');
+  const newResearch = researchAction && (snapshot?.target?.kind === 'basic' && tasks.length > 0 && completed === tasks.length
+    || snapshot?.chatPlan?.accepted && snapshot.phase === 'done');
   const renderAction = (a: Action) => <button key={a.id} type="button"
     className={a.group === 'next' ? 'aif-action' : 'aif-action aif-secondary'} disabled={sending || busy || !a.available}
-    title={`${a.reason}\n${a.command}`} onClick={() => void run(a)}>{a.label}{!a.available && (a.disabledReason === 'unchanged' ? ' · без изменений' : ' · не установлен')}</button>;
+    title={`${a.reason}\n${a.command}`} onClick={() => {
+      if (a.id === 'basic-explore') { setResearchOpen(true); setError(''); setNotice(''); }
+      else void run(a);
+    }}><ActionIcon id={a.id} command={a.command} /><span>{a.label}{!a.available && (a.disabledReason === 'unchanged' ? ' · без изменений' : a.disabledReason === 'requires-cli222' ? ' · нужен CLI 2.22+' : a.disabledReason === 'context-blocked' ? ' · контекст неактуален' : ' · не установлен')}</span></button>;
   const renderActions = (actions: Action[]) => <div className="aif-actions">{actions.map(renderAction)}</div>;
+  const preparation = snapshot?.preparation;
+  const required = preparation?.filter(step => !step.optional) ?? [];
+  const optional = preparation?.filter(step => step.optional) ?? [];
+  const nextSetupStep = required.find(step => step.state === 'missing')?.id;
+  const setupInline = !!nextSetupStep && !snapshot?.target && !snapshot?.chatPlan;
+  const renderSetupStep = (step: NonNullable<Snapshot['preparation']>[number], number?: number) => {
+    const actionId = step.id === 'install' ? 'basic-install' : step.id === 'describe' ? 'setup-context' : `prep-${step.id}`;
+    const action = snapshot?.actions.find(item => item.id === actionId);
+    const current = step.id === nextSetupStep;
+    const showAction = !!action && (step.optional || current || step.id === 'describe' && step.state === 'found');
+    return <li key={step.id} className="aif-prep-step" data-state={step.state} aria-current={current ? 'step' : undefined}>
+      <span className="aif-prep-mark" role="img" aria-label={step.state === 'found' ? 'Файлы найдены' : step.state === 'unknown' ? 'Не удалось проверить файлы' : 'Файлы не найдены'}>
+        <Icon name={step.state === 'found' ? 'CircleCheck' : step.state === 'unknown' ? 'CircleHelp' : 'Circle'} className="aif-button-icon" aria-hidden="true" />
+      </span>
+      <div>
+        <div className="aif-prep-label">{number !== undefined && <span className="aif-muted" aria-hidden="true">{number}.</span>} <strong>{step.label}</strong></div>
+        {step.state !== 'found' && <div className="aif-prep-paths">{step.paths.map(file => <code key={file}>{file}</code>)}</div>}
+        {showAction && <div className={current ? 'aif-prep-action aif-prep-current' : 'aif-prep-action'}>{renderAction(action)}</div>}
+      </div>
+    </li>;
+  };
+  const setupContent = preparation && <>
+    <ol className="aif-prep-list">{required.map((step, index) => renderSetupStep(step, index + 1))}</ol>
+    <details className="aif-prep-optional"><summary>Дополнительно</summary>
+      <ul className="aif-prep-list">{optional.map(step => renderSetupStep(step))}</ul>
+    </details>
+  </>;
+  if (inline && (loading && !snapshot || snapshot && (snapshot.pendingConfirmation || snapshot.pendingQuestions))) return null;
   return <section className={`aif-card${compact ? ' aif-compact' : ''}`} aria-label="AI Factory workflow">
-    <header className="aif-heading"><strong><span aria-hidden="true">◈</span> AI Factory</strong>
-      {snapshot && <span className="aif-profile">{profileNames[snapshot.profile]}</span>}
-      <button className="aif-refresh" type="button" onClick={() => void refresh(false, true)} aria-label="Обновить статус AI Factory" title="Перечитать задачи и проверки; версии CLI/Git и GitHub кэшируются на сутки">↻</button>
+    <header className="aif-heading"><span className="aif-brand-icon"><Icon name="Workflow" aria-hidden="true" /></span><strong>AI Factory</strong>
+      {snapshot && snapshot.profile !== 'upstream' && <span className="aif-profile">{profileNames[snapshot.profile]}</span>}
+      <button className="aif-refresh" type="button" onClick={() => void refresh(false, true)} aria-label="Обновить статус AI Factory" title="Перечитать задачи и проверки; версии CLI/Git и GitHub кэшируются на сутки"><Icon name="RefreshCw" className="aif-button-icon" aria-hidden="true" /></button>
     </header>
     {loading && <p role="status" className="aif-muted">Читаю локальный статус…</p>}
     {error && <p role="alert" className="aif-error">{error}</p>}
@@ -89,26 +188,65 @@ function WorkflowCard({ threadId, initialTarget = '', phase = 'unknown', openFil
       <div className="aif-versions"><span>CLI <b>{snapshot.versions.globalCli ?? 'не найден'}</b></span><span>Проект <b>{snapshot.versions.installed ?? 'не указан'}</b></span>
         {snapshot.versions.sourceVersion && <span>Git <b>{snapshot.versions.sourceVersion}</b><small> @{snapshot.versions.sourceSha?.slice(0, 7)}{snapshot.versions.sourceDirty ? ' · изменён' : ''}</small></span>}
         {snapshot.extensions.map(e => <span key={e.name} title={e.installedVersion ? 'Установленная версия расширения' : 'Записанная версия; установленные файлы не подтверждены'}>{e.name} <b>{e.installedVersion ?? e.recordedVersion ?? 'неизвестна'}</b>{!e.installedVersion && <small> · не подтверждена</small>}</span>)}</div>
-      <div className="aif-maintenance" role="group" aria-label="Обновление и настройка AI Factory">{renderActions(snapshot.actions.filter(a => a.group === 'maintenance' && !updateInVersionDetails(snapshot, a.id) && !contextSetupInDetails(snapshot, a.id)))}</div>
-      <p className="aif-stage" title={snapshot.phaseSource}>{busy ? <span className="aif-live-dot" aria-hidden="true" /> : <span className="aif-idle-dot" aria-hidden="true" />} {phaseNames[snapshot.phase]}
-        <span className="aif-muted"> · {snapshot.pendingQuestions ? `ожидаю ответы: ${snapshot.pendingQuestions}` : busy ? 'агент занят' : snapshot.threadState === 'error' ? 'ошибка выполнения BB' : 'агент свободен'}</span></p>
-      {usesBasicWorkflow(snapshot) && <p className="aif-muted" aria-label="Базовый workflow">Без AI Factory доступен встроенный flow: исследование → план → выполнение → проверка → коммит. Установка — отдельная кнопка; планы сохраняются в .bb-aif-helper/plans/.</p>}
-      {snapshot.candidates.length > 0 && <label className="aif-target">План / change
-        <select aria-label="Выбранный план или change" value={snapshot.target?.path ?? target} onChange={e => { setTarget(e.target.value); setNotice(''); }}>
-          {!snapshot.target && <option value="">Выберите задачу</option>}
-          {snapshot.candidates.map(t => <option key={t.path} value={t.path}>{t.title} · {t.kind}</option>)}
-        </select></label>}
-      {snapshot.target && <div className="aif-progress"><div><strong>{snapshot.target.title}</strong><span>{completed}/{tasks.length} задач</span></div>
-        <progress aria-label="Выполнение задач плана" value={completed} max={Math.max(tasks.length, 1)} />
-        <details><summary>Задачи плана</summary><ul className="aif-tasks">{tasks.map((t, i) => <li key={`${t.id}-${i}`}><span className={t.done ? 'aif-task-done' : 'aif-muted'} aria-label={t.done ? 'Выполнена по плану' : 'Не выполнена'}>{t.done ? '✓' : '□'}</span><span>{t.title}</span></li>)}</ul>
-          {!tasks.length && <p className="aif-muted">Чекбоксы задач не найдены; прогресс неизвестен.</p>}</details>
-      </div>}
-      {renderActions(snapshot.actions.filter(a => a.group === 'next').slice(0, 3))}
-      {snapshot.actions.some(a => contextSetupInDetails(snapshot, a.id)) && <details className="aif-context-setup"><summary>Настройка контекста проекта</summary>
+      {setupInline && <section className="aif-preparation" aria-label="Подготовка проекта">
+        <h3>Подготовка проекта</h3>{setupContent}
+      </section>}
+      <section className="aif-current" aria-label="Текущий этап">
+        <div className="aif-section-caption">Сейчас</div>
+        <div className="aif-stage" title={snapshot.phaseSource}>
+          <strong>{phaseNames[snapshot.phase]}</strong>
+          <span className={`aif-agent-state${busy ? ' aif-agent-state-active' : ''}`}>
+            <span className={busy ? 'aif-live-dot' : 'aif-idle-dot'} aria-hidden="true" />
+            {snapshot.pendingQuestions ? `ожидаю ответы: ${snapshot.pendingQuestions}` : snapshot.pendingConfirmation ? 'ожидается подтверждение пользователя' : snapshot.pendingConfirmation === null ? 'ожидание подтверждения не проверено' : busy ? 'агент занят' : snapshot.threadState === 'error' ? 'ошибка выполнения BB' : 'агент свободен'}
+          </span>
+        </div>
+        {usesBasicWorkflow(snapshot) && <p className="aif-muted" aria-label="Базовый workflow">Без AI Factory доступен встроенный flow: исследование → Plan BB → выполнение → проверка → коммит. «Составить план» включает штатный режим Plan. Установка — отдельная кнопка.</p>}
+        {sessionBriefBlocked(snapshot) && <p className="aif-error" role="status" aria-label="Блокировка SessionBrief">SessionBrief: {snapshot.sessionBrief!.status.toUpperCase()} · из чата. Выполнение остановлено. Синхронизируйте выбранный change, затем пересоберите SessionBrief. Актуальность контекста проверяет владелец workflow.</p>}
+        {snapshot.fixDefaults && <p className="aif-muted aif-small">Fix: <code>{snapshot.fixDefaults.mode}</code> · learning patch: {snapshot.fixDefaults.patch ? 'включён' : 'выключен'} · настройки применяет aif-fix</p>}
+        {snapshot.candidates.length > 0 && <label className="aif-target">План
+          <select aria-label="Выбранный план или change" value={snapshot.target?.path ?? target} onChange={e => { setTarget(e.target.value); setNewTask(false); setNotice(''); }}>
+            {!snapshot.target && <option value="">Выберите задачу</option>}
+            {!showCompleted && snapshot.target && hiddenPlans.some(t => t.path === snapshot.target!.path) && <option value={snapshot.target.path} hidden>{snapshot.target.title} · завершён</option>}
+            {visiblePlans.map(t => <option key={t.path} value={t.path} title={t.path}>{t.title}{t.progress ? ` · выполнено ${t.progress.completed} из ${t.progress.total}` : ''}{t.closed ? ' · закрыт' : ''} · {t.kind}</option>)}
+          </select></label>}
+        {hiddenPlans.length > 0 && <label className="aif-show-completed"><input type="checkbox" checked={showCompleted} onChange={event => setShowCompleted(event.target.checked)} />Показать завершённые ({hiddenPlans.length})</label>}
+        {snapshot.target && <div className="aif-progress"><div><strong>{snapshot.target.title}</strong><span className="aif-task-count">{completed}/{tasks.length} задач</span></div>
+          {snapshot.target.verification?.verified && <small className="aif-muted" title="Отметка владельца проверки в файле плана">План отмечен проверенным</small>}
+          <progress aria-label="Выполнение задач плана" value={completed} max={Math.max(tasks.length, 1)} />
+          {snapshot.target.settings && Object.values(snapshot.target.settings).some(Boolean) && <p className="aif-muted aif-small" aria-label="Настройки плана">Коммиты: <code>{snapshot.target.settings.commitStrategy ?? 'не указано'}</code> · Метод: <code>{snapshot.target.settings.methodology ?? 'не указан'}</code>{snapshot.target.settings.tddGranularity && <> · TDD: <code>{snapshot.target.settings.tddGranularity}</code></>}</p>}
+          <details><summary>Задачи плана</summary><ul className="aif-tasks">{tasks.map((t, i) => <li key={`${t.id}-${i}`}><span className={t.done ? 'aif-task-done' : 'aif-muted'} role="img" aria-label={t.outcome === 'skipped' ? 'Пропущена по плану' : t.done ? 'Выполнена по плану' : 'Не выполнена'}><Icon name={t.outcome === 'skipped' ? 'Minus' : t.done ? 'CircleCheck' : 'Circle'} className="aif-button-icon" aria-hidden="true" /></span><span>{t.title}{t.kind === 'commit' && <small className="aif-muted"> · коммит</small>}{t.outcome === 'skipped' && <small className="aif-muted"> · пропущено по плану</small>}</span></li>)}</ul>
+            {!tasks.length && <p className="aif-muted">Чекбоксы задач не найдены; прогресс неизвестен.</p>}</details>
+        </div>}
+        {snapshot.chatPlan && !snapshot.target && <div className="aif-progress" aria-label="План из чата">
+          <strong>{snapshot.chatPlan.title}</strong>
+          <p className="aif-muted aif-small">{snapshot.chatPlan.accepted ? 'Выполнение плана запрошено' : 'План предложен · ожидает запуска'} · сообщение #{snapshot.chatPlan.seq}. Прогресс задач и результаты проверок не подтверждены.</p>
+        </div>}
+        <div className="aif-next-actions">{renderActions(snapshot.actions.filter(a => a.group === 'next' && !(newResearch && a.id === 'basic-explore')).slice(0, 3))}</div>
+        {newResearch && <div className="aif-actions" role="group" aria-label="Новая задача">{renderAction(researchAction)}</div>}
+        {researchOpen && researchAction && <form className="aif-research-form" aria-label="Описание исследования" onSubmit={event => {
+          event.preventDefault();
+          if (!researchTask.trim() || busy || sending || !researchAction.available) return;
+          void run(researchAction, researchTask.trim());
+        }}>
+          <label>Что исследовать?
+            <textarea autoFocus required maxLength={RESEARCH_TASK_MAX_LENGTH} rows={4} value={researchTask} disabled={sending || busy}
+              placeholder="Опишите вопрос, проблему или укажите ссылку на задачу" onChange={event => setResearchTask(event.target.value)} />
+          </label>
+          <p className="aif-muted aif-small">До {RESEARCH_TASK_MAX_LENGTH} символов. Исследование изучает задачу и код, не меняя файлы.</p>
+          {researchError && <p role="alert" className="aif-error">{researchError}</p>}
+          <div className="aif-actions">
+            <button type="submit" className="aif-action" disabled={!researchTask.trim() || sending || busy || !researchAction.available}><ActionIcon id="explore" />Начать исследование</button>
+            <button type="button" className="aif-action aif-secondary" disabled={sending} onClick={() => { setResearchOpen(false); setResearchTask(''); setResearchError(''); }}><Icon name="X" className="aif-button-icon" aria-hidden="true" />Отмена</button>
+          </div>
+        </form>}
+      </section>
+      <div className="aif-maintenance" role="group" aria-label="Обновление и настройка AI Factory">{renderActions(snapshot.actions.filter(a => a.group === 'maintenance' && !updateInVersionDetails(snapshot, a.id) && !contextSetupInDetails(snapshot, a.id) && (!preparation || !['setup-context', 'basic-install'].includes(a.id))))}</div>
+      {preparation && !setupInline && <details className="aif-context-setup aif-preparation"><summary>Подготовка проекта</summary>{setupContent}</details>}
+      {!preparation && snapshot.actions.some(a => contextSetupInDetails(snapshot, a.id)) && <details className="aif-context-setup"><summary>Настройка контекста проекта</summary>
         <p className="aif-muted aif-small">Выполнение плана уже начато. Настройка контекста запускается отдельно и не продолжает выбранный план.</p>
         {renderActions(snapshot.actions.filter(a => contextSetupInDetails(snapshot, a.id)))}
       </details>}
-      {snapshot.target && snapshot.checks.length > 0 && <details className="aif-checks"><summary>Что проверить <span className="aif-muted">· из чата: {snapshot.checks.filter(c => c.chat).length} · отчётов PASS: {snapshot.checks.filter(c => c.state === 'reported-pass').length}</span></summary>
+      {snapshot.checks.length > 0 && <details className="aif-checks"><summary>Что проверить <span className="aif-muted">· из чата: {snapshot.checks.filter(c => c.chat).length} · отчётов PASS: {snapshot.checks.filter(c => c.state === 'reported-pass').length}</span></summary>
         <p className="aif-muted aif-small">Дополнительные проверки — по выбору. Правила проекта и обязательные gates могут требовать их перед завершением; блокирующий FAIL сохраняет силу.</p>
         <p className="aif-muted aif-small">Галочки задач и результаты проверок независимы. Актуальность evidence подтверждает владелец workflow.</p>
         <ul>{snapshot.checks.map(c => <li key={c.id}><div><strong>{c.label}</strong>{c.required ? <small className="aif-required">нужно для завершения</small> : supplementaryChecks.has(c.id) && <small className="aif-required" title="Дополнительный шаг flow; действующие правила проекта сохраняют приоритет">по выбору</small>}</div>
@@ -122,7 +260,7 @@ function WorkflowCard({ threadId, initialTarget = '', phase = 'unknown', openFil
             {c.chat.result.blockers.map(b => <span key={b.id}>{` ${b.id}: ${b.summary}${b.file ? ` (${b.file})` : ''}`}</span>)}
             {c.chat.result.suggested_next?.reason && <span>{` ${c.chat.result.suggested_next.reason}`}</span>}</small>}
           <small className="aif-check-detail">{c.chat ? `Файловый отчёт: ${c.path ? checkLabels[c.state] + '. ' + c.detail : 'не найден.'}` : c.detail}</small></li>)}</ul>
-        <details className="aif-setup"><summary>Настройка инструментов</summary>{renderActions(snapshot.actions.filter(a => a.group === 'setup'))}</details>
+        <details className="aif-setup"><summary>Настройка инструментов</summary>{renderActions(snapshot.actions.filter(a => a.group === 'setup' && !a.id.startsWith('prep-')))}</details>
       </details>}
       <details className="aif-details"><summary>Версии и расширения{snapshot.extensions.length ? ` · ${snapshot.extensions.length}` : ''}</summary>
         {renderActions(snapshot.actions.filter(a => a.group === 'maintenance' && updateInVersionDetails(snapshot, a.id)))}
@@ -133,21 +271,50 @@ function WorkflowCard({ threadId, initialTarget = '', phase = 'unknown', openFil
             {snapshot.versions.sourceWorktreeVersion && snapshot.versions.sourceWorktreeVersion !== snapshot.versions.sourceVersion && <small>Рабочее дерево: {snapshot.versions.sourceWorktreeVersion}</small>}</dd>
           <dt>Git upstream</dt><dd>{snapshot.upstream.version ?? 'Не проверен'}{snapshot.upstream.ref && ` · ${snapshot.upstream.ref} @${snapshot.upstream.sha?.slice(0, 7)}`}
             {snapshot.upstream.checkedAt && <small>Проверено {new Date(snapshot.upstream.checkedAt).toLocaleString()}</small>}{snapshot.upstream.error && <small>{snapshot.upstream.error}</small>}</dd></dl>
-        <button type="button" className="aif-action aif-secondary" disabled={network || nextVersionCheck > Date.now()} title={nextVersionCheck > Date.now() ? `Следующая проверка доступна ${new Date(nextVersionCheck).toLocaleString('ru')}` : 'Проверить upstream; результат сохраняется на сутки'} onClick={async () => { setNetwork(true); try { await refresh(true); } finally { if (mounted.current) setNetwork(false); } }}>{network ? 'Проверяю GitHub…' : 'Проверить версию в GitHub'}</button>
+        <button type="button" className="aif-action aif-secondary" disabled={network || nextVersionCheck > Date.now()} title={nextVersionCheck > Date.now() ? `Следующая проверка доступна ${new Date(nextVersionCheck).toLocaleString('ru')}` : 'Проверить upstream; результат сохраняется на сутки'} onClick={async () => { setNetwork(true); try { await refresh(true); } finally { if (mounted.current) setNetwork(false); } }}><Icon name="Github" className="aif-button-icon" aria-hidden="true" />{network ? 'Проверяю GitHub…' : 'Проверить версию в GitHub'}</button>
         {nextVersionCheck > Date.now() && <p className="aif-muted aif-small">Следующая проверка GitHub — {new Date(nextVersionCheck).toLocaleString('ru')}.</p>}
         {snapshot.extensions.length ? <ul className="aif-extensions">{snapshot.extensions.map(e => <li key={e.name}><strong>{e.name}</strong> {e.installedVersion ?? 'файлы отсутствуют'} <span className="aif-muted">· {e.state}</span>
           <small>Записано: {e.recordedVersion ?? 'не указано'} · {e.source}</small>{e.contributions.length > 0 && <small>Настроенные injections: {e.contributions.join(', ')}. Это не подтверждение загрузки в текущую сессию.</small>}</li>)}</ul> : <p className="aif-muted">Расширения не зарегистрированы в этом проекте.</p>}
       </details>
       {snapshot.diagnostics.length > 0 && <details className="aif-diagnostics"><summary>Примечания · {snapshot.diagnostics.length}</summary><ul>{snapshot.diagnostics.map((d, i) => <li key={i}>{d}</li>)}</ul></details>}
       <footer className="aif-muted aif-small">{snapshot.cache?.source === 'saved' ? 'Сохранённые данные' : snapshot.cache?.source === 'memory' ? 'Данные из кэша' : 'Локальный статус'} · {new Date(snapshot.collectedAt).toLocaleTimeString()}
-        {snapshot.cache?.refreshing && ' · обновляются в фоне…'}{snapshot.cache?.refreshError && ' · обновление не удалось; нажмите ↻ для повторного чтения'} · {busy ? 'действия доступны после завершения работы' : 'кнопки отправляют выбранную команду в этот чат'}</footer>
+        {snapshot.cache?.refreshing && ' · обновляются в фоне…'}{snapshot.cache?.refreshError && ' · обновление не удалось; нажмите ↻ для повторного чтения'} · {snapshot.pendingConfirmation || snapshot.pendingQuestions ? 'действия доступны после ответа пользователя' : busy ? 'действия доступны после завершения работы' : 'кнопки отправляют выбранную команду в этот чат'}</footer>
     </>}
   </section>;
 }
 function Directive(props: PluginMessageDirectiveProps) {
+  // Legacy directives have no identity; hide their historical output as well.
+  const cardId = cardIdSchema.safeParse(props.attributes.card);
+  if (!cardId.success) return null;
   const parsed = phaseSchema.safeParse(props.attributes.phase ?? 'unknown');
   if (!parsed.success || (props.attributes.target?.length ?? 0) > 1000) return <p className="aif-error">Некорректная карточка AI Factory.</p>;
-  return <WorkflowCard threadId={props.message.threadId} initialTarget={props.attributes.target ?? ''} phase={parsed.data} openFile={props.openWorkspaceFile} />;
+  return <InlineCard key={`${props.message.threadId}:${cardId.data}`} cardId={cardId.data} threadId={props.message.threadId}
+    initialTarget={props.attributes.target ?? ''} phase={parsed.data} openFile={props.openWorkspaceFile} />;
+}
+function InlineCard({ cardId, threadId, initialTarget, phase, openFile }: {
+  cardId: string; threadId: string; initialTarget: string; phase: Phase; openFile: PluginMessageDirectiveProps['openWorkspaceFile'];
+}) {
+  const rpc = useRpc<typeof rpcContract>();
+  const [state, setState] = useState<'current' | 'superseded' | 'hidden'>('hidden');
+  const mounted = useRef(true);
+  const sequence = useRef(0);
+  const refresh = useCallback(async () => {
+    if (state === 'superseded') return;
+    const id = ++sequence.current;
+    try {
+      const result = await rpc.call('cardVisibility', { threadId, cardId });
+      if (mounted.current && sequence.current === id) setState(result.state);
+    } catch { if (mounted.current && sequence.current === id) setState('hidden'); }
+  }, [rpc, threadId, cardId, state]);
+  useEffect(() => { mounted.current = true; return () => { mounted.current = false; sequence.current++; }; }, []);
+  useEffect(() => {
+    if (state === 'superseded') return;
+    void refresh();
+    const timer = window.setInterval(() => { if (document.visibilityState === 'visible') void refresh(); }, 15000);
+    return () => window.clearInterval(timer);
+  }, [refresh, state]);
+  useRealtime('changed', (payload: unknown) => { if ((payload as { threadId?: string })?.threadId === threadId) void refresh(); });
+  return state === 'current' ? <WorkflowCard threadId={threadId} initialTarget={initialTarget} phase={phase} openFile={openFile} inline /> : null;
 }
 function ContextCard({ threadId }: ExperimentalThreadContextCardProps) { return <WorkflowCard threadId={threadId} compact />; }
 function WorkflowPanel({ threadId }: ExperimentalThreadTabProps) { return <div className="aif-panel"><WorkflowCard key={threadId} threadId={threadId} compact /></div>; }
@@ -194,24 +361,27 @@ function SuggestionBar({ threadId, composerBusy }: { threadId: string; composerB
   if (!data?.items.length && !data?.gate && !data?.gateError && !error && !notice) return null;
   return <section className="aif-suggestions" aria-label="Команды из последнего ответа агента">
     {(data?.gate || data?.gateError) && <div className={`aif-message-gate${data.gate?.blocking || data.gateError ? ' aif-message-gate-blocking' : ''}`} role="group" aria-label="Gate из последнего ответа">
-      {data.gate && <><div className="aif-message-gate-heading"><strong>{data.gate.gate} · {data.gate.status.toUpperCase()} в ответе</strong><span>{data.gate.blocking ? 'Блокирует следующий этап' : 'Не блокирует'}</span></div>
+      {data.gate && <><div className="aif-message-gate-heading"><strong>{data.gate.gate} · {data.gate.status.toUpperCase()} в ответе</strong><span>{data.gate.blocking ? 'Блокирует следующий этап' : data.gateWarning ? 'Переход не подтверждён' : 'Не блокирует'}</span></div>
         <p className="aif-muted aif-small">Заявленный результат из чата. Актуальность evidence для текущих inputs проверяет владелец workflow.</p>
         {data.gate.blockers.length ? <details open><summary>Блокирующие проблемы · {data.gate.blockers.length}</summary><ul>{data.gate.blockers.map((b, i) => <li key={`${b.id}-${i}`}><strong>{b.id}</strong> <span className="aif-muted">· {b.severity}</span><p>{b.summary}</p>{b.file && <code>{b.file}</code>}</li>)}</ul></details> : <p className="aif-small">Блокирующих проблем нет.</p>}
         {data.gate.suggested_next?.reason && <p className="aif-small"><strong>{data.gate.suggested_next.command ? 'Следующий шаг: ' : 'Пояснение: '}</strong>{data.gate.suggested_next.reason}</p>}
         {!!data.gate.affected_files.length && <details><summary>Затронутые файлы · {data.gate.affected_files.length}</summary><ul>{data.gate.affected_files.map((file, i) => <li key={i}><code>{file}</code></li>)}</ul></details>}
       </>}
       {data.gateError && <p className="aif-error" role="alert">Некорректный gate: {data.gateError}</p>}
+      {data.gateWarning && <p className="aif-muted aif-small" role="note">Формат ответа: {data.gateWarning}</p>}
     </div>}
-    {!!data?.items.length && <><span className="aif-suggestions-label">Из ответа агента</span><div className="aif-suggestion-list">{data.items.map(item => <div className="aif-suggestion" key={item.id}>
-      <button type="button" className="aif-suggestion-run" disabled={working || busy || !item.available} title={busy ? 'Дождитесь завершения текущей работы' : item.reason} onClick={() => void act(item.id, false)}>{item.command}</button>
-      <button type="button" className="aif-suggestion-dismiss" disabled={working} aria-label={`Удалить предложение ${item.command}`} title="Убрать из предложений этого ответа" onClick={() => void act(item.id, true)}>×</button>
-    </div>)}</div></>}
+    {!!data?.items.length && <><span className="aif-suggestions-label">Из ответа агента</span><div className="aif-suggestion-list">{data.items.map(item => <div className="aif-suggestion-entry" key={item.id}><div className="aif-suggestion">
+      <button type="button" className="aif-suggestion-run" disabled={working || (busy && !(item.kind === 'improve-approval' && !composerBusy && data.threadState === 'awaiting_input')) || !item.available} title={item.kind === 'improve-approval' ? item.reason : busy ? 'Дождитесь завершения текущей работы' : item.reason} onClick={() => void act(item.id, false)}><ActionIcon id={item.kind === 'improve-approval' ? 'apply-improvements' : item.id} command={item.command} /><span>{item.label ?? item.command}</span></button>
+      <button type="button" className="aif-suggestion-dismiss" disabled={working} aria-label={`Удалить предложение ${item.label ?? item.command}`} title="Убрать из предложений этого ответа" onClick={() => void act(item.id, true)}>×</button>
+    </div>{!item.available && <p className="aif-suggestion-reason" role="note">{item.reason}</p>}</div>)}</div></>}
     {error && <p className="aif-error" role="alert">{error}</p>}
     {notice && <p className="aif-muted aif-small" role="status">{notice}</p>}
   </section>;
 }
 export default definePluginApp(app => {
   app.slots.experimental_codeFenceRenderer({ id: 'gate-data', languages: ['aif-gate-result'], component: GateData });
+  app.slots.experimental_codeFenceRenderer({ id: 'plan-document', languages: ['aif-plan'], component: PlanDocument });
+  app.contentScripts.register({ id: 'plan-presentation', mount: mountPlanPresentation });
   app.composer.customize({ id: 'suggested-commands', scopes: ['thread'], banners: [{ id: 'commands', chrome: 'bare', component: SuggestedCommands }] });
   app.slots.messageDirective({ id: 'aif-chat', component: Directive });
   app.slots.experimental_threadContextCardSection({ id: 'workflow', title: 'AI Factory', group: '9_aif', order: 10, component: ContextCard });

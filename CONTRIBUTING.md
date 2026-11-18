@@ -4,7 +4,7 @@
 
 ## Локальная сборка
 
-Нужны Git, Node.js/npm и BB. Проверенная среда: Windows, Node.js 24.13.0, npm 11.18.0, BB 0.48.1, Plugin SDK 0.6.104. Для тестов нужен `node:module.registerHooks`; используйте Node 24. `better-sqlite3` может потребовать подходящий prebuilt binary или инструменты нативной сборки.
+Нужны Git, Node.js/npm и BB. Проверенная среда: Windows, Node.js 24.13.0, npm 11.18.0, BB 0.49.0, Plugin SDK 0.6.132. Для тестов нужен `node:module.registerHooks`; используйте Node 24. `better-sqlite3` может потребовать подходящий prebuilt binary или инструменты нативной сборки.
 
 ```text
 git clone https://github.com/ichinya/bb-aif-helper.git
@@ -24,6 +24,18 @@ bb plugin reload aif-chat
 ```
 
 React и frontend SDK предоставляет BB. Не коммитьте `node_modules`, кэши, `dist` и `.tgz`; Git-установка собирается средствами BB.
+
+## CI и автоматические теги
+
+`.github/workflows/ci.yml` запускает typecheck, тесты и сборку на Windows и Linux для pull request и push в `main`. Используются Node 24 и зафиксированный CLI `bb-app@0.49.0`; сборка не требует работающего BB-сервера.
+
+После успешных проверок push в `main` в `ichinya/bb-aif-helper` получает аннотированный тег `v<version>` из `package.json`, например `v0.8.5`. Версии manifest и lockfile должны совпадать; автоматически выпускаются только стабильные `X.Y.Z`. При уже существующем теге он пропускается без изменения. Для следующего выпуска поднимите версии в обоих файлах и обновите CHANGELOG. Устаревший запуск, когда `main` уже ушёл вперёд, тоже пропускается.
+
+Права `contents: write` есть только у задачи тега, после всех проверок. Она не устанавливает зависимости и использует штатный `GITHUB_TOKEN`; отдельный PAT не нужен. PR, fork и другие ветки теги не создают. GitHub Release и npm-публикация не выполняются. Тег от `GITHUB_TOKEN` не запускает отдельные tag-push workflows, поэтому проверки находятся в этом же workflow.
+
+Marketplace отслеживает `^0.8.0`: новый тег `v0.8.x` не требует нового marketplace PR. Для `0.9.0` нужно отдельно изменить диапазон каталога. Workflow начнёт работать после публикации этих файлов в GitHub.
+
+Логику тега можно проверить отдельно: `node --test tests/auto-tag.test.mjs`. Интеграционные тесты создают только временные локальные Git-репозитории и локальный bare remote, без отправки в GitHub.
 
 ## Исходники
 

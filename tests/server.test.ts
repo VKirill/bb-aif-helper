@@ -6,6 +6,7 @@ import plugin, { cardDirective } from '../server.ts';
 import { snapshot } from './fixtures.ts';
 import { workflowActions } from '../workflow.ts';
 import { VERSION_TTL } from '../versions.ts';
+import { nativePlanInput } from '../basic-workflow.ts';
 
 async function setup() {
   let value = snapshot(); value.actions = workflowActions(value);
@@ -14,26 +15,58 @@ async function setup() {
   let pending = 0;
   let output: string | null = null;
   let events: any[] = [];
+  let eventsFailure = false;
+  let eventsHook = () => {};
   let collections = 0;
   let collectBlock: Promise<void> | null = null;
   let collectFailure = false;
+  let collectHook: ((input: any) => ReturnType<typeof snapshot>) | null = null;
+  let planSupported = true;
+  const savedPlans: any[] = [];
+  const verifiedPlans: any[] = [];
+  let saveFailure = false;
   const hostInputs: any[] = [];
   let thread = makeThreadResponse({ id: 'thr_test', projectId: 'proj_test', environmentId: 'env_test', status: 'idle', runtime: { displayStatus: 'idle' } });
   const h = createFakePluginHost({ pluginId: 'aif-chat', agentSkillIds: ['aif-chat'], experimental_hostEntry: true,
     sdk: {
-      threads: { get: async () => thread, events: { list: async (args: any) => { assert(Number(args.limit) <= 100); return events; } }, output: async () => ({ output }), send: async () => { sends++; if (failSend) throw new Error('lost connection'); return {} as any; }, interactions: { list: async () => Array.from({ length: pending }, () => ({})) as any } },
+      providers: { list: async () => [{ id: thread.providerId, composerActions: planSupported
+        ? [{ kind: 'plan', command: { trigger: '/', name: 'plan', trailingText: ' ' } }] : [] }] as any },
+      threads: { get: async () => thread, events: { list: async (args: any) => { assert(Number(args.limit) <= 100); eventsHook(); if (eventsFailure) throw new Error('history unavailable'); return events; } }, output: async () => ({ output }), send: async () => { sends++; if (failSend) throw new Error('lost connection'); return {} as any; }, interactions: { list: async () => Array.from({ length: pending }, () => ({})) as any } },
       environments: { get: async () => ({ id: 'env_test', projectId: 'proj_test', path: '/project', hostId: 'host_test', status: 'ready', lifecycle: { phase: 'active' } }) as any },
     },
-    experimental_callHostRpc: async ({ input }) => { collections++; hostInputs.push(structuredClone(input)); if (collectBlock) await collectBlock; if (collectFailure) throw new Error('host unavailable'); return structuredClone(value); },
+    experimental_callHostRpc: async ({ method, input }) => {
+      if (method === 'savePlan') { if (saveFailure) throw new Error('disk unavailable'); savedPlans.push(structuredClone(input)); return { path: '.bb/aif-helper/plans/saved.md' }; }
+      if (method === 'markPlanVerified') { verifiedPlans.push(structuredClone(input)); return { path: (input as any).target, verified: true }; }
+      collections++; hostInputs.push(structuredClone(input)); if (collectBlock) await collectBlock; if (collectFailure) throw new Error('host unavailable'); return structuredClone(collectHook ? collectHook(input) : value);
+    },
   });
   await plugin(h.bb);
   return { ...h, get value() { return value; }, set value(v) { value = v; }, get sends() { return sends; },
-    get collections() { return collections; }, setCollectBlock(block: Promise<void> | null) { collectBlock = block; },
-    get hostInputs() { return hostInputs; }, setCollectFailure(fails: boolean) { collectFailure = fails; },
-    setEvents(rows: any[]) { events = rows; }, setOutput(text: string | null) { output = text; }, setQueued(count: number) { thread = { ...thread, queuedMessageCount: count }; },
+    get collections() { return collections; }, setCollectBlock(block: Promise<void> | null) { collectBlock = block; }, setCollectHook(hook: (input: any) => ReturnType<typeof snapshot>) { collectHook = hook; },
+    get hostInputs() { return hostInputs; }, get savedPlans() { return savedPlans; }, get verifiedPlans() { return verifiedPlans; }, setSaveFailure(value: boolean) { saveFailure = value; }, setCollectFailure(fails: boolean) { collectFailure = fails; }, setPlanSupported(value: boolean) { planSupported = value; },
+    setEvents(rows: any[]) { events = rows; }, setEventsFailure(fails: boolean) { eventsFailure = fails; }, setEventsHook(hook: () => void) { eventsHook = hook; }, setOutput(text: string | null) { output = text; }, setQueued(count: number) { thread = { ...thread, queuedMessageCount: count }; },
     setFailure(v: boolean) { failSend = v; }, setPending(v: number) { pending = v; }, setActive(v: boolean) { thread = { ...thread, status: v ? 'active' : 'idle', runtime: { displayStatus: v ? 'active' : 'idle' } }; } };
 }
 function runInput(fingerprint = 'a'.repeat(64)) { return { threadId: 'thr_test', target: '.ai-factory/plans/demo.md', phase: 'plan', fingerprint, actionId: 'improve', requestId: randomUUID() }; }
+
+test('2.22 commit boundaries also block a generic commit suggestion while coupling retains its explicit opt-in', async () => {
+  const h = await setup(); try {
+    h.value.versions.installed = '2.22.0'; h.value.worktree.hasUncommitted = true;
+    h.value.target!.settings = { commitStrategy: 'single-commit', methodology: 'tdd', tddGranularity: 'task-based' };
+    h.setOutput('$aif-commit');
+    const view = await h.harness.behavior.callRpc('suggestions', { threadId: 'thr_test' }) as any;
+    assert.equal(view.items[0].available, false); assert.match(view.items[0].reason, /aif-implement/);
+    await assert.rejects(h.harness.behavior.callRpc('runSuggestion', { threadId: 'thr_test', sourceKey: view.sourceKey,
+      fingerprint: view.fingerprint, commandId: 'aif-commit', requestId: randomUUID() }));
+    assert.equal(h.sends, 0);
+    h.setOutput('$aif-review +coupling --unsafe');
+    const coupling = await h.harness.behavior.callRpc('suggestions', { threadId: 'thr_test' }) as any;
+    assert.equal(coupling.items[0].command, '$aif-review +coupling --unsafe');
+    await h.harness.behavior.callRpc('runSuggestion', { threadId: 'thr_test', sourceKey: coupling.sourceKey,
+      fingerprint: coupling.fingerprint, commandId: 'aif-review', requestId: randomUUID() });
+    assert.equal((h.harness.inspection.sdk.callsTo('threads.send')[0][0] as any).input[0].text, '$aif-review +coupling --unsafe');
+  } finally { await h.harness.lifecycle.dispose(); }
+});
 
 test('version probes are cached for a day across force requests and plugin reload, then expire', async () => {
   const h = await setup(); let live = h.harness; let api = h.bb;
@@ -153,6 +186,20 @@ test('a live completed gate blocks unchanged checks across reload and re-enables
   } finally { await live.lifecycle.dispose(); }
 });
 
+test('a nonterminal gate remains a historical claim and never establishes a current-input baseline', async () => {
+  const h = await setup(); try {
+    h.value.inputsFingerprint = 'c'.repeat(64);
+    h.value.checks = [{ id: 'verify', label: 'Verify', state: 'notrun', path: null, detail: 'Missing', required: false }];
+    const text = gateText({ status: 'pass', suggested_next: null, affected_files: ['.ai-factory/plans/demo.md'] }) + '\nSummary after gate.';
+    h.setEvents([{ seq: 31, createdAt: Date.now(), type: 'item/completed', data: { item: { type: 'agentMessage', text } } }]);
+    await h.harness.behavior.emitThreadEvent('thread.idle', { thread: makeThreadResponse({ id: 'thr_test' }), lastAssistantText: text });
+    const status = await h.harness.behavior.callRpc('status', { threadId: 'thr_test', force: true }) as any;
+    assert.equal(status.checks[0].chat.result.status, 'pass'); assert.equal(status.checks[0].chat.freshness, 'unknown');
+    assert.equal(status.actions.find((a: any) => a.id === 'check-verify').available, true);
+    assert.equal(h.sends, 0);
+  } finally { await h.harness.lifecycle.dispose(); }
+});
+
 test('old results and unavailable input hashes never lock repeat checks', async () => {
   const h = await setup(); try {
     h.value.inputsFingerprint = 'c'.repeat(64);
@@ -196,6 +243,34 @@ test('native status tool returns one directive and never dispatches a model', as
     assert.match(JSON.stringify(result), /previewDirective/); assert.equal(h.sends, 0);
   } finally { await h.harness.lifecycle.dispose(); }
 });
+
+test('only the latest issued card is current per thread, persists across reload and performs no project reads', async () => {
+  const h = await setup(); let live = h.harness;
+  const show = async () => {
+    const result = await live.behavior.runCli(['show', '--thread', 'thr_test', '--phase', 'explore']);
+    assert.equal(result.exitCode, 0);
+    return result.stdout!.match(/card="([^"]+)"/)![1];
+  };
+  try {
+    const first = await show();
+    assert.equal((await live.behavior.callRpc('cardVisibility', { threadId: 'thr_test', cardId: first }) as any).state, 'current');
+    // A suppressed output does not supersede the existing card.
+    h.setPending(1);
+    assert.equal((await live.behavior.runCli(['show', '--thread', 'thr_test'])).stdout, '');
+    h.setPending(0);
+    assert.equal((await live.behavior.callRpc('cardVisibility', { threadId: 'thr_test', cardId: first }) as any).state, 'current');
+    const latest = await show(); assert.notEqual(first, latest);
+    const scans = h.collections;
+    assert.equal((await live.behavior.callRpc('cardVisibility', { threadId: 'thr_test', cardId: first }) as any).state, 'superseded');
+    assert.equal((await live.behavior.callRpc('cardVisibility', { threadId: 'thr_other', cardId: latest }) as any).state, 'hidden');
+    live = (await live.lifecycle.reload(plugin)).harness;
+    assert.equal((await live.behavior.callRpc('cardVisibility', { threadId: 'thr_test', cardId: latest }) as any).state, 'current');
+    assert.equal((await live.behavior.callRpc('cardVisibility', { threadId: 'thr_test', cardId: first }) as any).state, 'superseded');
+    assert.equal(h.collections, scans); assert.equal(h.sends, 0);
+    await live.behavior.emitThreadEvent('thread.deleted', { thread: makeThreadResponse({ id: 'thr_test' }) });
+    assert.equal((await live.behavior.callRpc('cardVisibility', { threadId: 'thr_test', cardId: latest }) as any).state, 'hidden');
+  } finally { await live.lifecycle.dispose(); }
+});
 test('button sends exactly to selected thread with current plan and no permission/model override', async () => {
   const h = await setup(); try {
     await h.harness.behavior.callRpc('run', runInput()); assert.equal(h.sends, 1);
@@ -216,7 +291,8 @@ test('basic exploration and installation are click-only scoped prompts without i
       h.value = snapshot({ configured: false, profile: 'none', phase: 'unknown', target: null, candidates: [], skills: [] });
       const view = await h.harness.behavior.callRpc('status', { threadId: 'thr_test', force: true }) as any;
       assert.equal(h.sends, 0);
-      const input = { ...runInput(view.fingerprint), phase: 'unknown', target: '', actionId };
+      const input = { ...runInput(view.fingerprint), phase: 'unknown', target: '', actionId,
+        ...(actionId === 'basic-explore' ? { researchTask: 'Почему форма отклоняет завтрашнюю дату?' } : {}) };
       h.setPending(1); await assert.rejects(h.harness.behavior.callRpc('run', input)); h.setPending(0);
       h.setActive(true); await assert.rejects(h.harness.behavior.callRpc('run', input)); h.setActive(false);
       await h.harness.behavior.callRpc('run', input);
@@ -224,11 +300,257 @@ test('basic exploration and installation are click-only scoped prompts without i
       assert(sent.input[0].text.startsWith('BB AIF Helper:'));
       assert.equal(sent.input[1].visibility, 'agent-only');
       if (actionId === 'basic-explore') {
+        assert.match(sent.input[0].text, /Задача для исследования:\nПочему форма отклоняет завтрашнюю дату\?/);
         assert.match(sent.input[1].text, /Исследуй текущую задачу/); assert(!sent.input[1].text.includes('npm install'));
       } else assert.match(sent.input[1].text, /ai-factory init --agents codex-app/);
       assert.equal(h.sends, 1);
     } finally { await h.harness.lifecycle.dispose(); }
   }
+});
+
+test('a stale stored basic selection is cleared, does not choose a different plan and stays cleared after reload/show', async () => {
+  const h = await setup(); let live = h.harness;
+  try {
+    const deleted = '.bb/aif-helper/plans/deleted.md';
+    const other = { path: '.bb/aif-helper/plans/other.md', id: 'other', title: 'Other', kind: 'basic' as const, tasks: [{ id: '1', title: 'Work', done: false }] };
+    const base = snapshot({ configured: false, profile: 'none', target: other, candidates: [{ ...other }], skills: [], phase: 'unknown' });
+    h.setCollectHook(input => input.target ? snapshot({ ...base, target: null, selectionReset: true, diagnostics: ['Ранее выбранный план не найден; выбор сброшен.'] }) : base);
+    await h.bb.storage.kv.set('selection:thr_test', { environmentId: 'env_test', target: deleted, phase: 'explore' });
+    await h.bb.storage.kv.set('chat-plan:thr_test', { environmentId: 'env_test', root: '/project', seq: 1, hash: 'a'.repeat(64), title: 'Old task', text: '# Old task' });
+    const recovered = await live.behavior.callRpc('status', { threadId: 'thr_test', force: true }) as any;
+    assert.equal(recovered.profile, 'none'); assert.equal(recovered.selectionReset, true); assert.equal(recovered.target, null);
+    assert.equal(recovered.chatPlan, undefined);
+    assert(recovered.actions.some((a: any) => a.id === 'basic-explore')); assert(recovered.actions.some((a: any) => a.id === 'basic-plan'));
+    assert.equal(h.hostInputs[0].target, deleted); assert.equal(h.hostInputs[1].target, '');
+    assert.equal((await h.bb.storage.kv.get<any>('selection:thr_test'))!.target, '');
+    const shown = await live.behavior.runCli(['show', '--thread', 'thr_test', '--target', deleted, '--phase', 'explore']);
+    assert.equal(shown.exitCode, 0); assert(!shown.stdout.includes(deleted));
+    assert.equal((await h.bb.storage.kv.get<any>('selection:thr_test'))!.target, '');
+    live = (await live.lifecycle.reload(plugin)).harness;
+    const persisted = await live.behavior.callRpc('status', { threadId: 'thr_test' }) as any;
+    assert.equal(persisted.profile, 'none'); assert.equal(persisted.target, null);
+    assert.equal(h.sends, 0); assert.equal(h.savedPlans.length, 0);
+  } finally { await live.lifecycle.dispose(); }
+});
+
+test('an archived native selection clears persistently, enables sync and retains the missing commit skill guard', async () => {
+  const h = await setup(); let live = h.harness;
+  try {
+    const archived = 'openspec/changes/archive/2026-11-14-demo/tasks.md';
+    const other = { path: 'openspec/changes/other/tasks.md', id: 'other', title: 'Other', kind: 'openspec' as const, tasks: [{ id: '1', title: 'Other work', done: false }] };
+    const base = snapshot({ configured: true, profile: 'aifhub-openspec', target: other, candidates: [{ ...other }], skills: ['aif-mode'], phase: 'done' });
+    h.setCollectHook(input => input.target ? snapshot({ ...base, target: null, selectionReset: true, diagnostics: ['Выбранный change найден в архиве; выбор сброшен.'] }) : base);
+    await h.bb.storage.kv.set('selection:thr_test', { environmentId: 'env_test', target: archived, phase: 'done' });
+    h.setOutput('Далее: `$aif-mode sync`, затем `$aif-commit`.');
+    const view = await live.behavior.callRpc('suggestions', { threadId: 'thr_test' }) as any;
+    assert.equal(view.items[0].command, '$aif-mode sync'); assert.equal(view.items[0].available, true);
+    assert.equal(view.items[1].available, false); assert.match(view.items[1].reason, /aif-commit не установлена/);
+    const selected = await h.bb.storage.kv.get<any>('selection:thr_test');
+    assert.equal(selected.target, ''); assert.equal(selected.newTask, true);
+    const shown = await live.behavior.runCli(['show', '--thread', 'thr_test', '--target', archived, '--phase', 'done']);
+    assert.equal(shown.exitCode, 0); assert(!shown.stdout.includes(archived));
+    live = (await live.lifecycle.reload(plugin)).harness;
+    const status = await live.behavior.callRpc('status', { threadId: 'thr_test' }) as any;
+    assert.equal(status.profile, 'aifhub-openspec'); assert.equal(status.target, null); assert.equal(status.phase, 'done');
+    const fresh = await live.behavior.callRpc('suggestions', { threadId: 'thr_test' }) as any;
+    await assert.rejects(live.behavior.callRpc('runSuggestion', suggestionInput(fresh, 'aif-commit')));
+    assert.equal(h.sends, 0);
+    await live.behavior.callRpc('runSuggestion', suggestionInput(fresh, 'aif-mode'));
+    assert.equal(h.sends, 1);
+    assert.deepEqual((live.inspection.sdk.callsTo('threads.send')[0][0] as any).input, [{ type: 'text', text: '$aif-mode sync', mentions: [] }]);
+  } finally { await live.lifecycle.dispose(); }
+});
+
+test('mark-verified writes only the selected completed basic plan and never starts an agent', async () => {
+  const h = await setup(); try {
+    const target = { path: '.bb/aif-helper/plans/demo.md', title: 'Demo', id: 'demo', kind: 'basic' as const,
+      verification: { contentHash: 'a'.repeat(64), verified: false }, tasks: [{ id: '1', title: 'Work', done: false }] };
+    h.value = snapshot({ configured: false, profile: 'none', target, candidates: [{ ...target }], skills: [] });
+    const args = ['mark-verified', '--thread', 'thr_test', '--target', target.path, '--json'];
+    assert.equal((await h.harness.behavior.runCli(args)).exitCode, 1); assert.equal(h.verifiedPlans.length, 0);
+    h.value.target!.tasks[0].done = true; h.setPending(1);
+    assert.equal((await h.harness.behavior.runCli(args)).exitCode, 1); assert.equal(h.verifiedPlans.length, 0);
+    h.setPending(0); h.setActive(true);
+    const result = await h.harness.behavior.runCli(args);
+    assert.equal(result.exitCode, 0); assert.equal(JSON.parse(result.stdout).verified, true);
+    assert.deepEqual(h.verifiedPlans[0], { root: '/project', target: target.path, expectedHash: 'a'.repeat(64) });
+    assert.equal(h.sends, 0);
+  } finally { await h.harness.lifecycle.dispose(); }
+});
+
+for (const wrapped of [true, false]) test(`a ${wrapped ? 'wrapped' : 'standalone'} plan is saved only after generation, selects the file and supersedes an earlier inline form`, async () => {
+  const h = await setup(); try {
+    h.value = snapshot({ configured: false, profile: 'none', target: null, candidates: [], skills: [], phase: 'unknown' });
+    const text = '# Ready\n## Tasks\n- [ ] 1. Fix input\n## Проверки\nOffline only.';
+    const rows = [{ seq: 1, type: 'client/turn/requested', data: { input: [nativePlanInput('Составить план')] } },
+      { seq: 2, type: 'item/completed', data: { item: { type: 'agentMessage', text: (wrapped ? '<proposed_plan>\n' : '') + '````aif-plan\n' + text + '\n````' + (wrapped ? '\n</proposed_plan>' : '') } } }];
+    h.setEvents(rows); h.setActive(true);
+    const oldId = '11111111-1111-4111-8111-111111111111';
+    await h.bb.storage.kv.set('inline-card:thr_test', { cardId: oldId, environmentId: 'env_test' });
+    const early = await h.harness.behavior.runCli(['show', '--thread', 'thr_test', '--phase', 'plan']);
+    assert.equal(early.stdout, ''); assert.equal(h.savedPlans.length, 0);
+    assert.equal(await h.harness.behavior.callRpc('planDocument', { threadId: 'thr_test', text }), null);
+    h.setActive(false);
+    assert.equal(await h.harness.behavior.callRpc('planDocument', { threadId: 'thr_test', text: text + 'changed' }), null);
+    const saved = await h.harness.behavior.callRpc('planDocument', { threadId: 'thr_test', text }) as any;
+    assert.equal(saved.path, '.bb/aif-helper/plans/saved.md'); assert.equal(h.savedPlans.length, 1);
+    assert.equal(h.savedPlans[0].text, text); assert.equal(h.sends, 0);
+    assert.deepEqual(await h.harness.behavior.callRpc('cardVisibility', { threadId: 'thr_test', cardId: oldId }), { state: 'superseded' });
+    assert.equal((await h.bb.storage.kv.get<any>('selection:thr_test'))!.target, saved.path);
+    await h.harness.behavior.callRpc('planDocument', { threadId: 'thr_test', text });
+    assert.equal(h.savedPlans.length, 1);
+    const retry = await h.harness.behavior.runCli(['save-plan', '--thread', 'thr_test', '--json']);
+    assert.equal(retry.exitCode, 0); assert.equal(JSON.parse(retry.stdout).path, saved.path);
+    assert.equal(h.savedPlans.length, 1); assert.equal(h.sends, 0);
+  } finally { await h.harness.lifecycle.dispose(); }
+});
+
+test('saving failures keep the proposal intact and retryable without execution', async () => {
+  const h = await setup(); try {
+    h.value = snapshot({ configured: false, profile: 'none', target: null, candidates: [], skills: [] });
+    const text = '# Ready\n## Tasks\n- [ ] Work';
+    h.setEvents([{ seq: 1, type: 'client/turn/requested', data: { input: [nativePlanInput('Составить план')] } },
+      { seq: 2, type: 'item/completed', data: { item: { type: 'agentMessage', text: '<proposed_plan>\n' + text + '\n</proposed_plan>' } } }]);
+    h.setSaveFailure(true);
+    await assert.rejects(h.harness.behavior.callRpc('planDocument', { threadId: 'thr_test', text }));
+    assert.equal(await h.bb.storage.kv.get('plan-document:thr_test'), undefined); assert.equal(h.sends, 0);
+    h.setSaveFailure(false);
+    assert(await h.harness.behavior.callRpc('planDocument', { threadId: 'thr_test', text }));
+    assert.equal(h.savedPlans.length, 1);
+  } finally { await h.harness.lifecycle.dispose(); }
+});
+
+test('a builtin Plan proposal enables normal execution, binds its contents and preserves accepted context after reload', async () => {
+  const h = await setup(); let live = h.harness;
+  try {
+    h.value = snapshot({ configured: false, profile: 'none', target: null, candidates: [], skills: [], phase: 'unknown' });
+    const text = '<proposed_plan>\n# Chat task\n1. Fix input.\n2. Test offline.\nNo push.\n</proposed_plan>\n::aif-chat{phase="plan"}';
+    const rows = [{ seq: 1, type: 'client/turn/requested', data: { input: [nativePlanInput('Составить план')] } },
+      { seq: 2, type: 'item/completed', data: { item: { type: 'agentMessage', text } } }];
+    h.setEvents(rows);
+    const view = await live.behavior.callRpc('status', { threadId: 'thr_test', phase: 'plan' }) as any;
+    assert.equal(view.chatPlan.title, 'Chat task'); assert.equal(view.chatPlan.accepted, false); assert.equal(h.sends, 0);
+    assert.equal(view.actions.find((a: any) => a.id === 'basic-implement').label, 'Выполнить предложенный план');
+    const input = { ...runInput(view.fingerprint), target: '', phase: 'plan', actionId: 'basic-implement' };
+    h.setActive(true); await assert.rejects(live.behavior.callRpc('run', input)); h.setActive(false);
+    const result = await live.behavior.callRpc('run', input) as any;
+    assert.equal(result.newTask, true);
+    const sent = live.inspection.sdk.callsTo('threads.send')[0][0] as any;
+    assert.equal(sent.input[0].text, 'BB AIF Helper: Выполнить предложенный план');
+    assert.deepEqual(sent.input[0].mentions, []); assert(!sent.input[0].text.startsWith('/plan'));
+    assert.match(sent.input[1].text, /No push/); assert.match(sent.input[1].text, /SHA-256/);
+    assert.equal(h.sends, 1);
+    h.setEvents([...rows, { seq: 3, type: 'client/turn/requested', data: { input: sent.input } }]);
+    live = (await live.lifecycle.reload(plugin)).harness;
+    const follow = await live.behavior.callRpc('status', { threadId: 'thr_test' }) as any;
+    assert.equal(follow.chatPlan.accepted, true); assert.equal(follow.phase, 'implement');
+    assert(follow.actions.some((a: any) => a.id === 'basic-verify'));
+    assert.equal(follow.target, null); assert.equal(follow.checks.length, 0);
+    const done = await live.behavior.callRpc('status', { threadId: 'thr_test', phase: 'done' }) as any;
+    assert(done.actions.some((a: any) => a.id === 'basic-explore'));
+    await live.behavior.callRpc('run', { ...runInput(done.fingerprint), target: '', phase: 'done', actionId: 'basic-explore', researchTask: 'Next task' });
+    const nextTask = await live.behavior.callRpc('status', { threadId: 'thr_test' }) as any;
+    assert.equal(nextTask.chatPlan, undefined); assert.equal(nextTask.phase, 'explore');
+  } finally { await live.lifecycle.dispose(); }
+});
+
+test('a proposed chat plan cannot dispatch after a new user request or a changed version', async () => {
+  for (const changed of [false, true]) {
+    const h = await setup(); try {
+      h.value = snapshot({ configured: false, profile: 'none', target: null, candidates: [], skills: [] });
+      const request = { seq: 1, type: 'client/turn/requested', data: { input: [nativePlanInput('Составить план')] } };
+      const reply = { seq: 2, type: 'item/completed', data: { item: { type: 'agentMessage', text: '<proposed_plan>\n# Work\n1. Test.\n</proposed_plan>' } } };
+      h.setEvents([request, reply]);
+      const view = await h.harness.behavior.callRpc('status', { threadId: 'thr_test', phase: 'plan' }) as any;
+      h.setEvents(changed ? [request, { ...reply, seq: 3 }] : [request, reply, { ...request, seq: 3 }]);
+      await assert.rejects(h.harness.behavior.callRpc('run', { ...runInput(view.fingerprint), target: '', phase: 'plan', actionId: 'basic-implement' }));
+      assert.equal(h.sends, 0); assert.equal(await h.bb.storage.kv.get('chat-plan:thr_test'), undefined);
+    } finally { await h.harness.lifecycle.dispose(); }
+  }
+});
+
+test('a new exploration releases the completed basic plan only after dispatch and survives reload', async () => {
+  const h = await setup(); let live = h.harness;
+  try {
+    const target = { path: '.bb/aif-helper/plans/finished.md', title: 'Finished', id: 'finished', kind: 'basic' as const,
+      tasks: [{ id: '1', title: 'Done', done: true }] };
+    h.value = snapshot({ configured: false, profile: 'none', target, candidates: [{ ...target }], skills: [], phase: 'unknown' });
+    const view = await live.behavior.callRpc('status', { threadId: 'thr_test', target: target.path, phase: 'done' }) as any;
+    assert(view.actions.some((a: any) => a.label === 'Исследовать новую задачу')); assert.equal(h.sends, 0);
+    const request = { ...runInput(view.fingerprint), target: target.path, phase: 'done', actionId: 'basic-explore', researchTask: 'Исследовать #16' };
+    h.setActive(true); await assert.rejects(live.behavior.callRpc('run', request)); h.setActive(false);
+    assert.equal(await h.bb.storage.kv.get('selection:thr_test'), undefined);
+    const result = await live.behavior.callRpc('run', request) as any;
+    assert.equal(result.newTask, true); assert.equal(h.sends, 1);
+    const sent = live.inspection.sdk.callsTo('threads.send')[0][0] as any;
+    assert.match(sent.input[0].text, /Исследовать #16/); assert(!sent.input[1].text.includes(target.path));
+    assert.match(sent.input[1].text, /"target":null/);
+    const follow = await live.behavior.callRpc('status', { threadId: 'thr_test' }) as any;
+    assert.equal(follow.target, null); assert.equal(follow.phase, 'explore'); assert.equal(follow.candidates[0].path, target.path);
+    assert(follow.actions.some((a: any) => a.id === 'basic-plan')); assert.equal(h.value.target!.tasks[0].done, true);
+    live = (await live.lifecycle.reload(plugin)).harness;
+    const restored = await live.behavior.callRpc('status', { threadId: 'thr_test' }) as any;
+    assert.equal(restored.target, null); assert.equal(restored.phase, 'explore'); assert.equal(restored.fingerprint, follow.fingerprint);
+    const selected = await live.behavior.callRpc('status', { threadId: 'thr_test', target: target.path }) as any;
+    assert.equal(selected.target.path, target.path);
+  } finally { await live.lifecycle.dispose(); }
+});
+
+test('basic planning enters native Plan with a builtin pill and refinement uses the same mode', async () => {
+  for (const refine of [false, true]) {
+    const h = await setup(); try {
+      const target = refine ? { path: '.bb-aif-helper/plans/demo.md', title: 'Demo', id: 'demo', kind: 'basic' as const, tasks: [{ id: '1', title: 'Work', done: false }] } : null;
+      h.value = snapshot({ configured: false, profile: 'none', skills: [], target, candidates: target ? [{ ...target }] : [], phase: 'unknown' });
+      const view = await h.harness.behavior.callRpc('status', { threadId: 'thr_test' }) as any;
+      const request = { ...runInput(view.fingerprint), phase: 'unknown', target: target?.path ?? '', actionId: 'basic-plan' };
+      await h.harness.behavior.callRpc('run', request);
+      const sent = h.harness.inspection.sdk.callsTo('threads.send')[0][0] as any;
+      assert.equal(sent.input[0].text, '/plan ' + (refine ? 'Уточнить план' : 'Составить план'));
+      assert.deepEqual(sent.input[0].mentions, [{ start: 0, end: 5, resource: {
+        kind: 'command', trigger: '/', name: 'plan', source: 'command', origin: 'builtin', label: 'plan', argumentHint: null,
+      } }]);
+      assert.match(sent.input[1].text, /штатном режиме Plan/);
+      assert(!sent.input[1].text.includes('Иначе создай новый')); assert(!sent.input[1].text.includes('aif_chat_status'));
+      assert.equal(h.harness.inspection.sdk.callsTo('threads.update').length, 0);
+      assert.equal(sent.permissionMode, undefined); assert.equal(h.sends, 1);
+    } finally { await h.harness.lifecycle.dispose(); }
+  }
+});
+
+test('an unsupported Plan provider never falls back to file-writing and leaves dispatch retryable', async () => {
+  const h = await setup(); try {
+    h.value = snapshot({ configured: false, profile: 'none', skills: [], target: null, candidates: [], phase: 'unknown' });
+    const view = await h.harness.behavior.callRpc('status', { threadId: 'thr_test' }) as any;
+    const request = { ...runInput(view.fingerprint), phase: 'unknown', target: '', actionId: 'basic-plan' };
+    h.setPlanSupported(false);
+    await assert.rejects(h.harness.behavior.callRpc('run', request), /не объявляет штатный режим Plan/);
+    assert.equal(h.sends, 0);
+    assert.equal(await h.bb.storage.kv.get('deliveries:thr_test'), undefined);
+    h.setPlanSupported(true); await h.harness.behavior.callRpc('run', request);
+    assert.equal(h.sends, 1);
+  } finally { await h.harness.lifecycle.dispose(); }
+});
+
+test('basic exploration requires a bounded description and sends it literally with the read-only prompt', async () => {
+  const h = await setup(); try {
+    h.value = snapshot({ configured: false, profile: 'none', target: null, candidates: [], skills: [] });
+    const view = await h.harness.behavior.callRpc('status', { threadId: 'thr_test', phase: 'unknown' }) as any;
+    const input = { ...runInput(view.fingerprint), target: '', phase: 'unknown', actionId: 'basic-explore' };
+    await assert.rejects(h.harness.behavior.callRpc('run', input), /Опишите/);
+    for (const researchTask of ['', ' \n ', 'x'.repeat(4001)]) {
+      await assert.rejects(h.harness.behavior.callRpc('run', { ...input, researchTask }));
+    }
+    await assert.rejects(h.harness.behavior.callRpc('run', { ...input, actionId: 'basic-plan', researchTask: 'Задача' }), /только для кнопки/);
+    assert.equal(h.sends, 0);
+    const task = 'Исследовать #213\nПроверить `before_or_equal:today` и форму.';
+    await h.harness.behavior.callRpc('run', { ...input, researchTask: `  ${task}\n ` });
+    const sent = h.harness.inspection.sdk.callsTo('threads.send')[0][0] as any;
+    assert.equal(sent.input[0].text, `BB AIF Helper: Исследовать задачу\n\nЗадача для исследования:\n${task}`);
+    assert.equal(sent.input[0].visibility, undefined);
+    assert.equal(sent.input[1].visibility, 'agent-only');
+    assert.match(sent.input[1].text, /не меняй код, конфигурацию и планы/);
+    assert.equal(h.sends, 1);
+  } finally { await h.harness.lifecycle.dispose(); }
 });
 
 test('basic advancement obeys the last gate and cannot execute without its selected plan', async () => {
@@ -296,6 +618,53 @@ test('active work or pending questions prevent a second workflow launch', async 
     await assert.rejects(h.harness.behavior.callRpc('run', runInput())); assert.equal(h.sends, 0);
   } finally { await h.harness.lifecycle.dispose(); }
 });
+
+test('plain exploration confirmation suppresses a new card and blocks both dispatch paths until the next user turn', async () => {
+  const h = await setup(); try {
+    const text = 'Предлагаю исследовать ограничения формы и сервера. Подтверждаете такой объём?\nПосле исследования — $aif-plan.';
+    h.setOutput(text);
+    const question = { seq: 10, type: 'item/completed', data: { item: { type: 'agentMessage', text } } };
+    h.setEvents([question]);
+    const value = await h.harness.behavior.callRpc('status', { threadId: 'thr_test', phase: 'explore' }) as any;
+    assert.equal(value.pendingConfirmation, true); assert.equal(value.pendingQuestions, 0); assert.equal(value.threadState, 'awaiting_input');
+    const show = await h.harness.behavior.runCli(['show', '--thread', 'thr_test', '--phase', 'explore', '--json']);
+    assert.equal(JSON.parse(show.stdout!).previewDirective, '');
+    await assert.rejects(h.harness.behavior.callRpc('run', runInput()), /подтверждения/);
+    const suggestion = await h.harness.behavior.callRpc('suggestions', { threadId: 'thr_test' }) as any;
+    assert.equal(suggestion.threadState, 'awaiting_input');
+    await assert.rejects(h.harness.behavior.callRpc('runSuggestion', { threadId: 'thr_test', sourceKey: suggestion.sourceKey,
+      fingerprint: suggestion.fingerprint, commandId: 'aif-plan', requestId: randomUUID() }), /подтверждения/);
+    assert.equal(h.sends, 0);
+    // Clearing the wait does not approve or execute anything by itself.
+    h.setEvents([{ seq: 11, type: 'client/turn/requested', data: { input: [{ type: 'text', text: 'Нет, изменим объём.' }] } }, question]);
+    const answered = await h.harness.behavior.callRpc('status', { threadId: 'thr_test', phase: 'explore' }) as any;
+    assert.equal(answered.pendingConfirmation, false); assert.equal(answered.threadState, 'idle'); assert.equal(h.sends, 0);
+    const shown = await h.harness.behavior.runCli(['show', '--thread', 'thr_test', '--phase', 'explore']);
+    assert.match(shown.stdout!, /^::aif-chat/);
+  } finally { await h.harness.lifecycle.dispose(); }
+});
+
+test('confirmation is checked during dispatch even when a card was loaded before the question', async () => {
+  const h = await setup(); try {
+    await h.harness.behavior.callRpc('status', { threadId: 'thr_test' });
+    h.setEvents([{ seq: 5, type: 'item/completed', data: { item: { type: 'agentMessage', text: 'Жду подтверждения.' } } }]);
+    await assert.rejects(h.harness.behavior.callRpc('run', runInput()), /подтверждения/);
+    h.setEventsFailure(true);
+    await assert.rejects(h.harness.behavior.callRpc('run', runInput()), /проверить ожидание подтверждения/);
+    assert.equal(h.sends, 0);
+  } finally { await h.harness.lifecycle.dispose(); }
+});
+
+test('a confirmation appearing during the rest of the fresh status read still prevents dispatch', async () => {
+  const h = await setup(); try {
+    let reads = 0;
+    h.setEventsHook(() => {
+      if (++reads === 2) h.setEvents([{ seq: 8, type: 'item/completed', data: { item: { type: 'agentMessage', text: 'Подтверждаете такой объём?' } } }]);
+    });
+    await assert.rejects(h.harness.behavior.callRpc('run', runInput()), /подтверждения/);
+    assert.equal(h.sends, 0);
+  } finally { await h.harness.lifecycle.dispose(); }
+});
 test('concurrent duplicate clicks and request replay do not dispatch twice', async () => {
   const h = await setup(); try {
     const input = runInput();
@@ -360,6 +729,174 @@ test('extension update dispatch uses the supported command and includes ordered 
 function suggestionInput(view: any, commandId = 'aif-plan') {
   return { threadId: 'thr_test', sourceKey: view.sourceKey, fingerprint: view.fingerprint, commandId, requestId: randomUUID() };
 }
+
+const improveQuestion = 'Для `demo` подготовлен diff уточнения задач.\n**Применить этот diff к `design.md` и `tasks.md`?**\nПлан и код сохранены. После применения доступен `$aif-implement`.';
+
+test('OpenSpec without a SessionBrief returns JSON-safe status and suggestions without an undefined field', async () => {
+  const h = await setup(); try {
+    h.value = snapshot({ profile: 'aifhub-openspec', target: { path: 'openspec/changes/demo/tasks.md', id: 'demo', title: 'Demo', kind: 'openspec',
+      tasks: [{ id: '1', title: 'Work', done: false }] } });
+    const status = await h.harness.behavior.callRpc('status', { threadId: 'thr_test', phase: 'plan' }) as any;
+    assert.equal(Object.hasOwn(status, 'sessionBrief'), false);
+    assert.equal(status.pendingConfirmation, false);
+    h.setOutput('$aif-improve demo');
+    const suggestions = await h.harness.behavior.callRpc('suggestions', { threadId: 'thr_test' }) as any;
+    assert.equal(suggestions.items[0].available, true); assert.equal(h.sends, 0);
+  } finally { await h.harness.lifecycle.dispose(); }
+});
+
+test('a stale SessionBrief survives reload and offers scoped CLI recovery without allowing implementation', async () => {
+  const h = await setup(); let live = h.harness;
+  try {
+    h.value.profile = 'aifhub-openspec'; h.value.target!.kind = 'openspec';
+    h.value.extensions = [{ name: 'aifhub-extension', installedVersion: '1.8.1', recordedVersion: '1.8.1', source: 'local', state: 'present', contributions: [], commands: ['aifhub-session-brief'] }];
+    const stale = 'Задача заблокирована: **SessionBrief: stale**.\n`/aif-mode sync --change demo`\n`ai-factory aifhub-session-brief compile --change demo --json`\nПовторный `$aif-implement`.';
+    h.setOutput(stale);
+    h.setEvents([{ seq: 2, type: 'item/completed', data: { item: { type: 'agentMessage', text: stale } } }]);
+    const status = await live.behavior.callRpc('status', { threadId: 'thr_test' }) as any;
+    assert.equal(status.sessionBrief.status, 'stale');
+    assert.equal(status.actions.find((a: any) => a.id === 'implement').available, false);
+    await assert.rejects(live.behavior.callRpc('run', { ...runInput(status.fingerprint), phase: 'unknown', actionId: 'implement' }), /SessionBrief/);
+    const view = await live.behavior.callRpc('suggestions', { threadId: 'thr_test' }) as any;
+    assert.equal(view.items.find((a: any) => a.id === 'aif-mode').command, '$aif-mode sync --change demo');
+    assert.equal(view.items.find((a: any) => a.id === 'aif-implement').available, false);
+    const compile = view.items.find((a: any) => a.id === 'aif-session-brief');
+    assert.equal(compile.available, true); assert(!compile.command.startsWith('$'));
+    await live.behavior.callRpc('runSuggestion', suggestionInput(view, 'aif-session-brief'));
+    const sent = live.inspection.sdk.callsTo('threads.send')[0][0] as any;
+    assert.deepEqual(sent.input, [{ type: 'text', text: 'ai-factory aifhub-session-brief compile --change demo --json', mentions: [] }]);
+    h.setOutput('Команда завершилась с кодом 0.'); h.setEvents([]);
+    live = (await live.lifecycle.reload(plugin)).harness;
+    const persisted = await live.behavior.callRpc('status', { threadId: 'thr_test' }) as any;
+    assert.equal(persisted.sessionBrief.status, 'stale');
+    h.setEvents([{ seq: 3, type: 'client/turn/requested', data: { input: [{ type: 'text', text: 'ai-factory aifhub-session-brief status --change demo --json' }] } },
+      { seq: 4, type: 'item/completed', data: { item: { type: 'agentMessage', text: 'SessionBrief demo пересобран; повторная проверка подтвердила valid, без stale/blocker причин.' } } }]);
+    const restored = await live.behavior.callRpc('status', { threadId: 'thr_test' }) as any;
+    assert.equal(restored.sessionBrief.status, 'valid');
+    assert.equal(restored.actions.find((a: any) => a.id === 'implement').available, true);
+    assert.equal(h.sends, 1);
+  } finally { await live.lifecycle.dispose(); }
+});
+
+test('SessionBrief CLI suggestions reject a different change and missing extension command', async () => {
+  const h = await setup(); try {
+    h.value.profile = 'aifhub-openspec'; h.value.target!.kind = 'openspec';
+    h.setOutput('`ai-factory aifhub-session-brief compile --change other --json`');
+    const other = await h.harness.behavior.callRpc('suggestions', { threadId: 'thr_test' }) as any;
+    assert.equal(other.items[0].available, false);
+    await assert.rejects(h.harness.behavior.callRpc('runSuggestion', suggestionInput(other, 'aif-session-brief')));
+    h.setOutput('`ai-factory aifhub-session-brief compile --change demo --json`');
+    const missing = await h.harness.behavior.callRpc('suggestions', { threadId: 'thr_test' }) as any;
+    assert.equal(missing.items[0].available, false); assert.equal(h.sends, 0);
+  } finally { await h.harness.lifecycle.dispose(); }
+});
+
+test('gate writer is offered before verify and dispatches the exact CLI once without claiming evidence', async () => {
+  for (const from of ['<rules-output.md>', '".bb/chats/rules output.md"']) {
+    const h = await setup(); try {
+      h.value.profile = 'aifhub-openspec'; h.value.target!.kind = 'openspec';
+      h.value.extensions = [{ name: 'aifhub-extension', installedVersion: '1.8.1', recordedVersion: '1.8.1', state: 'present', source: 'local', contributions: [], commands: ['aifhub-write-gate-evidence'] }];
+      h.value.skills.push('aif-verify');
+      const command = 'ai-factory aifhub-write-gate-evidence --change demo --gate rules --from ' + from;
+      h.setOutput('Сохраните результат writer, затем `$aif-verify demo`:\n```text\n' + command + '\n```');
+      const view = await h.harness.behavior.callRpc('suggestions', { threadId: 'thr_test' }) as any;
+      assert.deepEqual(view.items.map((i: any) => i.id), ['aif-gate-evidence', 'aif-verify']);
+      const writer = view.items[0];
+      assert.equal(writer.available, true); assert.equal(writer.command, command);
+      assert.equal(writer.label.includes('уточнить файл'), from.startsWith('<')); assert.equal(h.sends, 0);
+      const input = suggestionInput(view, 'aif-gate-evidence');
+      await Promise.all([h.harness.behavior.callRpc('runSuggestion', input), h.harness.behavior.callRpc('runSuggestion', input)]);
+      assert.equal(h.sends, 1);
+      assert.deepEqual((h.harness.inspection.sdk.callsTo('threads.send')[0][0] as any).input,
+        [{ type: 'text', text: command, mentions: [] }]);
+      assert.deepEqual((await h.harness.behavior.callRpc('suggestions', { threadId: 'thr_test' }) as any).items.map((i: any) => i.id), ['aif-verify']);
+      assert(h.value.checks.every(c => c.state !== 'reported-pass'));
+    } finally { await h.harness.lifecycle.dispose(); }
+  }
+});
+
+test('gate writer requires the installed command, exact selected change and a current idle request', async () => {
+  const h = await setup(); try {
+    h.value.profile = 'aifhub-openspec'; h.value.target!.kind = 'openspec';
+    const command = 'ai-factory aifhub-write-gate-evidence --change demo --gate rules --from out.md';
+    h.setOutput('`' + command + '`');
+    const read = () => h.harness.behavior.callRpc('suggestions', { threadId: 'thr_test' }) as Promise<any>;
+    const missing = await read(); assert.equal(missing.items[0].available, false);
+    await assert.rejects(h.harness.behavior.callRpc('runSuggestion', suggestionInput(missing, 'aif-gate-evidence')));
+    h.value.extensions = [{ name: 'aifhub-extension', installedVersion: '1.8.1', recordedVersion: '1.8.1', state: 'present', source: 'local', contributions: [], commands: ['aifhub-write-gate-evidence'] }];
+    await h.harness.behavior.callRpc('status', { threadId: 'thr_test', force: true });
+    h.setOutput('`' + command.replace('--change demo', '--change other') + '`');
+    const other = await read(); assert.equal(other.items[0].available, false);
+    await assert.rejects(h.harness.behavior.callRpc('runSuggestion', suggestionInput(other, 'aif-gate-evidence')));
+    h.setOutput('`' + command + '`'); const ready = await read(); assert.equal(ready.items[0].available, true);
+    h.setActive(true);
+    await assert.rejects(h.harness.behavior.callRpc('runSuggestion', suggestionInput(ready, 'aif-gate-evidence')));
+    h.setActive(false); h.setOutput('Новый ответ без команды.');
+    await assert.rejects(h.harness.behavior.callRpc('runSuggestion', suggestionInput(ready, 'aif-gate-evidence')));
+    h.setOutput('`$aif-gate-evidence`'); assert.equal((await read()).items[0].available, false);
+    assert.equal(h.sends, 0);
+  } finally { await h.harness.lifecycle.dispose(); }
+});
+
+function improveEvents(seq = 1, text = improveQuestion, launch = '/aif-improve demo') {
+  return [{ seq, type: 'client/turn/requested', data: { input: [{ type: 'text', text: launch }] } },
+    { seq: seq + 1, type: 'item/completed', data: { item: { type: 'agentMessage', text } } }];
+}
+
+test('improve apply-all is explicit confirmation of one proposal, not a rerun or implementation', async () => {
+  const h = await setup(); try {
+    h.setOutput(improveQuestion); h.setEvents(improveEvents());
+    const view = await h.harness.behavior.callRpc('suggestions', { threadId: 'thr_test' }) as any;
+    const approval = view.items.find((item: any) => item.id === 'apply-improvements');
+    assert.equal(approval.label, 'Применить всё'); assert.equal(approval.available, true);
+    assert.equal(view.threadState, 'awaiting_input'); assert.equal(h.sends, 0);
+    await assert.rejects(h.harness.behavior.callRpc('runSuggestion', suggestionInput(view, 'aif-implement')), /подтверждения/);
+    const input = suggestionInput(view, 'apply-improvements');
+    await Promise.all([h.harness.behavior.callRpc('runSuggestion', input), h.harness.behavior.callRpc('runSuggestion', input)]);
+    assert.equal(h.sends, 1);
+    const sent = h.harness.inspection.sdk.callsTo('threads.send')[0][0] as any;
+    assert.deepEqual(sent.input, [{ type: 'text', text: approval.command, mentions: [] }]);
+    assert.match(sent.input[0].text, /выполнение плана не запускать/);
+    const after = await h.harness.behavior.callRpc('suggestions', { threadId: 'thr_test' }) as any;
+    assert(!after.items.some((item: any) => item.id === 'apply-improvements'));
+  } finally { await h.harness.lifecycle.dispose(); }
+});
+
+test('apply-all rejects changed files, answered questions and identical text from a later improve turn', async () => {
+  const h = await setup(); try {
+    h.setOutput(improveQuestion); h.setEvents(improveEvents());
+    const view = await h.harness.behavior.callRpc('suggestions', { threadId: 'thr_test' }) as any;
+    const input = suggestionInput(view, 'apply-improvements');
+    h.value.fingerprint = 'b'.repeat(64);
+    await assert.rejects(h.harness.behavior.callRpc('runSuggestion', input), /устарели/);
+    h.value.fingerprint = 'a'.repeat(64);
+    h.setEvents(improveEvents(10));
+    const newer = await h.harness.behavior.callRpc('suggestions', { threadId: 'thr_test' }) as any;
+    assert.notEqual(newer.sourceKey, view.sourceKey);
+    await assert.rejects(h.harness.behavior.callRpc('runSuggestion', input), /устарели/);
+    h.setEvents([...improveEvents(10), { seq: 12, type: 'client/turn/requested', data: { input: [{ type: 'text', text: 'Не применять' }] } }]);
+    const answered = await h.harness.behavior.callRpc('suggestions', { threadId: 'thr_test' }) as any;
+    assert(!answered.items.some((item: any) => item.id === 'apply-improvements')); assert.equal(h.sends, 0);
+  } finally { await h.harness.lifecycle.dispose(); }
+});
+
+test('apply-all preserves native questions, busy, missing skill and unknown-history guards', async () => {
+  const h = await setup(); try {
+    h.setOutput(improveQuestion); h.setEvents(improveEvents());
+    const read = () => h.harness.behavior.callRpc('suggestions', { threadId: 'thr_test' }) as Promise<any>;
+    const first = await read();
+    h.setPending(1);
+    assert.equal((await read()).items[0].available, false);
+    await assert.rejects(h.harness.behavior.callRpc('runSuggestion', suggestionInput(first, 'apply-improvements')));
+    h.setPending(0); h.setActive(true); assert.equal((await read()).items[0].available, false);
+    h.setActive(false); h.setQueued(1); assert.equal((await read()).items[0].available, false);
+    h.setQueued(0); h.value.skills = h.value.skills.filter(skill => skill !== 'aif-improve');
+    const missing = await h.harness.behavior.callRpc('suggestions', { threadId: 'thr_test' }) as any;
+    await assert.rejects(h.harness.behavior.callRpc('runSuggestion', suggestionInput(missing, 'apply-improvements')));
+    h.setEventsFailure(true); assert(!(await read()).items.some((item: any) => item.id === 'apply-improvements'));
+    assert.equal(h.sends, 0);
+  } finally { await h.harness.lifecycle.dispose(); }
+});
 test('no commands in the last answer means no suggestions or host scans', async () => {
   const h = await setup(); try {
     h.setOutput('Completed.');
@@ -391,10 +928,64 @@ test('suggestion click sends only the selected skill once and preserves the shar
     await Promise.all([h.harness.behavior.callRpc('runSuggestion', input), h.harness.behavior.callRpc('runSuggestion', input)]);
     assert.equal(h.sends, 1);
     const call = JSON.stringify(h.harness.inspection.sdk.callsTo('threads.send')[0]);
-    assert.match(call, /thr_test/); assert.match(call, /\$aif-plan/); assert(!call.includes('unrelated shell text')); assert(!call.includes('full #177')); assert(!call.includes('permissionMode'));
+    assert.match(call, /thr_test/); assert.match(call, /\$aif-plan full #177/); assert(!call.includes('unrelated shell text')); assert(!call.includes('permissionMode'));
+    const sent = h.harness.inspection.sdk.callsTo('threads.send')[0][0] as any;
+    assert.deepEqual(sent.input, [{ type: 'text', text: '$aif-plan full #177', mentions: [] }]);
     const after = await h.harness.behavior.callRpc('suggestions', { threadId: 'thr_test' }) as any;
     assert.deepEqual(after.items.map((i: any) => i.id), ['aif-explore']);
   } finally { await h.harness.lifecycle.dispose(); }
+});
+
+test('Markdown invocation arguments reach the agent verbatim with no delimiters or hidden prompt', async () => {
+  for (const runtime of ['codex-app', 'claude']) {
+    const h = await setup(); try {
+      h.value.runtime = runtime;
+      h.setOutput('Далее `/aif-plan full "@.ai-factory/plans/my plan.md" #177`, затем `/aif-review`.');
+      const view = await h.harness.behavior.callRpc('suggestions', { threadId: 'thr_test' }) as any;
+      const command = (runtime === 'claude' ? '/' : '$') + 'aif-plan full "@.ai-factory/plans/my plan.md" #177';
+      assert.equal(view.items[0].command, command);
+      await h.harness.behavior.callRpc('runSuggestion', suggestionInput(view));
+      const sent = h.harness.inspection.sdk.callsTo('threads.send')[0][0] as any;
+      assert.deepEqual(sent.input, [{ type: 'text', text: command, mentions: [] }]);
+      assert.equal(h.sends, 1);
+    } finally { await h.harness.lifecycle.dispose(); }
+  }
+});
+
+test('a scoped fenced recommendation is offered and sends only its command after the fix reply', async () => {
+  for (const runtime of ['codex-app', 'claude']) {
+    const h = await setup(); try {
+      h.value.runtime = runtime;
+      const command = (runtime === 'claude' ? '/' : '$') + 'aif-implement 71-schedule-templates';
+      h.setOutput('Прогресс остаётся 10/15. Теперь можно вернуться к задаче 3.3:\n\n```text\n' + command + '\n```\n\n::aif-chat{phase="fix"}');
+      const view = await h.harness.behavior.callRpc('suggestions', { threadId: 'thr_test' }) as any;
+      assert.deepEqual(view.items.map((item: any) => item.command), [command]);
+      assert.equal(view.items[0].available, true); assert.equal(h.sends, 0);
+      await h.harness.behavior.callRpc('runSuggestion', suggestionInput(view, 'aif-implement'));
+      assert.deepEqual((h.harness.inspection.sdk.callsTo('threads.send')[0][0] as any).input,
+        [{ type: 'text', text: command, mentions: [] }]);
+      assert.equal(h.sends, 1);
+      assert.deepEqual((await h.harness.behavior.callRpc('suggestions', { threadId: 'thr_test' }) as any).items, []);
+    } finally { await h.harness.lifecycle.dispose(); }
+  }
+});
+
+test('prefix-free code recommendations become runtime-correct suggestions without extra prompt text', async () => {
+  for (const runtime of ['codex-app', 'claude']) {
+    const h = await setup(); try {
+      h.value.runtime = runtime;
+      h.setOutput('Задача заблокирована. Следующий шаг — `aif-fix 71-schedule-templates`. Коммит и push не выполнялись.\n\n::aif-chat{phase="implement"}');
+      const view = await h.harness.behavior.callRpc('suggestions', { threadId: 'thr_test' }) as any;
+      const command = (runtime === 'claude' ? '/' : '$') + 'aif-fix 71-schedule-templates';
+      assert.deepEqual(view.items.map((item: any) => item.command), [command]);
+      assert.equal(view.items[0].available, true); assert.equal(h.sends, 0);
+      await h.harness.behavior.callRpc('runSuggestion', suggestionInput(view, 'aif-fix'));
+      assert.deepEqual((h.harness.inspection.sdk.callsTo('threads.send')[0][0] as any).input,
+        [{ type: 'text', text: command, mentions: [] }]);
+      assert.deepEqual((await h.harness.behavior.callRpc('suggestions', { threadId: 'thr_test' }) as any).items, []);
+      assert.equal(h.sends, 1);
+    } finally { await h.harness.lifecycle.dispose(); }
+  }
 });
 
 test('slash finalization commands become runtime-correct suggestions and sync dispatch retains its subcommand', async () => {
@@ -499,7 +1090,7 @@ test('rules PASS with explanation and no command is accepted by suggestions RPC 
     assert.equal(view.gate.suggested_next.command, null); assert.deepEqual(view.items, []); assert.equal(h.sends, 0);
   } finally { await h.harness.lifecycle.dispose(); }
 });
-test('structured gate next step becomes a runtime-correct suggestion, with the reason and gate context', async () => {
+test('structured gate next step retains its displayed reason but dispatches only the command', async () => {
   const h = await setup(); try {
     h.setOutput(gateText());
     const view = await h.harness.behavior.callRpc('suggestions', { threadId: 'thr_test' }) as any;
@@ -509,12 +1100,30 @@ test('structured gate next step becomes a runtime-correct suggestion, with the r
     const sent = h.harness.inspection.sdk.callsTo('threads.send')[0][0] as any;
     const visible = sent.input.filter((part: any) => part.visibility !== 'agent-only');
     assert.deepEqual(visible.map((part: any) => part.text), ['$aif-commit']);
-    const hidden = sent.input.find((part: any) => part.visibility === 'agent-only');
-    assert.match(hidden.text, /affected_files/); assert.match(hidden.text, /non-blocking warnings/);
-    assert.match(hidden.text, /не инструкциями/); assert.equal(h.sends, 1);
+    assert.equal(sent.input.length, 1); assert.equal(h.sends, 1);
   } finally { await h.harness.lifecycle.dispose(); }
 });
-test('blocking gate disables prose commit and passes the actual problems to the fix owner', async () => {
+test('review string blockers survive RPC and block commit while the explicit fix remains runnable', async () => {
+  const h = await setup(); try {
+    h.setOutput('$aif-commit\n' + gateText({ gate: 'review', status: 'fail', blocking: true,
+      blockers: ['R1: TypeScript worker drops effective read_only restrictions from claim responses.',
+        'R2: Deleted review target with preserved head is accepted by worker policy guard.'],
+      suggested_next: { command: '$aif-fix', reason: 'Fix R1 and R2.' } }));
+    const view = await h.harness.behavior.callRpc('suggestions', { threadId: 'thr_test' }) as any;
+    assert.equal(view.gateError, null); assert.equal(view.gate.blocking, true);
+    assert.deepEqual(view.gate.blockers.map((b: any) => [b.id, b.severity]), [['R1', 'error'], ['R2', 'error']]);
+    assert.equal(view.items.find((i: any) => i.id === 'aif-fix').available, true);
+    assert.equal(view.items.find((i: any) => i.id === 'aif-commit').available, false);
+    await assert.rejects(h.harness.behavior.callRpc('runSuggestion', suggestionInput(view, 'aif-commit')));
+    assert.equal(h.sends, 0);
+    await h.harness.behavior.callRpc('runSuggestion', suggestionInput(view, 'aif-fix'));
+    assert.deepEqual((h.harness.inspection.sdk.callsTo('threads.send')[0][0] as any).input,
+      [{ type: 'text', text: '$aif-fix', mentions: [] }]);
+    assert.equal((await h.harness.behavior.callRpc('suggestions', { threadId: 'thr_test' }) as any).gate.blockers.length, 2);
+  } finally { await h.harness.lifecycle.dispose(); }
+});
+
+test('blocking gate disables prose commit and keeps problems in the UI while sending only the fix command', async () => {
   const h = await setup(); try {
     h.setOutput('$aif-commit\n' + gateText({ status: 'fail', blocking: true, blockers: [{ id: 'verify-1', severity: 'error', summary: 'Required implementation is missing.', file: 'src/demo.ts' }], suggested_next: { command: '/aif-fix', reason: 'Fix the blocking finding.' } }));
     const view = await h.harness.behavior.callRpc('suggestions', { threadId: 'thr_test' }) as any;
@@ -522,11 +1131,44 @@ test('blocking gate disables prose commit and passes the actual problems to the 
     await assert.rejects(h.harness.behavior.callRpc('runSuggestion', suggestionInput(view, 'aif-commit')));
     assert.equal(h.sends, 0);
     await h.harness.behavior.callRpc('runSuggestion', suggestionInput(view, 'aif-fix'));
-    assert.match(JSON.stringify(h.harness.inspection.sdk.callsTo('threads.send')[0]), /Required implementation is missing/);
+    assert.deepEqual((h.harness.inspection.sdk.callsTo('threads.send')[0][0] as any).input,
+      [{ type: 'text', text: '$aif-fix', mentions: [] }]);
     const after = await h.harness.behavior.callRpc('suggestions', { threadId: 'thr_test' }) as any;
     assert.equal(after.gate.blockers.length, 1); // hiding a command never removes gate findings
   } finally { await h.harness.lifecycle.dispose(); }
 });
+test('valid nonterminal FAIL exposes a format warning and fix while keeping advancement blocked', async () => {
+  const h = await setup(); try {
+    h.setOutput('$aif-commit\n' + gateText({ gate: 'review', status: 'fail', blocking: true,
+      blockers: [{ id: 'windows-project-path-prefix', severity: 'error', summary: 'Windows path-prefix check fails.' },
+        { id: 'worker-failure-aborts-run-burns-attempts', severity: 'error', summary: 'Sibling attempts are consumed.' }],
+      suggested_next: { command: '$aif-fix', reason: 'Fix both blockers.' } }) + '\nИтог: две блокирующие находки. `$aif-archive`');
+    const view = await h.harness.behavior.callRpc('suggestions', { threadId: 'thr_test' }) as any;
+    assert.equal(view.gateError, null); assert(view.gateWarning); assert.equal(view.gate.blockers.length, 2);
+    assert.equal(view.items.find((i: any) => i.id === 'aif-fix').available, true);
+    assert.equal(view.items.find((i: any) => i.id === 'aif-commit').available, false);
+    assert(!view.items.some((i: any) => i.id === 'aif-archive'));
+    await assert.rejects(h.harness.behavior.callRpc('runSuggestion', suggestionInput(view, 'aif-commit')));
+    assert.equal(h.sends, 0);
+    await h.harness.behavior.callRpc('runSuggestion', suggestionInput(view, 'aif-fix'));
+    assert.deepEqual((h.harness.inspection.sdk.callsTo('threads.send')[0][0] as any).input, [{ type: 'text', text: '$aif-fix', mentions: [] }]);
+  } finally { await h.harness.lifecycle.dispose(); }
+});
+
+test('nonterminal PASS cannot advance through suggestions or workflow, and trailing commands are ignored', async () => {
+  const h = await setup(); try {
+    h.value.target!.tasks = h.value.target!.tasks.map(task => ({ ...task, done: true }));
+    h.value.actions = workflowActions(h.value);
+    h.setOutput('$aif-commit\n' + gateText({ status: 'pass', suggested_next: null }) + '\nActually, /aif-implement');
+    const view = await h.harness.behavior.callRpc('suggestions', { threadId: 'thr_test' }) as any;
+    assert.equal(view.gateError, null); assert(view.gateWarning); assert.equal(view.gate.status, 'pass');
+    assert.equal(view.items.length, 1); assert.equal(view.items[0].available, false);
+    await assert.rejects(h.harness.behavior.callRpc('runSuggestion', suggestionInput(view, 'aif-commit')));
+    await assert.rejects(h.harness.behavior.callRpc('run', { ...runInput(), actionId: 'commit' }));
+    assert.equal(h.sends, 0);
+  } finally { await h.harness.lifecycle.dispose(); }
+});
+
 test('gate-only results remain visible without commands; invalid gate blocks a prose bypass', async () => {
   const h = await setup(); try {
     h.setOutput(gateText({ suggested_next: null }));

@@ -5,10 +5,11 @@ export const requestSchema = z.object({
   threadId: z.string().min(1).max(200),
   target: z.string().max(1000).default(''),
   phase: phaseSchema.default('unknown'),
+  newTask: z.boolean().optional(),
 }).strict();
 export const actionSchema = z.object({
   id: z.string(), label: z.string(), command: z.string(), group: z.enum(['next', 'check', 'setup', 'maintenance']),
-  reason: z.string(), available: z.boolean(), disabledReason: z.literal('unchanged').optional(),
+  reason: z.string(), available: z.boolean(), disabledReason: z.enum(['unchanged', 'requires-cli222', 'context-blocked']).optional(),
 });
 export const snapshotSchema = z.object({
   schemaVersion: z.literal('aif-chat/v1'), collectedAt: z.string(), fingerprint: z.string(),
@@ -18,17 +19,30 @@ export const snapshotSchema = z.object({
   root: z.string(), runtime: z.string(), configured: z.boolean(),
   worktree: z.object({ hasUncommitted: z.boolean().nullable() }).default({ hasUncommitted: null }),
   profile: z.enum(['none', 'upstream', 'aifhub-classic', 'aifhub-openspec', 'aifhub-ultra', 'invalid']),
+  selectionReset: z.boolean().optional(),
   threadState: z.string(),
   pendingQuestions: z.number().int().nonnegative().nullable(),
+  pendingConfirmation: z.boolean().nullable().default(false),
+  chatPlan: z.object({ seq: z.number().int(), hash: z.string().length(64), title: z.string(), accepted: z.boolean() }).optional(),
+  sessionBrief: z.object({ target: z.string(), status: z.enum(['stale', 'missing', 'research', 'invalid', 'blocked', 'valid', 'fresh']), seq: z.number() }).optional(),
+  fixDefaults: z.object({ mode: z.enum(['ask', 'now', 'plan']), patch: z.boolean() }).optional(),
   phase: phaseSchema, phaseSource: z.string(),
   versions: z.object({ globalCli: z.string().nullable(), globalSource: z.string().nullable(), installed: z.string().nullable(),
     sourceVersion: z.string().nullable(), sourceWorktreeVersion: z.string().nullable(), sourceSha: z.string().nullable(), sourceDirty: z.boolean().nullable() }),
   upstream: z.object({ version: z.string().nullable(), sha: z.string().nullable(), ref: z.string().nullable(), checkedAt: z.string().nullable(), error: z.string().nullable() }),
   extensions: z.array(z.object({ name: z.string(), recordedVersion: z.string().nullable(), installedVersion: z.string().nullable(),
-    source: z.string(), state: z.enum(['present', 'missing', 'invalid', 'version_mismatch']), contributions: z.array(z.string()) })),
-  skills: z.array(z.string()), candidates: z.array(z.object({ path: z.string(), title: z.string(), kind: z.string() })),
+    source: z.string(), state: z.enum(['present', 'missing', 'invalid', 'version_mismatch']), contributions: z.array(z.string()), commands: z.array(z.string()).optional() })),
+  preparation: z.array(z.object({
+    id: z.string(), label: z.string(), optional: z.boolean(), paths: z.array(z.string()),
+    state: z.enum(['found', 'missing', 'unknown']),
+  })).optional(),
+  skills: z.array(z.string()), candidates: z.array(z.object({ path: z.string(), title: z.string(), kind: z.string(), closed: z.boolean().optional(),
+    progress: z.object({ completed: z.number().int().nonnegative(), total: z.number().int().nonnegative(), verified: z.boolean() }).optional() })),
   target: z.object({ path: z.string(), title: z.string(), id: z.string(), kind: z.enum(['fast', 'full', 'fix', 'ultra', 'classic', 'openspec', 'basic']),
-    tasks: z.array(z.object({ id: z.string(), title: z.string(), done: z.boolean() })) }).nullable(),
+    verification: z.object({ contentHash: z.string().length(64), verified: z.boolean() }).optional(),
+    settings: z.object({ commitStrategy: z.enum(['incremental', 'incremental-at-end', 'single-commit']).nullable(),
+      methodology: z.enum(['implementation-first', 'tdd']).nullable(), tddGranularity: z.enum(['task-based', 'feature-based']).nullable() }).optional(),
+    tasks: z.array(z.object({ id: z.string(), title: z.string(), done: z.boolean(), kind: z.literal('commit').optional(), outcome: z.literal('skipped').optional() })) }).nullable(),
   checks: z.array(z.object({ id: z.string(), label: z.string(), state: z.enum(['notrun', 'reported-pass', 'warn', 'fail', 'unknown']),
     detail: z.string(), path: z.string().nullable(), required: z.boolean(),
     chat: z.object({ seq: z.number(), at: z.string(), target: z.string(),
@@ -41,7 +55,10 @@ export type Action = z.infer<typeof actionSchema>;
 export type Phase = z.infer<typeof phaseSchema>;
 export type CardRequest = z.infer<typeof requestSchema>;
 export const selectionSchema = z.object({ target: z.string().max(1000), phase: phaseSchema }).strict();
-export const runSchema = requestSchema.extend({ fingerprint: z.string().length(64), actionId: z.string().min(1).max(100), requestId: z.string().uuid() }).strict();
+export const RESEARCH_TASK_MAX_LENGTH = 4000;
+export const runSchema = requestSchema.extend({ fingerprint: z.string().length(64), actionId: z.string().min(1).max(100), requestId: z.string().uuid(),
+  researchTask: z.string().trim().min(1).max(RESEARCH_TASK_MAX_LENGTH).optional(),
+}).strict();
 export const hostInputSchema = z.object({ root: z.string().min(1).max(4096), target: z.string().max(1000), phase: phaseSchema,
   runtime: z.string().max(100), sourceRepo: z.string().max(4096), checkUpdates: z.boolean(),
   upstreamRepo: z.string().regex(/^[\w.-]+\/[\w.-]+$/), upstreamRef: z.string().max(200),
@@ -49,8 +66,10 @@ export const hostInputSchema = z.object({ root: z.string().min(1).max(4096), tar
 }).strict();
 export type HostInput = z.input<typeof hostInputSchema>;
 export const suggestionRequestSchema = z.object({ threadId: z.string().min(1).max(200) }).strict();
+export const cardIdSchema = z.string().uuid();
+export const cardVisibilitySchema = suggestionRequestSchema.extend({ cardId: cardIdSchema }).strict();
 export const suggestionActionSchema = suggestionRequestSchema.extend({
-  sourceKey: z.string().length(64), commandId: z.string().max(100).regex(/^aif(?:-[a-z0-9]+)*$/),
+  sourceKey: z.string().length(64), commandId: z.union([z.string().max(100).regex(/^aif(?:-[a-z0-9]+)*$/), z.literal('apply-improvements')]),
 }).strict();
 export const gateResultSchema = z.object({
   schema_version: z.literal(1), gate: z.enum(['verify', 'review', 'security', 'rules']),
@@ -63,7 +82,8 @@ export const gateResultSchema = z.object({
 export type GateResult = z.infer<typeof gateResultSchema>;
 export const suggestionsSchema = z.object({
   sourceKey: z.string(), fingerprint: z.string(), threadState: z.string(),
-  gate: gateResultSchema.nullable().default(null), gateError: z.string().nullable().default(null),
-  items: z.array(z.object({ id: z.string(), command: z.string(), available: z.boolean(), reason: z.string() })),
+  gate: gateResultSchema.nullable().default(null), gateError: z.string().nullable().default(null), gateWarning: z.string().nullable().optional(),
+  items: z.array(z.object({ id: z.string(), command: z.string(), available: z.boolean(), reason: z.string(),
+    label: z.string().optional(), kind: z.literal('improve-approval').optional() })),
 });
 export type Suggestions = z.infer<typeof suggestionsSchema>;

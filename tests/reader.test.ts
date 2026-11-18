@@ -6,26 +6,154 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { collectSnapshot, parseYaml, safeRelative, taskList, lastGate } from '../reader.ts';
 import { fixture } from './fixtures.ts';
+import { markPlanVerified } from '../plan-document.ts';
+import { planVerification } from '../plan-verification.ts';
 const input = (root: string, target = '') => ({ root, target, phase: 'plan' as const, runtime: 'codex-app', sourceRepo: '', checkUpdates: false, upstreamRepo: 'lee-to/ai-factory', upstreamRef: '' });
+
+test('preparation uses configured artifact paths and offers only installed setup skills', async () => {
+  const f = await fixture();
+  try {
+    const metaPath = path.join(f.root, '.ai-factory.json');
+    const metadata = JSON.parse(await fs.readFile(metaPath, 'utf8'));
+    metadata.agents[0].installedSkills.push('aif-architecture');
+    await f.write('.ai-factory.json', metadata);
+    await f.write('.agents/skills/aif-architecture/SKILL.md', '# Architecture');
+    await f.write('.ai-factory/config.yaml', 'paths:\n  description: docs/project.md\n');
+    await f.write('docs/project.md', '# Project');
+    const snapshot = await collectSnapshot(input(f.root));
+    assert.equal(snapshot.preparation?.find(step => step.id === 'describe')?.state, 'found');
+    assert.equal(snapshot.preparation?.find(step => step.id === 'architecture')?.state, 'missing');
+    assert.equal(snapshot.actions.find(action => action.id === 'prep-architecture')?.command, '$aif-architecture');
+    assert(!snapshot.actions.some(action => action.id === 'prep-docker'));
+  } finally { await f.cleanup(); }
+});
 
 test('without AI Factory the reader discovers basic plans and progress without creating setup or QA artifacts', async () => {
   const f = await fixture(); try {
     await fs.unlink(path.join(f.root, '.ai-factory.json'));
-    await f.write('.bb-aif-helper/plans/one.md', '# One\n## Tasks\n- [x] One\n- [ ] Two\n## Проверки\n- [x] Not a task');
+    await f.write('.bb/aif-helper/plans/one.md', '# One\n## Tasks\n- [x] One\n- [ ] Two\n## Проверки\n- [x] Not a task');
     await f.write('.bb-aif-helper/plans/two.md', '# Two\n## Tasks\n- [ ] Work');
     await promisify(execFile)('git', ['-C', f.root, 'init', '--quiet', '--initial-branch=one'], { windowsHide: true });
     const ambiguous = await collectSnapshot(input(f.root));
     assert.equal(ambiguous.profile, 'none'); assert.equal(ambiguous.target, null);
     assert(!ambiguous.actions.some(a => a.id === 'basic-implement'));
-    const selected = await collectSnapshot(input(f.root, '.bb-aif-helper/plans/one.md'));
+    assert.deepEqual(ambiguous.candidates.map(v => v.path).sort(), ['.bb-aif-helper/plans/two.md', '.bb/aif-helper/plans/one.md']);
+    const selected = await collectSnapshot(input(f.root, '.bb/aif-helper/plans/one.md'));
     assert.equal(selected.target?.kind, 'basic'); assert.equal(selected.target?.tasks.length, 2);
+    assert.equal(selected.target?.id, 'one');
+    assert.equal(selected.candidates.find(candidate => candidate.path.endsWith('/one.md'))?.title, 'One');
+    assert.deepEqual(selected.candidates.find(candidate => candidate.path.endsWith('/one.md'))?.progress, { completed: 1, total: 2, verified: false });
     assert.equal(selected.target?.tasks[0].done, true); assert.equal(selected.checks.length, 0);
     assert.equal(selected.actions.find(a => a.id === 'basic-implement')?.label, 'Продолжить выполнение');
     assert.equal(selected.upstream.checkedAt, null);
+    const legacy = await collectSnapshot(input(f.root, '.bb-aif-helper/plans/two.md'));
+    assert.equal(legacy.target?.kind, 'basic'); assert.equal(legacy.target?.tasks.length, 1);
+    await assert.rejects(fs.stat(path.join(f.root, '.bb-aif-helper/plans/one.md')));
     await assert.rejects(fs.stat(path.join(f.root, '.ai-factory.json')));
     await assert.rejects(fs.stat(path.join(f.root, '.ai-factory/qa')));
     const escaped = await collectSnapshot(input(f.root, '../secret.md'));
     assert.equal(escaped.profile, 'invalid'); assert(!escaped.actions.some(a => a.id.startsWith('basic-')));
+  } finally { await f.cleanup(); }
+});
+
+test('an absent basic plan resets navigation without hiding exploration or native planning', async () => {
+  const f = await fixture(); try {
+    await fs.unlink(path.join(f.root, '.ai-factory.json'));
+    await f.write('.bb/aif-helper/plans/other.md', '# Other\n## Tasks\n- [ ] Work');
+    const missing = await collectSnapshot(input(f.root, '.bb/aif-helper/plans/deleted.md'));
+    assert.equal(missing.profile, 'none'); assert.equal(missing.selectionReset, true); assert.equal(missing.target, null);
+    assert(missing.actions.some(a => a.id === 'basic-explore')); assert(missing.actions.some(a => a.id === 'basic-plan'));
+    const unsafe = await collectSnapshot(input(f.root, '../deleted.md'));
+    assert.equal(unsafe.profile, 'invalid'); assert(!unsafe.selectionReset);
+    await f.write('.ai-factory.json', '{invalid json');
+    const broken = await collectSnapshot(input(f.root, '.bb/aif-helper/plans/deleted.md'));
+    assert.equal(broken.profile, 'invalid'); assert(!broken.selectionReset);
+    assert(!broken.actions.some(a => a.id.startsWith('basic-')));
+  } finally { await f.cleanup(); }
+});
+
+test('archived OpenSpec selections release scope without invalidating the project or selecting another change', async () => {
+  const f = await fixture(true, true); try {
+    const archived = 'openspec/changes/archive/2026-11-14-demo/tasks.md';
+    const document = '# Archived\n## Tasks\n- [x] Done\n';
+    await f.write(archived, document);
+    await f.write('openspec/changes/other/tasks.md', '# Other\n## Tasks\n- [ ] Work\n');
+    for (const target of [archived, archived.replace('/tasks.md', ''), 'openspec/changes/demo/tasks.md']) {
+      const status = await collectSnapshot(input(f.root, target));
+      assert.equal(status.profile, 'aifhub-openspec'); assert.equal(status.selectionReset, true); assert.equal(status.target, null);
+      assert(status.diagnostics.some(value => value.includes('найден в архиве')));
+      assert(!status.candidates.some(candidate => candidate.path.includes('/archive/')));
+    }
+    assert.equal(await fs.readFile(path.join(f.root, archived), 'utf8'), document);
+    const missing = await collectSnapshot(input(f.root, 'openspec/changes/archive/2026-11-14-missing/tasks.md'));
+    assert.equal(missing.profile, 'invalid'); assert(!missing.selectionReset);
+    await f.write('openspec/changes/archive/2026-11-15-demo/tasks.md', document);
+    const ambiguous = await collectSnapshot(input(f.root, 'openspec/changes/demo/tasks.md'));
+    assert.equal(ambiguous.profile, 'invalid'); assert(!ambiguous.selectionReset);
+    const unsafe = await collectSnapshot(input(f.root, 'openspec/changes/archive/../demo/tasks.md'));
+    assert.equal(unsafe.profile, 'invalid'); assert(!unsafe.selectionReset);
+  } finally { await f.cleanup(); }
+});
+
+test('completed plans stay on disk and only unfinished plans are auto-selected, independent of verification', async () => {
+  const f = await fixture(); try {
+    await fs.unlink(path.join(f.root, '.ai-factory.json'));
+    await f.write('.bb/aif-helper/plans/active.md', '# Active\n## Tasks\n- [ ] Work');
+    const done = '# Finished\n## Tasks\n- [x] Work\n';
+    const target = '.bb/aif-helper/plans/finished.md';
+    await f.write(target, done);
+    const beforeVerification = await collectSnapshot(input(f.root));
+    assert.equal(beforeVerification.target?.id, 'active');
+    assert.equal(beforeVerification.candidates.find(candidate => candidate.path === target)?.progress?.verified, false);
+    await markPlanVerified({ root: f.root, target, expectedHash: planVerification(done).contentHash });
+    const view = await collectSnapshot(input(f.root));
+    assert.equal(view.target?.id, 'active'); assert.equal(view.candidates.length, 2);
+    assert.deepEqual(view.candidates.find(candidate => candidate.path === target)?.progress, { completed: 1, total: 1, verified: true });
+    assert.equal((await collectSnapshot(input(f.root, target))).target?.verification?.verified, true);
+    const edited = (await fs.readFile(path.join(f.root, target), 'utf8')).replace('- [x]', '- [ ]');
+    await f.write(target, edited);
+    const changed = await collectSnapshot(input(f.root));
+    assert.equal(changed.candidates.find(candidate => candidate.path === target)?.progress?.verified, false);
+    assert.equal(changed.target, null); assert(await fs.stat(path.join(f.root, target)));
+  } finally { await f.cleanup(); }
+});
+
+test('classic done status is read for every candidate and completed checkboxes alone leave plans active', async () => {
+  const f = await fixture(true); try {
+    const closedPath = '.ai-factory/plans/closed.md';
+    const content = '# Closed\n## Tasks\n- [x] Done\n';
+    await f.write(closedPath, content);
+    await f.write('.ai-factory/plans/closed/status.yaml', 'plan_id: closed\nstatus: done\nartifacts:\n  plan: .ai-factory/plans/closed.md\n');
+    await f.write('.ai-factory/plans/open.md', '# Open\n## Tasks\n- [x] Done\n');
+    await f.write('.ai-factory/plans/open/status.yaml', 'plan_id: open\nstatus: implemented\n');
+    await promisify(execFile)('git', ['-C', f.root, 'init', '--quiet', '--initial-branch=closed'], { windowsHide: true });
+    const result = await collectSnapshot(input(f.root));
+    assert.equal(result.profile, 'aifhub-classic'); assert.equal(result.target?.id, 'open');
+    assert.equal(result.candidates.find(c => c.path === closedPath)?.closed, true);
+    assert.equal(result.candidates.find(c => c.path.endsWith('/open.md'))?.closed, undefined);
+    assert.equal(result.candidates.find(c => c.path === closedPath)?.progress?.verified, false);
+    const explicit = await collectSnapshot(input(f.root, closedPath));
+    assert.equal(explicit.target?.id, 'closed'); assert.equal(explicit.target?.tasks.length, 1);
+    await f.write('.ai-factory/plans/open/status.yaml', 'plan_id: open\nstatus: done\nplan_file: .ai-factory/plans/open.md\n');
+    const allClosed = await collectSnapshot(input(f.root));
+    assert.equal(allClosed.target, null); assert(allClosed.candidates.every(c => c.closed));
+    assert.equal(await fs.readFile(path.join(f.root, closedPath), 'utf8'), content);
+  } finally { await f.cleanup(); }
+});
+
+test('invalid or mismatched classic closure metadata keeps candidates visible instead of guessing completion', async () => {
+  const f = await fixture(true); try {
+    for (const [name, status] of Object.entries({ foreign: 'plan_id: other\nstatus: done\n',
+      wrongPath: 'plan_id: wrongPath\nstatus: done\nplan_file: .ai-factory/plans/other.md\n',
+      invalid: 'plan_id: invalid\nstatus: done\nstatus: planned\n', missing: '' })) {
+      await f.write(`.ai-factory/plans/${name}.md`, '# Work\n## Tasks\n- [x] Done\n');
+      if (status) await f.write(`.ai-factory/plans/${name}/status.yaml`, status);
+    }
+    const result = await collectSnapshot(input(f.root));
+    assert.equal(result.profile, 'aifhub-classic'); assert.equal(result.target, null);
+    assert(result.candidates.every(c => !c.closed));
+    assert(result.diagnostics.some(v => v.includes('не привязан')));
+    assert(result.diagnostics.some(v => v.includes('Не удалось прочитать статус закрытия')));
   } finally { await f.cleanup(); }
 });
 
