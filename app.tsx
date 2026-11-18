@@ -23,6 +23,11 @@ const phaseNames: Record<Phase, string> = { unknown: 'Контекст зада�
 const profileNames: Record<Snapshot['profile'], string> = { none: 'Нет установки', upstream: 'AI Factory', 'aifhub-classic': 'AIFHub · classic', 'aifhub-openspec': 'AIFHub · OpenSpec', 'aifhub-ultra': 'AIFHub · legacy ultra', invalid: 'Проверьте конфигурацию' };
 const checkLabels = { notrun: 'Не запускалась', 'reported-pass': 'PASS в отчёте', warn: 'С замечаниями', fail: 'Ошибка', unknown: 'Не подтверждено' };
 
+/** Info mark: "?" in a circle, drawn inline so it never falls back to a host glyph. */
+const InfoIcon = () => <svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" aria-hidden="true">
+  <circle cx="8" cy="8" r="6.75" /><path d="M6.2 6.1a1.9 1.9 0 0 1 3.7.6c0 1.3-1.9 1.6-1.9 2.8" /><circle cx="8" cy="11.6" r="0.4" fill="currentColor" />
+</svg>;
+
 function GateData({ code, status, Original }: ExperimentalCodeFenceRendererProps) {
   const parsed = status === 'closed' ? parseReplyGate(`\`\`\`aif-gate-result\n${code}\n\`\`\``) : null;
   const error = status === 'unclosed' ? 'Блок aif-gate-result не закрыт; результат не подтверждён.' : parsed?.error;
@@ -163,9 +168,8 @@ function WorkflowCard({ threadId, initialTarget = '', phase = 'unknown', openFil
         <p className="m-0 text-xs text-muted-foreground">Дополнительные проверки — по выбору. Правила проекта и обязательные gates могут требовать их перед завершением; блокирующий FAIL сохраняет силу. Галочки задач и результаты проверок независимы. Актуальность отчётов подтверждает владелец workflow.</p>
         <ul className="m-0 flex list-none flex-col divide-y divide-border rounded-lg border border-border p-0">{snapshot.checks.map(c => <li key={c.id} className="flex flex-col gap-2 p-3">
           <div className="flex flex-wrap items-center gap-2">
-            <strong className="font-medium">{c.label}</strong>
-            {checkHelp[c.id] && <Button type="button" variant="ghost" size="icon" className="size-6 text-muted-foreground" aria-label={`Что проверяет «${c.label}»`}
-              aria-expanded={help === c.id} onClick={() => setHelp(help === c.id ? null : c.id)}><Icon name="CircleHelp" className="size-4" /></Button>}
+            <strong className="font-medium">{c.label}{checkHelp[c.id] && <button type="button" className="ml-0.5 inline-flex -translate-y-1.5 cursor-pointer rounded-full border-0 bg-transparent p-0.5 align-top text-muted-foreground hover:text-foreground" aria-label={`Что проверяет «${c.label}»`}
+              aria-expanded={help === c.id} onClick={() => setHelp(help === c.id ? null : c.id)}><InfoIcon /></button>}</strong>
             {c.required ? <span className="text-xs text-muted-foreground">нужно для завершения</span> : supplementaryChecks.has(c.id) && <span className="text-xs text-muted-foreground" title="Дополнительный шаг flow; действующие правила проекта сохраняют приоритет">по выбору</span>}
             <Badge variant={checkTone(c)} className="ml-auto" title={c.detail}>{c.chat ? `${c.chat.result.status.toUpperCase()} · из чата` : checkLabels[c.state]}</Badge>
           </div>
