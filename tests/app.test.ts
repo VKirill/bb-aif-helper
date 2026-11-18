@@ -505,3 +505,21 @@ test('readiness block in the tab: one run button on the first todo step, skip RP
     assert.equal(card.queryByText('Проект готов к работе через AI Factory'), null);
   } finally { card.lifecycle.unmount(); }
 });
+
+test('each check row has a «?» button that toggles a plain explanation without launching the check', async () => {
+  const { checkHelp } = await import('../check-actions.ts');
+  const s = data();
+  s.checks = [{ id: 'verify', label: 'Соответствие плану', state: 'notrun', detail: 'Отчёт проверки не найден', path: null, required: false }];
+  s.actions = workflowActions(s); let runs = 0;
+  const slot = renderSlot(app.messageDirectives[0], props, { rpc: { status: () => s, run: () => { runs++; return { sent: true, message: 'Отправлено' }; } } });
+  try {
+    const button = await slot.findByRole('button', { name: 'Что проверяет «Соответствие плану»', hidden: true });
+    assert.equal(slot.queryByText(checkHelp.verify), null);
+    fireEvent.click(button);
+    await slot.findByText(checkHelp.verify);
+    assert.equal(button.getAttribute('aria-expanded'), 'true');
+    fireEvent.click(button);
+    await waitFor(() => assert.equal(slot.queryByText(checkHelp.verify), null));
+    assert.equal(runs, 0);
+  } finally { slot.lifecycle.unmount(); }
+});

@@ -5,7 +5,7 @@ import type { DelegationChoice } from './delegation.ts';
 import { phaseSchema, type Snapshot, type Phase, type Action, type ReadinessStep, type Suggestions } from './model.ts';
 import { readinessComplete, nextReadinessStep } from './readiness.ts';
 import { parseReplyGate } from './gate.ts';
-import { rowActions, supplementaryChecks } from './check-actions.ts';
+import { checkHelp, rowActions, supplementaryChecks } from './check-actions.ts';
 import { updateInVersionDetails, VERSION_TTL } from './versions.ts';
 import { contextSetupInDetails } from './workflow.ts';
 import { chipDraft } from './suggestions.ts';
@@ -45,6 +45,7 @@ function WorkflowCard({ threadId, initialTarget = '', phase = 'unknown', openFil
   const [notice, setNotice] = useState('');
   const [loading, setLoading] = useState(true);
   const [sending, setSending] = useState(false);
+  const [help, setHelp] = useState<string | null>(null);
   const [network, setNetwork] = useState(false);
   const sequence = useRef(0);
   const mounted = useRef(true);
@@ -163,9 +164,12 @@ function WorkflowCard({ threadId, initialTarget = '', phase = 'unknown', openFil
         <ul className="m-0 flex list-none flex-col divide-y divide-border rounded-lg border border-border p-0">{snapshot.checks.map(c => <li key={c.id} className="flex flex-col gap-2 p-3">
           <div className="flex flex-wrap items-center gap-2">
             <strong className="font-medium">{c.label}</strong>
+            {checkHelp[c.id] && <Button type="button" variant="ghost" size="icon" className="size-6 text-muted-foreground" aria-label={`Что проверяет «${c.label}»`}
+              aria-expanded={help === c.id} onClick={() => setHelp(help === c.id ? null : c.id)}><Icon name="CircleHelp" className="size-4" /></Button>}
             {c.required ? <span className="text-xs text-muted-foreground">нужно для завершения</span> : supplementaryChecks.has(c.id) && <span className="text-xs text-muted-foreground" title="Дополнительный шаг flow; действующие правила проекта сохраняют приоритет">по выбору</span>}
             <Badge variant={checkTone(c)} className="ml-auto" title={c.detail}>{c.chat ? `${c.chat.result.status.toUpperCase()} · из чата` : checkLabels[c.state]}</Badge>
           </div>
+          {help === c.id && <p className="m-0 rounded-md bg-muted px-3 py-2 text-xs">{checkHelp[c.id]}</p>}
           <div className="flex flex-wrap items-center gap-2">
             {snapshot.actions.filter(a => a.id === rowActions[c.id]).map(renderAction)}
             {c.path && openFile && <Button type="button" variant="link" size="sm" className="h-auto px-0" onClick={() => { if (!openFile(c.path!)) setError('Просмотр файла недоступен в этой поверхности.'); }}>Отчёт</Button>}
