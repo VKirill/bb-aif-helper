@@ -17,7 +17,8 @@ const obj = (v: unknown): Record<string, any> => v && typeof v === 'object' && !
 const str = (v: unknown): string | null => typeof v === 'string' && v.trim() ? v : null;
 export function safeRelative(value: string): string {
   if (!value || value.length > 1000 || path.isAbsolute(value) || /^[A-Za-z]:|[\x00-\x1f]/.test(value)) throw new Error('Нужен относительный путь внутри проекта.');
-  const normalized = value.replaceAll('\\', '/');
+  // config.yaml writes directory paths with a trailing slash (`docs/`, `.ai-factory/plans/`).
+  const normalized = value.replaceAll('\\', '/').replace(/(?<=[^/])\/+$/, '');
   if (normalized.split('/').some(p => !p || p === '..' || p === '.' || p === '.git' || p.includes(':'))) throw new Error('Недопустимый путь артефакта.');
   return normalized;
 }

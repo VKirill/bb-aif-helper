@@ -72,6 +72,9 @@ test('check input fingerprint ignores phase, detects tracked and untracked byte 
 test('artifact paths reject escapes, drive paths, git administration and null bytes', () => {
   for (const s of ['../secret', 'a/../secret', 'C:/x', '/x', '.git/config', 'a\u0000b', 'x//y']) assert.throws(() => safeRelative(s));
   assert.equal(safeRelative('.ai-factory\\plans\\one.md'), '.ai-factory/plans/one.md');
+  assert.equal(safeRelative('.ai-factory/plans/'), '.ai-factory/plans', 'directory paths from config.yaml end with a slash');
+  assert.equal(safeRelative('docs/'), 'docs');
+  assert.throws(() => safeRelative('/'));
 });
 test('duplicate YAML keys fail rather than choosing a hidden mode', () => {
   assert.throws(() => parseYaml('aifhub: true\naifhub: false'));
