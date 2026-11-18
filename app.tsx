@@ -57,6 +57,14 @@ function WorkflowCard({ threadId, initialTarget = '', phase = 'unknown', openFil
   const [sending, setSending] = useState(false);
   const [help, setHelp] = useState<string | null>(null);
   const [network, setNetwork] = useState(false);
+  const [view, setViewState] = useState<'nav' | 'settings'>(() => {
+    if (!delegation) return 'nav';
+    try { return window.sessionStorage.getItem(`aif-view:${threadId}`) === 'settings' ? 'settings' : 'nav'; } catch { return 'nav'; }
+  });
+  const setView = (v: 'nav' | 'settings') => {
+    setViewState(v);
+    try { window.sessionStorage.setItem(`aif-view:${threadId}`, v); } catch {}
+  };
   const sequence = useRef(0);
   const mounted = useRef(true);
   const sendingRef = useRef(false);
@@ -113,29 +121,42 @@ function WorkflowCard({ threadId, initialTarget = '', phase = 'unknown', openFil
     const state = c.chat ? c.chat.result.status : c.state;
     return state === 'fail' ? 'destructive' : state === 'pass' || state === 'reported-pass' ? 'default' : 'secondary';
   };
+  const settingsAttention = !!snapshot && (snapshot.profile === 'invalid' ||
+    snapshot.actions.some(a => a.group === 'maintenance' && a.available && updateInVersionDetails(snapshot, a.id)));
+  const versionsLine = snapshot && <div className="aif-versions flex flex-wrap gap-x-4 gap-y-1 text-xs text-muted-foreground tabular-nums">
+    <span>CLI <b className="font-semibold text-foreground">{snapshot.versions.globalCli ?? 'не найден'}</b></span>
+    <span>Проект <b className="font-semibold text-foreground">{snapshot.versions.installed ?? 'не указан'}</b></span>
+    {snapshot.versions.sourceVersion && <span>Git <b className="font-semibold text-foreground">{snapshot.versions.sourceVersion}</b> @{snapshot.versions.sourceSha?.slice(0, 7)}{snapshot.versions.sourceDirty ? ' · изменён' : ''}</span>}
+    {snapshot.extensions.map(e => <span key={e.name} title={e.installedVersion ? 'Установленная версия расширения' : 'Записанная версия; установленные файлы не подтверждены'}>{e.name} <b className="font-semibold text-foreground">{e.installedVersion ?? e.recordedVersion ?? 'неизвестна'}</b>{!e.installedVersion && ' · не подтверждена'}</span>)}
+  </div>;
   return <section aria-label="AI Factory workflow" className={cn('aif-card flex min-w-0 flex-col gap-4 text-sm text-foreground [overflow-wrap:anywhere]',
     compact ? '' : 'my-3 rounded-xl border border-border bg-card p-4')}>
     <header className={cn('flex min-h-8 items-center gap-2', delegation && 'sticky -top-4 z-10 -mx-4 -mt-4 border-b border-border bg-background/90 px-4 py-3 backdrop-blur')}>
       <span className="grid size-6 shrink-0 place-items-center rounded-md bg-primary text-primary-foreground"><Icon name="Workflow" className="size-3.5" /></span>
       <strong className="text-base font-semibold tracking-tight whitespace-nowrap">AI Factory</strong>
       {snapshot && snapshot.profile !== 'upstream' && <Badge variant="secondary" className="min-w-0 truncate font-medium">{profileNames[snapshot.profile]}</Badge>}
-      <span className="ml-auto"><Hint text="Перечитать задачи и проверки; версии CLI/Git и GitHub кэшируются на сутки"><Button type="button" variant="ghost" size="icon" className="size-8 text-muted-foreground" onClick={() => void refresh(false, true)}
-        aria-label="Обновить статус AI Factory"><Icon name="RotateCcw" className="size-4" /></Button></Hint></span>
+      <span className="ml-auto flex items-center gap-2">
+        {delegation && <div role="tablist" aria-label="Раздел панели" className="flex gap-0.5 rounded-lg bg-muted p-0.5">
+          {(['nav', 'settings'] as const).map(v => <button key={v} type="button" role="tab" aria-selected={view === v} onClick={() => setView(v)}
+            className={cn('h-7 cursor-pointer rounded-md px-2.5 text-xs font-medium transition-colors outline-none focus-visible:ring-1 focus-visible:ring-ring',
+              view === v ? 'bg-background text-foreground shadow-xs' : 'text-muted-foreground hover:text-foreground')}>
+            {v === 'nav' ? 'Навигация' : 'Настройки'}{v === 'settings' && settingsAttention && <><span aria-hidden="true" className="ml-1 inline-block size-1.5 rounded-full bg-primary" /><span className="sr-only">, есть что проверить</span></>}
+          </button>)}
+        </div>}
+        <Hint text="Перечитать задачи и проверки; версии CLI/Git и GitHub кэшируются на сутки"><Button type="button" variant="ghost" size="icon" className="size-8 text-muted-foreground" onClick={() => void refresh(false, true)}
+          aria-label="Обновить статус AI Factory"><Icon name="RotateCcw" className="size-4" /></Button></Hint>
+      </span>
     </header>
     {loading && <div role="status" aria-label="Читаю локальный статус…" className="h-24 animate-pulse rounded-lg bg-muted motion-reduce:animate-none" />}
     {error && <Callout tone="error" role="alert">{error}</Callout>}
     {notice && <Callout role="status">{notice}</Callout>}
     {snapshot && <>
-      <div className="aif-versions flex flex-wrap gap-x-4 gap-y-1 text-xs text-muted-foreground tabular-nums">
-        <span>CLI <b className="font-semibold text-foreground">{snapshot.versions.globalCli ?? 'не найден'}</b></span>
-        <span>Проект <b className="font-semibold text-foreground">{snapshot.versions.installed ?? 'не указан'}</b></span>
-        {snapshot.versions.sourceVersion && <span>Git <b className="font-semibold text-foreground">{snapshot.versions.sourceVersion}</b> @{snapshot.versions.sourceSha?.slice(0, 7)}{snapshot.versions.sourceDirty ? ' · изменён' : ''}</span>}
-        {snapshot.extensions.map(e => <span key={e.name} title={e.installedVersion ? 'Установленная версия расширения' : 'Записанная версия; установленные файлы не подтверждены'}>{e.name} <b className="font-semibold text-foreground">{e.installedVersion ?? e.recordedVersion ?? 'неизвестна'}</b>{!e.installedVersion && ' · не подтверждена'}</span>)}
-      </div>
+      {!delegation && versionsLine}
 
-      {delegation && snapshot.readiness.length > 0 && <ReadinessSection snapshot={snapshot} run={run} busy={busy} sending={sending} setReadinessSkip={setReadinessSkip} />}
+      {delegation && view === 'nav' && snapshot.readiness.length > 0 && !readinessComplete(snapshot.readiness) &&
+        <ReadinessSection snapshot={snapshot} run={run} busy={busy} sending={sending} setReadinessSkip={setReadinessSkip} />}
 
-      <Section label="Текущий этап" title="Сейчас">
+      {(!delegation || view === 'nav') && <Section label="Текущий этап" title="Сейчас">
         <p className="m-0 flex flex-wrap items-center gap-2" title={snapshot.phaseSource}>
           <StatusDot tone={busy ? 'live' : snapshot.threadState === 'error' ? 'error' : 'idle'} />
           <span className="font-medium">{phaseNames[snapshot.phase]} <span className="font-normal text-muted-foreground">· {stateText}</span></span>
@@ -165,11 +186,11 @@ function WorkflowCard({ threadId, initialTarget = '', phase = 'unknown', openFil
           <p className="m-0 text-xs text-muted-foreground">Выполнение плана уже начато. Настройка контекста запускается отдельно и не продолжает выбранный план.</p>
           {renderActions(snapshot.actions.filter(a => contextSetupInDetails(snapshot, a.id)))}
         </Disclosure>}
-      </Section>
+      </Section>}
 
-      {delegation && snapshot.configured && <DelegationSection threadId={threadId} environmentId={environmentId} busy={busy} />}
+      {delegation && view === 'nav' && snapshot.configured && <WorkingSection threadId={threadId} />}
 
-      {snapshot.target && snapshot.checks.length > 0 && <Disclosure className="aif-checks" summary={<>Что проверить <span className="font-normal text-muted-foreground">· из чата: {snapshot.checks.filter(c => c.chat).length} · отчётов PASS: {snapshot.checks.filter(c => c.state === 'reported-pass').length}</span></>}>
+      {(!delegation || view === 'nav') && snapshot.target && snapshot.checks.length > 0 && <Disclosure className="aif-checks" summary={<>Что проверить <span className="font-normal text-muted-foreground">· из чата: {snapshot.checks.filter(c => c.chat).length} · отчётов PASS: {snapshot.checks.filter(c => c.state === 'reported-pass').length}</span></>}>
         <p className="m-0 text-xs text-muted-foreground">Дополнительные проверки — по выбору. Правила проекта и обязательные gates могут требовать их перед завершением; блокирующий FAIL сохраняет силу. Галочки задач и результаты проверок независимы. Актуальность отчётов подтверждает владелец workflow.</p>
         <ul className="m-0 flex list-none flex-col divide-y divide-border rounded-lg border border-border p-0">{snapshot.checks.map(c => <li key={c.id} className="flex flex-col gap-2 p-3">
           <div className="flex flex-wrap items-center gap-2">
@@ -190,12 +211,18 @@ function WorkflowCard({ threadId, initialTarget = '', phase = 'unknown', openFil
             {c.chat.result.suggested_next?.reason && <span>{` ${c.chat.result.suggested_next.reason}`}</span>}</p>}
           <p className="m-0 text-xs text-muted-foreground">{c.chat ? `Файловый отчёт: ${c.path ? checkLabels[c.state] + '. ' + c.detail : 'не найден.'}` : c.detail}</p>
         </li>)}</ul>
-        <Disclosure summary="Настройка инструментов">{renderActions(snapshot.actions.filter(a => a.group === 'setup' && (a.id === 'quality-setup' || a.id === 'ci-setup')))}</Disclosure>
+        {!delegation && <Disclosure summary="Настройка инструментов">{renderActions(snapshot.actions.filter(a => a.group === 'setup' && (a.id === 'quality-setup' || a.id === 'ci-setup')))}</Disclosure>}
       </Disclosure>}
 
-      {delegation && <ToolsSection actions={snapshot.actions.filter(a => a.group === 'setup' && toolHelp[a.id])} renderAction={renderAction} />}
+      {delegation && view === 'settings' && <>
+        {snapshot.configured && <DelegationSection threadId={threadId} environmentId={environmentId} busy={busy} />}
+        {snapshot.readiness.length > 0 && <ReadinessSection snapshot={snapshot} run={run} busy={busy} sending={sending} setReadinessSkip={setReadinessSkip} />}
+        <Disclosure summary="Настройка инструментов">{renderActions(snapshot.actions.filter(a => a.group === 'setup' && (a.id === 'quality-setup' || a.id === 'ci-setup')))}</Disclosure>
+        <ToolsSection actions={snapshot.actions.filter(a => a.group === 'setup' && toolHelp[a.id])} renderAction={renderAction} />
+      </>}
 
-      <Disclosure className="aif-details" summary={<>Версии и расширения{snapshot.extensions.length ? <span className="font-normal text-muted-foreground"> · {snapshot.extensions.length}</span> : null}</>}>
+      {(!delegation || view === 'settings') && <Disclosure className="aif-details" summary={<>Версии и расширения{snapshot.extensions.length ? <span className="font-normal text-muted-foreground"> · {snapshot.extensions.length}</span> : null}</>}>
+        {delegation && versionsLine}
         {renderActions(snapshot.actions.filter(a => a.group === 'maintenance' && updateInVersionDetails(snapshot, a.id)))}
         {snapshot.versionsCheckedAt && <p className="m-0 text-xs text-muted-foreground">Версии CLI/Git: снимок от {new Date(snapshot.versionsCheckedAt).toLocaleString('ru')}. Плановая проверка — раз в сутки.</p>}
         <dl className="m-0 grid grid-cols-[minmax(96px,1fr)_minmax(0,2fr)] gap-x-3 gap-y-2 text-xs [&_dd]:m-0 [&_dt]:text-muted-foreground [&_small]:block [&_small]:text-muted-foreground">
@@ -214,7 +241,7 @@ function WorkflowCard({ threadId, initialTarget = '', phase = 'unknown', openFil
         {snapshot.extensions.length ? <ul className="m-0 flex list-none flex-col gap-3 p-0 text-xs">{snapshot.extensions.map(e => <li key={e.name}><strong className="font-medium">{e.name}</strong> {e.installedVersion ?? 'файлы отсутствуют'} <span className="text-muted-foreground">· {e.state}</span>
           <small className="block text-muted-foreground">Записано: {e.recordedVersion ?? 'не указано'} · {e.source}</small>{e.contributions.length > 0 && <small className="block text-muted-foreground">Настроенные injections: {e.contributions.join(', ')}. Это не подтверждение загрузки в текущую сессию.</small>}</li>)}</ul>
           : <p className="m-0 text-xs text-muted-foreground">Расширения не зарегистрированы в этом проекте.</p>}
-      </Disclosure>
+      </Disclosure>}
       {snapshot.diagnostics.length > 0 && <Disclosure summary={`Примечания · ${snapshot.diagnostics.length}`}>
         <ul className="m-0 flex list-none flex-col gap-2 p-0 text-xs text-muted-foreground">{snapshot.diagnostics.map((d, i) => <li key={i}>{d}</li>)}</ul>
       </Disclosure>}
@@ -239,7 +266,7 @@ const roleText = {
   implement: { title: 'Код', skills: '/aif-implement', group: 'Кто пишет код',
     saved: '/aif-implement будет передавать задачи выбранной модели.', self: 'Код снова пишет агент этого чата.',
     note: 'Хранится в .ai-factory.json → phases.implement. /aif-implement отдаёт каждую задачу дочернему треду на этой модели, затем сам проверяет diff и отмечает задачу в плане.' },
-  research: { title: 'Разведка', skills: '/aif-plan, /aif-fix, /aif-qa', group: 'Кто исследует код',
+  research: { title: 'Разведчик 1', skills: '/aif-plan, /aif-fix, /aif-qa', group: 'Кто исследует код',
     saved: 'Разведчики AI Factory будут запускаться дочерними тредами на выбранной модели.', self: 'Разведку снова делают встроенные помощники агента.',
     note: 'Разведчик 1 — архитектура и затронутые модули; если навык просит одного разведчика, это он. Хранится в .ai-factory/skill-context/global-skill-context.md. Разведчики идут дочерними тредами параллельно, агент собирает их отчёты.' },
   research2: { title: 'Разведчик 2', skills: 'шаблоны и соглашения', group: 'Кто ищет шаблоны',
@@ -250,12 +277,14 @@ const roleText = {
     selfLabel: 'Как разведчик 1', selfBadge: 'как разведчик 1', note: 'Разведчик 3 берёт и всех следующих, если навык просит больше трёх.' },
 } as const satisfies Record<DelegationRole, { title: string; skills: string; group: string; saved: string; self: string; note: string; selfLabel?: string; selfBadge?: string }>;
 
-/** «Этот агент / Другая модель» for one role; saves through setDelegation. */
+/** One-line role row; the «Этот агент / Другая модель» editor opens on «Изменить» and saves through setDelegation. */
 function ModelChoice({ role, saved, providerName, environmentId, busy, locked: lockedOuter, onSave }: {
   role: DelegationRole; saved: DelegationChoice; providerName: (id: string | null) => string | null; environmentId: string | null; busy: boolean; locked: boolean;
   onSave: (choice: DelegationChoice) => Promise<void>;
 }) {
   const text: { title: string; skills: string; group: string; saved: string; self: string; note: string; selfLabel?: string; selfBadge?: string } = roleText[role];
+  const [editing, setEditing] = useState(false);
+  const [help, setHelp] = useState(false);
   const [mode, setMode] = useState<'self' | 'bb'>(saved.mode);
   const [pick, setPick] = useState<PickerValue | null>(saved.mode === 'bb' ? toPicker(saved) : null);
   const [saving, setSaving] = useState(false);
@@ -268,49 +297,71 @@ function ModelChoice({ role, saved, providerName, environmentId, busy, locked: l
   async function save() {
     if (!choice) return;
     setSaving(true);
-    try { await onSave(choice); toast.success(choice.mode === 'bb' ? text.saved : text.self); }
+    try { await onSave(choice); toast.success(choice.mode === 'bb' ? text.saved : text.self); setEditing(false); }
     finally { setSaving(false); }
   }
-  return <div className="flex min-w-0 flex-col gap-2">
+  function cancel() {
+    setMode(saved.mode); setPick(saved.mode === 'bb' ? toPicker(saved) : null); setEditing(false);
+  }
+  return <div className="flex min-w-0 flex-col gap-2 py-2.5 first:pt-0 last:pb-0">
     <div className="flex min-w-0 items-center gap-2">
-      <h4 className="m-0 text-sm font-medium">{text.title}</h4>
-      <span className="truncate text-xs text-muted-foreground">{text.skills}</span>
-      <Badge variant="secondary" className="ml-auto max-w-[55%] truncate font-medium">{savedLabel}</Badge>
+      <h4 className="m-0 shrink-0 text-sm font-medium">{text.title}{text.note && <HelpMark label={`Подробнее: ${text.title}`} open={help} onToggle={() => setHelp(!help)} />}</h4>
+      <span className="truncate text-xs text-muted-foreground max-sm:hidden">{text.skills}</span>
+      <Badge variant="secondary" className="ml-auto min-w-0 max-w-[55%] truncate font-medium">{savedLabel}</Badge>
+      {!editing && <Button type="button" size="sm" variant="outline" className="h-7 shrink-0 px-2.5 text-xs" aria-label={`Изменить: ${text.title}`} disabled={locked} onClick={() => setEditing(true)}>Изменить</Button>}
     </div>
-    <div role="radiogroup" aria-label={text.group} className="grid grid-cols-2 gap-0.5 rounded-lg bg-muted p-0.5">
-      {(['self', 'bb'] as const).map(m => <button key={m} type="button" role="radio" aria-checked={mode === m} disabled={locked}
-        onClick={() => { setMode(m); if (m === 'bb' && !pick) setPick(pickerSeed); }}
-        className={cn('h-8 cursor-pointer rounded-md px-3 text-sm font-medium transition-colors outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-default disabled:opacity-50',
-          mode === m ? 'bg-background text-foreground shadow-xs' : 'text-muted-foreground hover:text-foreground')}>{m === 'self' ? text.selfLabel ?? 'Этот агент' : 'Другая модель'}</button>)}
-    </div>
-    {mode === 'bb' && pick && <div className="flex min-w-0 flex-col gap-1">
-      <span className="text-xs text-muted-foreground">Провайдер и модель</span>
-      <ProviderModelPicker value={pick} onChange={setPick} disabled={locked} align="start"
-        routing={environmentId ? { kind: 'environment', environmentId } : undefined} className="max-w-full" />
-    </div>}
-    {dirty && <div className="flex flex-wrap gap-2">
-      <Hint text={busy ? 'Дождитесь, пока агент закончит текущую работу' : 'Сохранить выбор в проекте'}><Button type="button" size="sm" disabled={locked || busy} onClick={() => void save()}>{saving ? 'Сохраняю…' : 'Сохранить'}</Button></Hint>
-      <Button type="button" size="sm" variant="outline" disabled={saving} onClick={() => { setMode(saved.mode); setPick(saved.mode === 'bb' ? toPicker(saved) : null); }}>Отменить</Button>
-    </div>}
-    {text.note && <p className="m-0 text-xs text-muted-foreground">{text.note}</p>}
+    {help && text.note && <p className="m-0 text-xs text-muted-foreground">{text.note}</p>}
+    {editing && <>
+      <div role="radiogroup" aria-label={text.group} className="grid grid-cols-2 gap-0.5 rounded-lg bg-muted p-0.5">
+        {(['self', 'bb'] as const).map(m => <button key={m} type="button" role="radio" aria-checked={mode === m} disabled={locked}
+          onClick={() => { setMode(m); if (m === 'bb' && !pick) setPick(pickerSeed); }}
+          className={cn('h-8 cursor-pointer rounded-md px-3 text-sm font-medium transition-colors outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-default disabled:opacity-50',
+            mode === m ? 'bg-background text-foreground shadow-xs' : 'text-muted-foreground hover:text-foreground')}>{m === 'self' ? text.selfLabel ?? 'Этот агент' : 'Другая модель'}</button>)}
+      </div>
+      {mode === 'bb' && pick && <div className="flex min-w-0 flex-col gap-1">
+        <span className="text-xs text-muted-foreground">Провайдер и модель</span>
+        <ProviderModelPicker value={pick} onChange={setPick} disabled={locked} align="start"
+          routing={environmentId ? { kind: 'environment', environmentId } : undefined} className="max-w-full" />
+      </div>}
+      <div className="flex flex-wrap gap-2">
+        <Hint text={busy ? 'Дождитесь, пока агент закончит текущую работу' : 'Сохранить выбор в проекте'}><Button type="button" size="sm" disabled={locked || busy || !dirty} onClick={() => void save()}>{saving ? 'Сохраняю…' : 'Сохранить'}</Button></Hint>
+        <Button type="button" size="sm" variant="outline" disabled={saving} onClick={cancel}>Отменить</Button>
+      </div>
+    </>}
   </div>;
 }
 
-function DelegationSection({ threadId, environmentId, busy }: { threadId: string; environmentId: string | null; busy: boolean }) {
+function useDelegationView(threadId: string) {
   const rpc = useRpc<typeof rpcContract>();
-  const navigate = useBbNavigate();
   const [view, setView] = useState<DelegationView | null>(null);
   const [error, setError] = useState('');
+  const [applied, setApplied] = useState<string | null>(null);
+  const appliedRef = useRef<string | null>(null);
   const mounted = useRef(true);
   useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
   const load = useCallback(async () => {
     try {
       const next = await rpc.call('delegation', { threadId });
-      if (mounted.current) { setView(next); setError(''); }
+      if (mounted.current) {
+        setView(next); setError('');
+        if (next.appliedDefaults && appliedRef.current !== next.appliedDefaults) {
+          appliedRef.current = next.appliedDefaults;
+          setApplied(next.appliedDefaults);
+          toast.success(next.appliedDefaults);
+        }
+      }
     } catch (e) { if (mounted.current) setError(e instanceof Error ? e.message : String(e)); }
   }, [rpc, threadId]);
   useEffect(() => { void load(); }, [load]);
   useRealtime('changed', (payload: unknown) => { if ((payload as { threadId?: string })?.threadId === threadId) void load(); });
+  return { view, setView, error, setError, load, applied };
+}
+
+function DelegationSection({ threadId, environmentId, busy }: { threadId: string; environmentId: string | null; busy: boolean }) {
+  const rpc = useRpc<typeof rpcContract>();
+  const { view, setView, error, setError, applied } = useDelegationView(threadId);
+  const mounted = useRef(true);
+  useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
   if (!view) return <Section label="Исполнители" title="Исполнители">
     {error ? <p className="m-0 text-xs text-muted-foreground">Настройка недоступна: {error}</p> : <div className="h-20 animate-pulse rounded-md bg-muted motion-reduce:animate-none" aria-hidden="true" />}
   </Section>;
@@ -322,33 +373,74 @@ function DelegationSection({ threadId, environmentId, busy }: { threadId: string
       if (mounted.current) setView(next);
     } catch (e) { if (mounted.current) setError(e instanceof Error ? e.message : String(e)); throw e; }
   };
+  const changeDefaults = async (action: 'from-project' | 'apply' | 'clear') => {
+    setError('');
+    try {
+      const next = await rpc.call('setDelegationDefaults', { threadId, action });
+      if (mounted.current) setView(next);
+      toast.success(action === 'from-project' ? 'Умолчания взяты из этого проекта' : action === 'apply' ? 'Умолчания применены к этому проекту' : 'Умолчания очищены');
+    } catch (e) { if (mounted.current) setError(e instanceof Error ? e.message : String(e)); }
+  };
   return <Section label="Исполнители" title="Исполнители">
+    {applied && <Callout role="status">{applied}</Callout>}
     {view.foreign && <Callout>phases.implement в .ai-factory.json настроен на агента «{view.foreign}». Панель его не меняет.</Callout>}
     {view.error && <Callout tone="error">{view.error}</Callout>}
-    <ModelChoice role="implement" saved={view.choice} providerName={providerName} environmentId={environmentId} busy={busy} locked={!!view.foreign} onSave={save('implement')} />
-    <div className="border-t border-border" />
-    <ModelChoice role="research" saved={view.research} providerName={providerName} environmentId={environmentId} busy={busy} locked={false} onSave={save('research')} />
-    <details className="group rounded-md border border-border px-3 py-2" open={view.research2.mode === 'bb' || view.research3.mode === 'bb' || undefined}>
-      <summary className="cursor-pointer text-xs font-medium text-muted-foreground">Разведчики 2 и 3 · свои модели</summary>
-      <div className="mt-3 flex flex-col gap-3">
-        <ModelChoice role="research2" saved={view.research2} providerName={providerName} environmentId={environmentId} busy={busy} locked={false} onSave={save('research2')} />
-        <ModelChoice role="research3" saved={view.research3} providerName={providerName} environmentId={environmentId} busy={busy} locked={false} onSave={save('research3')} />
-      </div>
-    </details>
+    <div className="flex min-w-0 flex-col divide-y divide-border">
+      <ModelChoice role="implement" saved={view.choice} providerName={providerName} environmentId={environmentId} busy={busy} locked={!!view.foreign} onSave={save('implement')} />
+      <ModelChoice role="research" saved={view.research} providerName={providerName} environmentId={environmentId} busy={busy} locked={false} onSave={save('research')} />
+      <ModelChoice role="research2" saved={view.research2} providerName={providerName} environmentId={environmentId} busy={busy} locked={false} onSave={save('research2')} />
+      <ModelChoice role="research3" saved={view.research3} providerName={providerName} environmentId={environmentId} busy={busy} locked={false} onSave={save('research3')} />
+    </div>
+    <DefaultsSection view={view} busy={busy} onChange={changeDefaults} />
     {error && <Callout tone="error" role="status">{error}</Callout>}
-    {view.children.length > 0 && <div className="flex flex-col gap-2">
-      <h4 className="m-0 text-xs font-medium text-muted-foreground">Дочерние треды · {view.children.length}</h4>
-      <ul className="m-0 flex list-none flex-col divide-y divide-border rounded-md border border-border p-0">{view.children.map(c => {
-        const st = childStatus[c.status] ?? { label: c.status, tone: 'idle' as const };
-        return <li key={c.id} className="grid min-h-10 grid-cols-[8px_minmax(0,1fr)_auto] items-center gap-3 px-3 py-2">
-          <StatusDot tone={st.tone} />
-          <span className="min-w-0"><span className="block truncate">{c.title || 'Без названия'}</span>
-            <span className="block truncate text-xs text-muted-foreground">{[providerName(c.providerId), st.label].filter(Boolean).join(' · ')}</span></span>
-          <Button type="button" variant="ghost" size="sm" className="h-7 gap-1 px-2 text-xs" onClick={() => navigate.toThread(c.id, { split: true })}>
-            Открыть<Icon name="ExternalLink" className="size-3.5" /></Button>
-        </li>;
-      })}</ul>
-    </div>}
+  </Section>;
+}
+
+type DefaultsAction = 'from-project' | 'apply' | 'clear';
+
+/** Plugin-wide default executor models for new AI Factory projects; the owner picks them from a real project's settings. */
+function DefaultsSection({ view, busy, onChange }: { view: DelegationView; busy: boolean; onChange: (action: DefaultsAction) => Promise<void> }) {
+  const [pending, setPending] = useState(false);
+  const providerName = (id: string | null) => view.providers.find(p => p.id === id)?.name ?? id;
+  const label = (role: DelegationRole) => {
+    const choice = view.defaults?.[role];
+    if (!choice) return '';
+    return choice.mode === 'bb' ? [providerName(choice.providerId), choice.model, choice.reasoning].filter(Boolean).join(' · ') : (roleText[role] as { selfBadge?: string }).selfBadge ?? 'агент этого чата';
+  };
+  async function act(action: DefaultsAction) {
+    if (pending || busy) return;
+    setPending(true);
+    try { await onChange(action); } finally { setPending(false); }
+  }
+  return <Disclosure summary={<>Модели по умолчанию для новых проектов <span className="font-normal text-muted-foreground"> · {view.defaults ? 'заданы' : 'не заданы'}</span></>}>
+    <p className="m-0 text-xs text-muted-foreground">Применяются один раз в проекте с AI Factory, где у всех ролей «Этот агент». Дальше проект живёт своей настройкой.</p>
+    {view.defaults && <ul className="m-0 flex list-none flex-col gap-1 p-0 text-xs">
+      {(Object.keys(roleText) as DelegationRole[]).map(role => <li key={role}>{roleText[role].title} — {label(role)}</li>)}
+    </ul>}
+    <div className="flex flex-wrap gap-2">
+      <Button type="button" size="sm" variant="outline" disabled={pending || busy} onClick={() => void act('from-project')}>Взять из этого проекта</Button>
+      <Button type="button" size="sm" variant="outline" disabled={pending || busy || !view.defaults} onClick={() => void act('apply')}>Применить к этому проекту</Button>
+      <Button type="button" size="sm" variant="outline" disabled={pending || busy || !view.defaults} onClick={() => void act('clear')}>Очистить</Button>
+    </div>
+  </Disclosure>;
+}
+
+function WorkingSection({ threadId }: { threadId: string }) {
+  const navigate = useBbNavigate();
+  const { view } = useDelegationView(threadId);
+  if (!view || view.children.length === 0) return null;
+  const providerName = (id: string | null) => view.providers.find(p => p.id === id)?.name ?? id;
+  return <Section label="В работе" title="В работе">
+    <ul className="m-0 flex list-none flex-col divide-y divide-border rounded-md border border-border p-0">{view.children.map(c => {
+      const st = childStatus[c.status] ?? { label: c.status, tone: 'idle' as const };
+      return <li key={c.id} className="grid min-h-10 grid-cols-[8px_minmax(0,1fr)_auto] items-center gap-3 px-3 py-2">
+        <StatusDot tone={st.tone} />
+        <span className="min-w-0"><span className="block truncate">{c.title || 'Без названия'}</span>
+          <span className="block truncate text-xs text-muted-foreground">{[providerName(c.providerId), st.label].filter(Boolean).join(' · ')}</span></span>
+        <Button type="button" variant="ghost" size="sm" className="h-7 gap-1 px-2 text-xs" onClick={() => navigate.toThread(c.id, { split: true })}>
+          Открыть<Icon name="ExternalLink" className="size-3.5" /></Button>
+      </li>;
+    })}</ul>
   </Section>;
 }
 

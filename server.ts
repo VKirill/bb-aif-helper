@@ -2,7 +2,8 @@ import type { BbPluginApi } from '@get-bb/plugin-sdk';
 import { createHash } from 'node:crypto';
 import { z } from 'zod';
 import { hostContract, rpcContract, type DelegationView } from './contract.ts';
-import type { DelegationChoice, DelegationRole } from './delegation.ts';
+import { DELEGATION_ROLES, delegationDefaultsSchema, modelSpec } from './delegation.ts';
+import type { DelegationChoice, DelegationDefaults, DelegationRole } from './delegation.ts';
 import { requestSchema, phaseSchema, snapshotSchema, type CardRequest, type Snapshot, type Phase, type Suggestions } from './model.ts';
 import { actionPrompt, workflowActions } from './workflow.ts';
 import { applyRan, applySkipped, RUN_CONFIRMED_STEPS } from './readiness.ts';
@@ -248,6 +249,7 @@ export default async function plugin(bb: BbPluginApi) {
   }
   async function delegationView(threadId: string): Promise<DelegationView> {
     const { environment } = await context(threadId);
+    const defaults = delegationDefaultsSchema.safeParse(await bb.storage.kv.get<DelegationDefaults>('delegation-defaults'));
     const [state, providers, children] = await Promise.all([
       host.call('delegation', { root: environment.path! }, { hostId: environment.hostId }),
       bb.sdk.providers.list({ environmentId: environment.id }).catch(() => []),
@@ -255,22 +257,95 @@ export default async function plugin(bb: BbPluginApi) {
     ]);
     return { ...state,
       providers: providers.filter(p => p.available).map(p => ({ id: p.id, name: p.displayName })),
-      children: children.map(c => ({ id: c.id, title: c.title ?? null, status: c.status, providerId: c.providerId ?? null, updatedAt: String(c.updatedAt) })) };
+      children: children.map(c => ({ id: c.id, title: c.title ?? null, status: c.status, providerId: c.providerId ?? null, updatedAt: String(c.updatedAt) })),
+      defaults: defaults.success ? defaults.data : null,
+      appliedDefaults: null };
   }
   async function setDelegation(threadId: string, choice: DelegationChoice, role: DelegationRole = 'implement') {
     const { environment } = await context(threadId);
     const state = await host.call('setDelegation', { root: environment.path!, choice, role }, { hostId: environment.hostId });
+    await markApplied(environment);
     bb.log.info(`aif-chat: delegation saved threadId=${threadId} role=${role} mode=${choice.mode}`);
     if (state.removedLegacy) bb.log.info(`aif-chat: removed legacy runner root=${environment.path}`);
     cache.invalidate(key => !!watchers.get(key)?.has(threadId));
     bb.realtime.publish('changed', { threadId });
     return delegationView(threadId);
   }
+  async function setDelegationDefaults(threadId: string, action: 'from-project' | 'apply' | 'clear') {
+    const { environment } = await context(threadId);
+    const root = environment.path!;
+    const hostId = environment.hostId;
+    if (action === 'clear') {
+      await bb.storage.kv.delete('delegation-defaults');
+    } else if (action === 'from-project') {
+      const state = await host.call('delegation', { root }, { hostId });
+      const defaults: DelegationDefaults = { implement: state.choice, research: state.research, research2: state.research2, research3: state.research3 };
+      if (DELEGATION_ROLES.every(role => defaults[role].mode === 'self')) throw new Error('В этом проекте у всех ролей «Этот агент» — брать нечего.');
+      await bb.storage.kv.set('delegation-defaults', defaults);
+    } else {
+      const parsed = delegationDefaultsSchema.safeParse(await bb.storage.kv.get<DelegationDefaults>('delegation-defaults'));
+      if (!parsed.success) throw new Error('Модели по умолчанию не заданы.');
+      const state = await host.call('delegation', { root }, { hostId });
+      await applyDefaults(root, hostId, parsed.data, state.foreign);
+    }
+    if (action !== 'clear') await markApplied(environment);
+    bb.log.info(`aif-chat: delegation defaults ${action} threadId=${threadId}`);
+    cache.invalidate(key => !!watchers.get(key)?.has(threadId));
+    bb.realtime.publish('changed', { threadId });
+    return delegationView(threadId);
+  }
+  async function applyDefaults(root: string, hostId: string, defaults: DelegationDefaults, foreign: string | null): Promise<DelegationRole[]> {
+    const written: DelegationRole[] = [];
+    for (const role of DELEGATION_ROLES) {
+      if (role === 'implement' && foreign) continue;
+      await host.call('setDelegation', { root, choice: defaults[role], role }, { hostId });
+      written.push(role);
+    }
+    return written;
+  }
+  const appliedDefaultsKey = (environment: { hostId: string; path: string | null }) => `delegation-defaults-applied:${environment.hostId}:${environment.path!}`;
+  async function markApplied(environment: { hostId: string; path: string | null }) {
+    await bb.storage.kv.set(appliedDefaultsKey(environment), new Date().toISOString());
+  }
+  const ROLE_NAMES: Record<DelegationRole, string> = { implement: 'Код', research: 'Разведчик 1', research2: 'Разведчик 2', research3: 'Разведчик 3' };
+  async function autoApplyDefaults(threadId: string): Promise<string | null> {
+    const { environment } = await context(threadId);
+    const root = environment.path!;
+    const hostId = environment.hostId;
+    return serial(`defaults-apply:${hostId}:${root}`, async () => {
+      const parsed = delegationDefaultsSchema.safeParse(await bb.storage.kv.get<DelegationDefaults>('delegation-defaults'));
+      if (!parsed.success || !DELEGATION_ROLES.some(role => parsed.data[role].mode === 'bb')) return null;
+      if (await bb.storage.kv.get(appliedDefaultsKey(environment))) return null;
+      const state = await host.call('delegation', { root }, { hostId });
+      if (!state.configured || state.error !== null
+        || state.choice.mode !== 'self' || state.research.mode !== 'self' || state.research2.mode !== 'self' || state.research3.mode !== 'self') return null;
+      let roles: DelegationRole[];
+      try {
+        roles = await applyDefaults(root, hostId, parsed.data, state.foreign);
+      } catch (error) {
+        bb.log.warn(`aif-chat: delegation defaults auto-apply failed threadId=${threadId}: ${error instanceof Error ? error.message : String(error)}`);
+        return null;
+      }
+      await markApplied(environment);
+      bb.log.info(`aif-chat: delegation defaults auto-applied threadId=${threadId} roles=${roles.join(',')}`);
+      cache.invalidate(key => !!watchers.get(key)?.has(threadId));
+      bb.realtime.publish('changed', { threadId });
+      const parts = roles.flatMap(role => {
+        const choice = parsed.data[role];
+        return choice.mode === 'bb' ? [`${ROLE_NAMES[role]} — ${modelSpec(choice)}`] : [];
+      });
+      return `Применены модели по умолчанию: ${parts.join(', ')}`;
+    });
+  }
   bb.rpc.register(rpcContract, {
     status: input => status(input, input.checkUpdates, input.force),
     suggestions: async input => (await suggested(input.threadId)).view,
-    delegation: input => delegationView(input.threadId),
+    delegation: async input => {
+      const appliedDefaults = await autoApplyDefaults(input.threadId);
+      return { ...await delegationView(input.threadId), appliedDefaults };
+    },
     setDelegation: input => serial(`delegation:${input.threadId}`, () => setDelegation(input.threadId, input.choice, input.role)),
+    setDelegationDefaults: input => serial(`delegation:${input.threadId}`, () => setDelegationDefaults(input.threadId, input.action)),
     setReadinessSkip: async input => {
       const { environment } = await context(input.threadId);
       const key = `readiness-skip:${environment.hostId}:${environment.path!}`;

@@ -23,6 +23,7 @@ export type ResearchRole = typeof RESEARCH_ROLES[number];
 const RESEARCH_MARK: Record<ResearchRole, string> = { research: 'research-model', research2: 'research-model-2', research3: 'research-model-3' };
 export const delegationRoleSchema = z.enum(['implement', ...RESEARCH_ROLES]);
 export type DelegationRole = z.infer<typeof delegationRoleSchema>;
+export const DELEGATION_ROLES = ['implement', ...RESEARCH_ROLES] as const;
 const AGENT = 'bb';
 const TIMEOUT_MS = 4 * 60 * 60 * 1000;
 
@@ -32,6 +33,8 @@ export const delegationChoiceSchema = z.discriminatedUnion('mode', [
   z.object({ mode: z.literal('bb'), providerId: id, model: z.string().regex(/^[^\s?&#]{1,200}$/), reasoning: id.optional(), tier: id.optional() }).strict(),
 ]);
 export type DelegationChoice = z.infer<typeof delegationChoiceSchema>;
+export const delegationDefaultsSchema = z.object({ implement: delegationChoiceSchema, research: delegationChoiceSchema, research2: delegationChoiceSchema, research3: delegationChoiceSchema }).strict();
+export type DelegationDefaults = z.infer<typeof delegationDefaultsSchema>;
 export const delegationStateSchema = z.object({
   choice: delegationChoiceSchema,
   /** Model for research worker 1 (Explore) of every AI Factory skill; self = the agent's own subagent. */

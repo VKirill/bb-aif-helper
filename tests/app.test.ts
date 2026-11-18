@@ -228,6 +228,7 @@ test('panel uses the BB provider/model picker and saves exactly its selection', 
   const tab = app.tabs.find(t => t.id === 'workflow')!;
   const saved: unknown[] = [];
   const view = (choice: unknown, research: unknown = { mode: 'self' }) => ({ choice, research, research2: { mode: 'self' }, research3: { mode: 'self' }, configured: true, foreign: null, error: null, providers: [{ id: 'codex', name: 'Codex' }],
+    defaults: null, appliedDefaults: null,
     children: [{ id: 'thr_child', title: 'Задача 1', status: 'active', providerId: 'codex', updatedAt: '2026-11-17T00:00:00Z' }] });
   const slot = renderSlot(tab as any, { threadId: 'thr_panel', environment: { id: 'env_panel' } }, { rpc: {
     status: () => data(),
@@ -238,10 +239,27 @@ test('panel uses the BB provider/model picker and saves exactly its selection', 
     await slot.findByText('Задача 1');
     assert.ok(slot.getByText(/Codex · работает/));
     assert.equal(slot.queryByRole('button', { name: 'Сохранить' }), null);
-    assert.equal(slot.getAllByRole('radiogroup').length, 4, 'code and each of the three research workers have their own choice');
-    assert.ok(slot.getByRole('radiogroup', { name: 'Кто ищет шаблоны' }), 'worker 2 has its own choice');
-    assert.ok(within(slot.getByRole('radiogroup', { name: 'Кто ищет связи' })).getByRole('radio', { name: 'Как разведчик 1' }));
-    fireEvent.click(within(slot.getByRole('radiogroup', { name: 'Кто пишет код' })).getByRole('radio', { name: 'Другая модель' }));
+    fireEvent.click(slot.getByRole('tab', { name: /Настройки/ }));
+    await slot.findByRole('button', { name: 'Изменить: Код' });
+    for (const title of ['Код', 'Разведчик 1', 'Разведчик 2', 'Разведчик 3'])
+      assert.ok(slot.getByRole('button', { name: `Изменить: ${title}` }), `edit button for ${title}`);
+    assert.equal(slot.queryAllByRole('radiogroup').length, 0, 'role editors open only on «Изменить»');
+    const openEditor = async (title: string) => {
+      fireEvent.click(slot.getByRole('button', { name: `Изменить: ${title}` }));
+      return slot.findByRole('radiogroup');
+    };
+    const closeEditor = (group: HTMLElement) => fireEvent.click(within(group.parentElement!).getByRole('button', { name: 'Отменить' }));
+    let group = await openEditor('Разведчик 2');
+    assert.equal(group.getAttribute('aria-label'), 'Кто ищет шаблоны');
+    assert.ok(within(group).getByRole('radio', { name: 'Как разведчик 1' }), 'worker 2 has its own choice');
+    closeEditor(group);
+    group = await openEditor('Разведчик 3');
+    assert.equal(group.getAttribute('aria-label'), 'Кто ищет связи');
+    assert.ok(within(group).getByRole('radio', { name: 'Как разведчик 1' }));
+    closeEditor(group);
+    group = await openEditor('Код');
+    assert.equal(group.getAttribute('aria-label'), 'Кто пишет код');
+    fireEvent.click(within(group).getByRole('radio', { name: 'Другая модель' }));
     const picker = await slot.findByTestId('bb-provider-model-picker');
     assert.equal(picker.dataset.routingKind, 'environment'); assert.equal(picker.dataset.routingId, 'env_panel');
     fireEvent.change(slot.getByLabelText('Provider ID'), { target: { value: 'codex' } });
@@ -253,9 +271,11 @@ test('panel uses the BB provider/model picker and saves exactly its selection', 
     await waitFor(() => assert.equal(saved.length, 1));
     assert.deepEqual(saved, [{ threadId: 'thr_panel', role: 'implement', choice: { mode: 'bb', providerId: 'codex', model: 'gpt-6.2-sol', reasoning: 'high', tier: 'fast' } }]);
     await slot.findByText('Codex · gpt-6.2-sol · high');
-    fireEvent.click(within(slot.getByRole('radiogroup', { name: 'Кто исследует код' })).getByRole('radio', { name: 'Другая модель' }));
-    await waitFor(() => assert.equal(slot.getAllByTestId('bb-provider-model-picker').length, 2));
-    const research = within(slot.getAllByTestId('bb-provider-model-picker')[1]);
+    group = await openEditor('Разведчик 1');
+    assert.equal(group.getAttribute('aria-label'), 'Кто исследует код');
+    fireEvent.click(within(group).getByRole('radio', { name: 'Другая модель' }));
+    await waitFor(() => assert.equal(slot.getAllByTestId('bb-provider-model-picker').length, 1));
+    const research = within(slot.getAllByTestId('bb-provider-model-picker')[0]);
     fireEvent.change(research.getByLabelText('Provider ID'), { target: { value: 'codex' } });
     fireEvent.change(research.getByLabelText('Model'), { target: { value: 'gpt-6.2-luna' } });
     fireEvent.click(research.getByRole('button', { name: 'Apply execution selection' }));
@@ -512,6 +532,7 @@ test('readiness block in the tab: one run button on the first todo step, skip RP
   s.readiness = applyRan(readinessSteps({ configured: true, contextSkill: true, files, paths: {} }), ['docs']);
   slot = renderSlot(tab as any, { threadId: 'thr_panel', environment: { id: 'env_panel' } }, { rpc });
   try {
+    fireEvent.click(await slot.findByRole('tab', { name: /Настройки/ }));
     await slot.findByText('Проект готов к работе через AI Factory');
     assert.equal(slot.queryByText('Выполните шаги по порядку, чтобы AI Factory работал полностью'), null);
   } finally { slot.lifecycle.unmount(); }
@@ -571,6 +592,7 @@ test('«Другие команды» in the tab offers roadmap and archive with
   const runs: string[] = [];
   const slot = renderSlot(tab as any, { threadId: 'thr_panel', environment: { id: 'env_panel' } }, { rpc: { status: () => s, run: (input: any) => { runs.push(input.actionId); return { sent: true, message: 'Отправлено' }; } } });
   try {
+    fireEvent.click(await slot.findByRole('tab', { name: /Настройки/ }));
     fireEvent.click(await slot.findByText('Другие команды', { selector: '*' }));
     const help = await slot.findByRole('button', { name: 'Что делает «Roadmap»' });
     fireEvent.click(help);
@@ -578,5 +600,88 @@ test('«Другие команды» in the tab offers roadmap and archive with
     assert.deepEqual(runs, []);
     fireEvent.click(await slot.findByRole('button', { name: 'Roadmap' }));
     await waitFor(() => assert.deepEqual(runs, ['roadmap-setup']));
+  } finally { slot.lifecycle.unmount(); }
+});
+
+function delegView(patch: { children?: any[]; defaults?: any; appliedDefaults?: string | null } = {}) {
+  return { choice: { mode: 'self' }, research: { mode: 'self' }, research2: { mode: 'self' }, research3: { mode: 'self' },
+    configured: true, foreign: null, error: null, providers: [{ id: 'codex', name: 'Codex' }],
+    children: [], defaults: null, appliedDefaults: null, ...patch };
+}
+
+test('the panel tab splits navigation and settings between current work and one-time configuration', async () => {
+  const tab = app.tabs.find(t => t.id === 'workflow')!;
+  const s = data();
+  const slot = renderSlot(tab as any, { threadId: 'thr_split', environment: { id: 'env_split' } }, { rpc: { status: () => s, delegation: () => delegView() } });
+  try {
+    slot.getByRole('tablist', { name: 'Раздел панели' });
+    await slot.findByText('Сейчас');
+    assert.equal(slot.queryByText('Исполнители'), null);
+    fireEvent.click(slot.getByRole('tab', { name: /Настройки/ }));
+    await slot.findByRole('button', { name: 'Изменить: Код' });
+    await slot.findByText('Модели по умолчанию для новых проектов');
+    slot.getByText(/Версии и расширения/);
+    assert.equal(slot.queryByText('Сейчас'), null);
+  } finally { slot.lifecycle.unmount(); }
+});
+
+test('a message card has no navigation/settings switcher', async () => {
+  const s = data();
+  const slot = renderSlot(app.messageDirectives[0], props, { rpc: { status: () => s } });
+  try {
+    await slot.findByText('Сейчас');
+    assert.equal(slot.queryByRole('tablist'), null);
+    assert.equal(slot.queryByRole('tab'), null);
+  } finally { slot.lifecycle.unmount(); }
+});
+
+test('«В работе» lists child threads on navigation and hides when there are none', async () => {
+  const tab = app.tabs.find(t => t.id === 'workflow')!;
+  const s = data();
+  let children: any[] = [{ id: 'thr_child', title: 'Задача 1', status: 'active', providerId: 'codex', updatedAt: '2026-11-17T00:00:00Z' }];
+  const slot = renderSlot(tab as any, { threadId: 'thr_working', environment: { id: 'env_working' } }, { rpc: {
+    status: () => s, delegation: () => delegView({ children }),
+  } });
+  try {
+    await slot.findByText('Задача 1');
+    slot.getByText('В работе');
+    children = [];
+    await slot.behavior.emitRealtime('changed', { threadId: 'thr_working' });
+    await waitFor(() => assert.equal(slot.queryByText('В работе'), null));
+    assert.equal(slot.queryByText('Задача 1'), null);
+  } finally { slot.lifecycle.unmount(); }
+});
+
+test('defaults block disables apply without defaults and takes roles from this project', async () => {
+  const tab = app.tabs.find(t => t.id === 'workflow')!;
+  const s = data();
+  const calls: any[] = [];
+  const slot = renderSlot(tab as any, { threadId: 'thr_defaults', environment: { id: 'env_defaults' } }, { rpc: {
+    status: () => s, delegation: () => delegView(),
+    setDelegationDefaults: (input: any) => { calls.push(input); return delegView(); },
+  } });
+  try {
+    fireEvent.click(await slot.findByRole('tab', { name: /Настройки/ }));
+    await slot.findByRole('button', { name: 'Изменить: Код' });
+    fireEvent.click(await slot.findByText('Модели по умолчанию для новых проектов'));
+    assert.equal((await slot.findByRole('button', { name: 'Применить к этому проекту' }) as HTMLButtonElement).disabled, true);
+    fireEvent.click(slot.getByRole('button', { name: 'Взять из этого проекта' }));
+    await waitFor(() => assert.deepEqual(calls, [{ threadId: 'thr_defaults', action: 'from-project' }]));
+  } finally { slot.lifecycle.unmount(); }
+});
+
+test('auto-applied defaults appear as a status callout inside settings', async () => {
+  const tab = app.tabs.find(t => t.id === 'workflow')!;
+  const s = data();
+  const applied = 'Применены модели по умолчанию: Код — devin/swe-2-flash';
+  const slot = renderSlot(tab as any, { threadId: 'thr_applied', environment: { id: 'env_applied' } }, { rpc: {
+    status: () => s, delegation: () => delegView({ appliedDefaults: applied }),
+  } });
+  try {
+    await slot.findByText('Сейчас');
+    assert.equal(slot.queryByText(/Применены модели по умолчанию/), null);
+    fireEvent.click(slot.getByRole('tab', { name: /Настройки/ }));
+    const found = await slot.findAllByText(applied);
+    assert(found.some(el => el.closest('[role="status"]')));
   } finally { slot.lifecycle.unmount(); }
 });
