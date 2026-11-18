@@ -510,16 +510,16 @@ test('supplementary rows are optional without downgrading known required gates o
   s.actions = workflowActions(s); let runs = 0;
   const slot = renderSlot(app.messageDirectives[0], props, { rpc: { status: () => s, run: () => { runs++; return { sent: true, message: 'Отправлено' }; } } });
   try {
-    await slot.findByText(/Дополнительные проверки — по выбору/);
+    fireEvent.click(await slot.findByText('Что проверить'));
     const required = slot.getByText('rules').closest('li')!;
-    assert.match(required.textContent!, /нужно для завершения/);
+    assert.match(required.textContent!, /Обязательно/);
     assert(!required.textContent!.includes('по выбору'));
     for (const label of ['security', 'review', 'qa-plan', 'qa', 'quality', 'ci', 'mode']) {
       assert.match(slot.getByText(label).closest('li')!.textContent!, /по выбору/);
     }
     const doctor = slot.getByRole('button', { name: 'Проверить конфигурацию', hidden: true });
     assert.equal(doctor.closest('li'), slot.getByText('mode').closest('li'));
-    fireEvent.click(slot.getByText(/Что проверить/)); assert.equal(runs, 0);
+    assert.equal(runs, 0);
   } finally { slot.lifecycle.unmount(); }
 });
 
@@ -548,10 +548,38 @@ test('checks distinguish completed chat WARN from missing file evidence', async 
       result: { schema_version: 1, gate: 'verify', status: 'warn', blocking: false, blockers: [], affected_files: [], suggested_next: null } } }];
   const slot = renderSlot(app.messageDirectives[0], props, { rpc: { status: () => s } });
   try {
+    fireEvent.click(await slot.findByText('Что проверить'));
     await slot.findByText('WARN · из чата');
-    await slot.findByText(/Актуальность для текущих файлов не подтверждена/);
-    await slot.findByText('Файловый отчёт: не найден.');
+    const details = slot.getByLabelText('Детали проверки «Соответствие плану»');
+    assert.equal(details.closest('details')!.open, false);
+    fireEvent.click(details);
+    assert.equal(details.closest('details')!.open, true);
+    assert(slot.getByText('Актуальность для текущих файлов не подтверждена.'));
+    assert(slot.getByText('Файловый отчёт: не найден.'));
     assert(!slot.queryByText('Unknown launch'));
+  } finally { slot.lifecycle.unmount(); }
+});
+
+test('a blocking check opens the section and shows findings before unconfirmed checks', async () => {
+  const s = data();
+  s.checks = [
+    { id: 'verify', label: 'Соответствие плану', state: 'notrun', detail: 'Артефакт не найден', path: null, required: true },
+    { id: 'review', label: 'Code review', state: 'notrun', detail: '', path: null, required: false, chat: {
+      seq: 12, at: s.collectedAt, target: s.target!.path, freshness: 'unknown',
+      result: { schema_version: 1, gate: 'review', status: 'fail', blocking: true,
+        blockers: [{ id: 'regression', summary: 'Нужно исправить регрессию', severity: 'error' }],
+        affected_files: [], suggested_next: null },
+    } },
+  ];
+  const slot = renderSlot(app.messageDirectives[0], props, { rpc: { status: () => s } });
+  try {
+    const heading = await slot.findByText('Что проверить');
+    const section = heading.closest('details')!;
+    assert.equal(section.open, true);
+    assert.equal(section.querySelector('.aif-check-row')?.getAttribute('data-blocking'), 'true');
+    assert(within(section).getByText('Блокирующие · 1'));
+    assert(within(section).getByText(/Нужно исправить регрессию/));
+    assert.equal(section.querySelector<HTMLDetailsElement>('.aif-check-report')?.open, false);
   } finally { slot.lifecycle.unmount(); }
 });
 

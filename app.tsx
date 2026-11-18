@@ -14,7 +14,8 @@ import { preparationCommands, preparationHelp } from './project-preparation.ts';
 
 const phaseNames: Record<Phase, string> = { unknown: 'Контекст задачи', explore: 'Исследование', plan: 'Планирование', improve: 'Уточнение плана', implement: 'Выполнение плана', verify: 'Проверка', fix: 'Исправление замечаний', done: 'Финализация' };
 const profileNames: Record<Snapshot['profile'], string> = { none: 'Нет установки', upstream: 'AI Factory', 'aifhub-classic': 'AIFHub · classic', 'aifhub-openspec': 'AIFHub · OpenSpec', 'aifhub-ultra': 'AIFHub · legacy ultra', invalid: 'Проверьте конфигурацию' };
-const checkLabels = { notrun: 'Нет evidence', 'reported-pass': 'PASS в отчёте', warn: 'С замечаниями', fail: 'Ошибка', unknown: 'Не подтверждено' };
+const checkLabels = { notrun: 'Нет отчёта', 'reported-pass': 'PASS в отчёте', warn: 'С замечаниями', fail: 'Ошибка', unknown: 'Не подтверждено' };
+const checkIcons = { notrun: 'Minus', 'reported-pass': 'CircleCheck', warn: 'AlertTriangle', fail: 'CircleX', unknown: 'CircleQuestion' };
 
 const actionIcons: Record<string, string> = {
   commit: 'GitBranch', fix: 'ToolCase', 'fix-new': 'ToolCase', 'fix-findings': 'ToolCase', 'execute-fix': 'ToolCase',
@@ -48,6 +49,79 @@ function ExplainedLabel({ label, help, prefix, detail }: { label: string; help?:
     </span>
     {help && <div className="aif-help-text" id={id} hidden={!open}>{help}{detail}</div>}
   </div>;
+}
+
+function CheckPanel({ checks, actions, renderAction, openReport }: {
+  checks: Snapshot['checks']; actions: Action[]; renderAction: (action: Action) => ReactNode; openReport?: (path: string) => void;
+}) {
+  const blocking = checks.filter(check => check.chat?.result.blocking).length;
+  const fromChat = checks.filter(check => check.chat).length;
+  const filePasses = checks.filter(check => check.state === 'reported-pass').length;
+  const setup = actions.filter(action => action.group === 'setup' && !action.id.startsWith('prep-'));
+  const orderedChecks = [...checks].sort((a, b) => Number(!!b.chat?.result.blocking) - Number(!!a.chat?.result.blocking) || Number(b.required) - Number(a.required));
+
+  return <details className="aif-checks aif-disclosure" open={blocking > 0 || undefined}>
+    <summary>
+      <span className="aif-check-summary">
+        <span>Что проверить</span>
+        {blocking > 0 && <span className="aif-check-state" data-state="fail">Блокирующие · {blocking}</span>}
+        {fromChat > 0 && <span className="aif-check-summary-count">Из чата · {fromChat}</span>}
+        {filePasses > 0 && <span className="aif-check-summary-count">PASS в отчётах · {filePasses}</span>}
+      </span>
+    </summary>
+    <div className="aif-disclosure-body">
+      <ul className="aif-check-list">
+        {orderedChecks.map(check => {
+          const { chat } = check;
+          const state = chat ? chat.result.status === 'pass' ? 'reported-pass' : chat.result.status : check.state;
+          const label = chat ? `${chat.result.status.toUpperCase()} · из чата` : checkLabels[state];
+          const action = actions.find(item => item.id === rowActions[check.id]);
+          const reportPath = check.path;
+          const hasDetails = chat || reportPath || (check.state !== 'notrun' && check.detail);
+
+          return <li key={check.id} className="aif-check-row" data-blocking={chat?.result.blocking || undefined}>
+            <div className="aif-check-head">
+              <div className="aif-check-label">
+                <ExplainedLabel label={check.label} help={checkHelp[check.id]} />
+                {check.required ? <small className="aif-check-required" title="Нужно для завершения">Обязательно</small>
+                  : supplementaryChecks.has(check.id) && <small className="aif-check-optional">по выбору</small>}
+              </div>
+              <div className="aif-check-controls">
+                <span className="aif-check-state" data-state={state}>
+                  <Icon name={checkIcons[state]} aria-hidden="true" />{label}
+                </span>
+                {action && renderAction(action)}
+                {reportPath && openReport && <button type="button" className="aif-action aif-secondary" onClick={() => openReport(reportPath)}>
+                  <Icon name="FileText" className="aif-button-icon" aria-hidden="true" />Отчёт
+                </button>}
+              </div>
+            </div>
+            {chat && (chat.result.blocking || chat.result.blockers.length > 0) && <div className="aif-check-findings">
+              {chat.result.blocking && <strong>Блокирует следующий этап</strong>}
+              {chat.result.blockers.length > 0 && <ul>{chat.result.blockers.map(item =>
+                <li key={item.id}><strong>{item.id}</strong> {item.summary}{item.file && <> <code>{item.file}</code></>}</li>,
+              )}</ul>}
+            </div>}
+            {hasDetails && <details className="aif-check-report">
+              <summary aria-label={`Детали проверки «${check.label}»`}>Детали</summary>
+              {chat && <>
+                <p><time dateTime={chat.at}>{new Date(chat.at).toLocaleString('ru')}</time> · сообщение #{chat.seq}</p>
+                <p>{chat.freshness === 'unchanged' ? 'Файлы не изменились. Повторная проверка заблокирована.'
+                  : chat.freshness === 'changed' ? 'Файлы изменились после фиксации результата. Можно проверить повторно.'
+                  : 'Актуальность для текущих файлов не подтверждена.'}</p>
+                {chat.result.suggested_next?.reason && <p>{chat.result.suggested_next.reason}</p>}
+              </>}
+              <p>{chat ? `Файловый отчёт: ${reportPath ? checkLabels[check.state] + '. ' + check.detail : 'не найден.'}` : check.detail}</p>
+            </details>}
+          </li>;
+        })}
+      </ul>
+      {setup.length > 0 && <details className="aif-setup">
+        <summary>Настройка инструментов</summary>
+        <div className="aif-actions">{setup.map(renderAction)}</div>
+      </details>}
+    </div>
+  </details>;
 }
 
 function GateData({ code, status, Original }: ExperimentalCodeFenceRendererProps) {
@@ -313,24 +387,8 @@ function WorkflowCard({ threadId, initialTarget = '', phase = 'unknown', openFil
         <p className="aif-muted aif-small">Выполнение плана уже начато. Настройка контекста запускается отдельно и не продолжает выбранный план.</p>
         {renderActions(snapshot.actions.filter(a => contextSetupInDetails(snapshot, a.id)))}
       </details>}
-      {snapshot.checks.length > 0 && <details className="aif-checks"><summary>Что проверить <span className="aif-muted">· из чата: {snapshot.checks.filter(c => c.chat).length} · отчётов PASS: {snapshot.checks.filter(c => c.state === 'reported-pass').length}</span></summary>
-        <p className="aif-muted aif-small">Дополнительные проверки — по выбору. Правила проекта и обязательные gates могут требовать их перед завершением; блокирующий FAIL сохраняет силу.</p>
-        <p className="aif-muted aif-small">Галочки задач и результаты проверок независимы. Актуальность evidence подтверждает владелец workflow.</p>
-        <ul>{snapshot.checks.map(c => <li key={c.id}><div className="aif-check-label">
-          <ExplainedLabel label={c.label} help={checkHelp[c.id]} />
-          {c.required ? <small className="aif-required">нужно для завершения</small> : supplementaryChecks.has(c.id) && <small className="aif-required" title="Дополнительный шаг flow; действующие правила проекта сохраняют приоритет">по выбору</small>}</div>
-          <span className={`aif-check-state aif-${c.chat ? c.chat.result.status === 'pass' ? 'reported-pass' : c.chat.result.status : c.state}`} title={c.detail}>{c.chat ? `${c.chat.result.status.toUpperCase()} · из чата` : checkLabels[c.state]}</span>
-          {snapshot.actions.filter(a => a.id === rowActions[c.id]).map(renderAction)}
-          {c.path && openFile && <button className="aif-link" onClick={() => { if (!openFile(c.path!)) setError('Просмотр файла недоступен в этой поверхности.'); }}>Отчёт</button>}
-          {c.chat && <small className="aif-check-detail">Gate завершён · {new Date(c.chat.at).toLocaleString('ru')} · сообщение #{c.chat.seq}. {c.chat.freshness === 'unchanged'
-            ? 'С момента фиксации результата файлы не изменились. Повторная проверка заблокирована.'
-            : c.chat.freshness === 'changed' ? 'Файлы изменились после фиксации результата; можно проверить повторно.' : 'Актуальность для текущих файлов не подтверждена.'}
-            {c.chat.result.blocking ? ' Есть блокирующие проблемы.' : ' Блокеров нет.'}
-            {c.chat.result.blockers.map(b => <span key={b.id}>{` ${b.id}: ${b.summary}${b.file ? ` (${b.file})` : ''}`}</span>)}
-            {c.chat.result.suggested_next?.reason && <span>{` ${c.chat.result.suggested_next.reason}`}</span>}</small>}
-          <small className="aif-check-detail">{c.chat ? `Файловый отчёт: ${c.path ? checkLabels[c.state] + '. ' + c.detail : 'не найден.'}` : c.detail}</small></li>)}</ul>
-        <details className="aif-setup"><summary>Настройка инструментов</summary>{renderActions(snapshot.actions.filter(a => a.group === 'setup' && !a.id.startsWith('prep-')))}</details>
-      </details>}
+      {snapshot.checks.length > 0 && <CheckPanel checks={snapshot.checks} actions={snapshot.actions} renderAction={renderAction}
+        openReport={openFile ? path => { if (!openFile(path)) setError('Просмотр файла недоступен в этой поверхности.'); } : undefined} />}
       <details id={updatesId} ref={updatesDetails} className="aif-details aif-disclosure" onToggle={event => setUpdatesOpen(event.currentTarget.open)}>
         <summary>Версии и расширения{snapshot.extensions.length ? ` · ${snapshot.extensions.length}` : ''}</summary>
         <div className="aif-disclosure-body">
