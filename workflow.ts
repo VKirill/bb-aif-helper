@@ -22,6 +22,19 @@ export function workflowActions(s: Snapshot): Action[] {
       reason: s.skills.includes(contextSkill) ? installedHub ? 'Настроить контекст проекта через AIFHub analyze' : 'Настроить контекст проекта через AI Factory' : `Сначала установите ${contextSkill} для ${s.runtime}`,
       available: s.skills.includes(contextSkill) },
   ];
+  const addSetup = (id: string, label: string, skill: string, reason: string, args = '') => {
+    const available = s.skills.includes(skill);
+    maintenance.push({ id, label, command: `${prefix}${skill}${args}`, group: 'setup',
+      reason: available ? reason : `Сначала установите ${skill} для ${s.runtime}`, available });
+  };
+  addSetup('setup-architecture', 'Описать архитектуру', 'aif-architecture', 'Сформировать архитектурные правила проекта');
+  addSetup('setup-roadmap', 'Составить roadmap', 'aif-roadmap', 'Сформировать roadmap проекта');
+  addSetup('quality-setup', 'Настроить проверки', 'aif-quality-setup', 'Отдельная настройка подходящих quality tools', ' setup');
+  addSetup('ci-setup', 'Настроить CI', 'aif-ci', 'Создание/аудит pipeline не означает успешный CI-run');
+  addSetup('setup-rules', 'Настроить правила проекта', 'aif-rules', 'Правила проекта для агентов');
+  addSetup('setup-docs', 'Создать документацию', 'aif-docs', 'Документация проекта по контракту skill');
+  addSetup('setup-build', 'Настроить сборку', 'aif-build-automation', 'Автоматизация сборки проекта');
+  addSetup('setup-docker', 'Настроить Docker', 'aif-dockerize', 'Docker-конфигурация проекта');
   if (s.extensions.length) maintenance.push({ id: 'update-extensions', label: 'Обновить расширения', command: 'ai-factory extension update', group: 'maintenance',
     reason: 'Сначала обновить AI Factory и установку проекта, затем зарегистрированные расширения и проверить версии/команды; без --force', available: s.configured });
   // Maintenance can repair an outdated installation even when a selected plan
@@ -86,8 +99,6 @@ export function workflowActions(s: Snapshot): Action[] {
   add('quality', 'Качество кода', 'aif-quality-setup', 'check', 'Read-only аудит стека и существующих проверок; команды не запускаются автоматически', ' audit');
   add('ci', 'Посмотреть CI', 'aif-chat', 'check', 'Проверить существующий CI для нужного SHA; не генерировать конфигурацию', ' ci');
   result[result.length - 1].available = true; // bundled plugin skill, not an AI Factory installation record
-  add('quality-setup', 'Настроить проверки', 'aif-quality-setup', 'setup', 'Отдельная настройка подходящих quality tools', ' setup');
-  add('ci-setup', 'Настроить CI', 'aif-ci', 'setup', 'Создание/аудит pipeline не означает успешный CI-run', '');
   return [...result, ...maintenance].filter((v, i, a) => a.findIndex(x => x.id === v.id) === i);
 }
 
@@ -103,7 +114,7 @@ export function actionPrompt(s: Snapshot, action: Action): string {
     '4. Проверка результата. Выполни ai-factory extension list для инициализированного проекта; сравни записанные версии расширений в .ai-factory.json с установленными extension.json. Проверь наличие объявленных extension-команд и SKILL.md (в том числе aif-analyze, если расширение его предоставляет) для текущего runtime, не запуская сами workflow-команды. Отдельно сообщи результаты CLI, проекта, каждого расширения и доступности команд: updated/unchanged/skipped/failed/unknown. Код 0 не заменяет проверку skipped/failed и отсутствующих файлов. Если список расширений пуст, отметь это и пропусти этап 3.',
     'После операции обнови карточку через aif_chat_status с принудительным чтением. Не запускай реализацию или проверки приложения.',
   ].join('\n');
-  if (action.id === 'setup-context') return `${action.command}\n\nПользователь явно нажал запуск настройки контекста проекта. Примени именно ${action.command} в текущем проекте по установленному skill-контракту. Не выполняй план и не начинай реализацию. Когда настройка завершится, обнови карточку через aif_chat_status. Выбранный ранее план не является аргументом этой команды.`;
+  if (action.id === 'setup-context' || action.group === 'setup') return `${action.command}\n\nПользователь нажал шаг подготовки проекта «${action.label}». Примени ${action.command} по контракту skill. Не выполняй план и не начинай реализацию. По завершении обнови карточку через aif_chat_status. Выбранный ранее план не является аргументом этой команды.`;
   if (action.id === 'commit') return `${action.command}\n\nКонтекст кнопки AI Factory: ${JSON.stringify({ target: s.target?.path ?? null, profile: s.profile, expectedFingerprint: s.fingerprint })}.\nПользователь выбрал подготовку коммита. Примени установленный aif-commit в текущем проекте: сначала перечитай правила, git status и diff, определи относящиеся к задаче изменения и сообщение коммита. Незакоммиченные файлы не означают, что все они согласованы для включения: сохрани несвязанные изменения и не добавляй все файлы автоматически. Соблюдай действующие gates и разрешения на коммит; не выполняй push или публикацию без отдельного разрешения. Активный план может отсутствовать после архивации. После действия обнови карточку через aif_chat_status.`;
   return `${action.command}\n\nКонтекст кнопки AI Factory: ${JSON.stringify({ target: s.target?.path ?? null, profile: s.profile, expectedFingerprint: s.fingerprint })}.\nВыполни выбранное действие в текущей задаче. Сначала перечитай выбранный план/change и действующие правила. Для новой задачи без описания запроси её описание. Не расширяй scope. Не считай старые отчёты актуальным PASS без проверки evidence. После этапа обнови карточку через aif_chat_status или bb plugin run aif-chat show. Нажатие этой кнопки не разрешает другие действия workflow.`;
 }

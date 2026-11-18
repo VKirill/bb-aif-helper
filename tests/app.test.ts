@@ -209,9 +209,14 @@ test('persistent header control opens the registered workflow tab without dispat
 });
 test('workflow panel reads its owning thread and exposes maintenance without a transcript card', async () => {
   const readThreads: string[] = []; let runs = 0;
+  const s = data();
+  s.readiness = [
+    { id: 'install', label: 'Установить AI Factory', actionId: 'update-factory', state: 'done', optional: false, skippable: false, missing: [] },
+    { id: 'context', label: 'Описать проект (/aif или aif-analyze)', actionId: 'setup-context', state: 'todo', optional: false, skippable: false, missing: [] },
+  ];
   const tab = app.tabs.find((t): t is Extract<(typeof app.tabs)[number], { availability: 'fixed'; context: { kind: 'thread' } }> => t.id === 'workflow' && t.availability === 'fixed' && t.context.kind === 'thread')!;
   const slot = renderSlot(tab, { threadId: 'thr_panel', environment: { id: 'env_panel' } }, {
-    rpc: { status: (input: any) => { readThreads.push(input.threadId); return data(); }, run: () => { runs++; return { sent: true, message: 'Отправлено' }; } },
+    rpc: { status: (input: any) => { readThreads.push(input.threadId); return s; }, run: () => { runs++; return { sent: true, message: 'Отправлено' }; } },
   });
   try {
     await slot.findByRole('button', { name: 'Обновить AI Factory' });
@@ -463,4 +468,37 @@ test('non-blocking gate reason and command render independently; dismiss does no
     await waitFor(() => assert(!slot.queryByRole('button', { name: '$aif-commit' })));
     assert(slot.getByText('verify · WARN в ответе')); assert(slot.getByText('Блокирующих проблем нет.'));
   } finally { slot.lifecycle.unmount(); }
+});
+
+test('readiness block in the tab: one run button on the first todo step, skip RPC, collapsed when ready, absent from chat cards', async () => {
+  const { readinessSteps } = await import('../readiness.ts');
+  const tab = app.tabs.find(t => t.id === 'workflow')!;
+  const s = data(); s.readiness = readinessSteps({ configured: true, contextSkill: true, files: {}, paths: {} });
+  let runs: string[] = []; const skips: unknown[] = [];
+  const rpc = { status: () => s, run: (input: any) => { runs.push(input.actionId); return { sent: true, message: 'Отправлено' }; },
+    setReadinessSkip: (input: any) => { skips.push(input); return { ok: true }; } };
+  let slot = renderSlot(tab as any, { threadId: 'thr_panel', environment: { id: 'env_panel' } }, { rpc });
+  try {
+    await slot.findByText('Подготовка проекта', { selector: '*' });
+    const run = await slot.findByRole('button', { name: 'Запустить aif' });
+    assert.equal(slot.queryByRole('button', { name: 'Описать архитектуру' }), null);
+    assert.equal(slot.queryByText('Настройка контекста проекта'), null);
+    fireEvent.click(run);
+    await waitFor(() => assert.deepEqual(runs, ['setup-context']));
+    fireEvent.click(slot.getAllByRole('button', { name: 'Пропустить' })[2]);
+    await waitFor(() => assert.deepEqual(skips, [{ threadId: 'thr_panel', stepId: 'ci', skipped: true }]));
+  } finally { slot.lifecycle.unmount(); }
+  const files = Object.fromEntries(['.ai-factory/DESCRIPTION.md', '.ai-factory/config.yaml', '.ai-factory/rules/base.md', 'AGENTS.md', '.ai-factory/ARCHITECTURE.md', '.ai-factory/ROADMAP.md', 'lefthook.yml', 'Jenkinsfile'].map(f => [f, true]));
+  s.readiness = readinessSteps({ configured: true, contextSkill: true, files, paths: {} });
+  slot = renderSlot(tab as any, { threadId: 'thr_panel', environment: { id: 'env_panel' } }, { rpc });
+  try {
+    await slot.findByText('Проект готов к работе через AI Factory');
+    assert.equal(slot.queryByText('Выполните шаги по порядку, чтобы AI Factory работал полностью'), null);
+  } finally { slot.lifecycle.unmount(); }
+  const card = renderSlot(app.messageDirectives[0] as any, props as any, { rpc });
+  try {
+    await card.findByRole('button', { name: 'Улучшить план' });
+    assert.equal(card.queryByText('Подготовка проекта'), null);
+    assert.equal(card.queryByText('Проект готов к работе через AI Factory'), null);
+  } finally { card.lifecycle.unmount(); }
 });

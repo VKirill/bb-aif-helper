@@ -6,6 +6,7 @@ import plugin, { cardDirective } from '../server.ts';
 import { snapshot } from './fixtures.ts';
 import { workflowActions } from '../workflow.ts';
 import { VERSION_TTL } from '../versions.ts';
+import { readinessSteps } from '../readiness.ts';
 
 async function setup() {
   let value = snapshot(); value.actions = workflowActions(value);
@@ -601,5 +602,20 @@ test('a child thread going idle publishes changed for its parent thread', async 
     const targets = h.harness.realtimeSignals.filter(s => s.channel === 'changed').map(s => (s.payload as { threadId?: string }).threadId);
     assert.ok(targets.includes('thr_child'));
     assert.ok(targets.includes('thr_test'));
+  } finally { await h.harness.lifecycle.dispose(); }
+});
+
+test('readiness skip marks persist per project, overlay status and reject non-skippable steps', async () => {
+  const h = await setup();
+  try {
+    const value = h.value; value.readiness = readinessSteps({ configured: true, contextSkill: true, files: {}, paths: {} }); h.value = value;
+    const ci = async () => ((await h.harness.behavior.callRpc('status', { threadId: 'thr_test', force: true })) as any).readiness.find((r: any) => r.id === 'ci').state;
+    assert.equal(await ci(), 'todo');
+    assert.deepEqual(await h.harness.behavior.callRpc('setReadinessSkip', { threadId: 'thr_test', stepId: 'ci', skipped: true }), { ok: true });
+    assert.equal(await ci(), 'skipped');
+    assert.deepEqual(await h.bb.storage.kv.get('readiness-skip:host_test:/project'), ['ci']);
+    await h.harness.behavior.callRpc('setReadinessSkip', { threadId: 'thr_test', stepId: 'ci', skipped: false });
+    assert.equal(await ci(), 'todo');
+    await assert.rejects(h.harness.behavior.callRpc('setReadinessSkip', { threadId: 'thr_test', stepId: 'context', skipped: true }));
   } finally { await h.harness.lifecycle.dispose(); }
 });

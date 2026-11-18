@@ -6,6 +6,7 @@ import { promisify } from 'node:util';
 import { parseDocument } from 'yaml';
 import { snapshotSchema, type HostInput, type Snapshot } from './model.ts';
 import { workflowActions } from './workflow.ts';
+import { readinessSteps, type ReadinessFacts } from './readiness.ts';
 import { BASIC_PLAN_ROOT, usesBasicWorkflow } from './basic-workflow.ts';
 
 const exec = promisify(execFile);
@@ -184,7 +185,7 @@ export async function collectSnapshot(input: HostInput, signal?: AbortSignal): P
     pendingQuestions: null,
     versions: { globalCli: null, globalSource: null, installed: null, sourceVersion: null, sourceWorktreeVersion: null, sourceSha: null, sourceDirty: null },
     upstream: { version: null, sha: null, ref: null, checkedAt: null, error: null },
-    extensions: [], skills: [], candidates: [], target: null, checks: [], actions: [], diagnostics: [],
+    extensions: [], skills: [], candidates: [], target: null, checks: [], actions: [], readiness: [], diagnostics: [],
   };
   if (input.cachedVersions) {
     Object.assign(s.versions, input.cachedVersions.versions, { installed: null });
@@ -273,6 +274,34 @@ export async function collectSnapshot(input: HostInput, signal?: AbortSignal): P
   const planRoot = str(paths.plans) ?? '.ai-factory/plans';
   const qaRoot = str(paths.qa) ?? '.ai-factory/qa';
   const openRoot = str(obj(aifhub.openspec).root) ?? 'openspec';
+  // Readiness probes share Reader limits and the fingerprint's seen set; a failed path is a false fact, not a failed snapshot.
+  const files: Record<string, boolean> = {};
+  const probe = async (rel: string) => {
+    try { files[rel] = (await read.read(rel)) !== null; }
+    catch { files[rel] = false; s.diagnostics.push(`Подготовка проекта: ${rel} недоступен.`); }
+  };
+  const probeDir = async (rel: string, keep?: (item: { name: string; directory: boolean }) => boolean) => {
+    const dir = rel.replace(/\/+$/, '');
+    try { for (const item of await read.list(dir)) if (!keep || keep(item)) files[`${dir}/${item.name}`] = true; }
+    catch { s.diagnostics.push(`Подготовка проекта: каталог ${dir} недоступен.`); }
+  };
+  const description = str(paths.description) ?? '.ai-factory/DESCRIPTION.md';
+  const architecture = str(paths.architecture) ?? '.ai-factory/ARCHITECTURE.md';
+  const roadmap = str(paths.roadmap) ?? '.ai-factory/ROADMAP.md';
+  const rulesBase = str(obj(config.rules).base) ?? '.ai-factory/rules/base.md';
+  const docsDir = str(paths.docs) ?? 'docs';
+  for (const rel of [description, '.ai-factory/config.yaml', architecture, roadmap, rulesBase, 'AGENTS.md',
+    'lefthook.yml', '.lefthook.yml', '.pre-commit-config.yaml',
+    '.gitlab-ci.yml', '.circleci/config.yml', 'Jenkinsfile', 'bitbucket-pipelines.yml',
+    'Makefile', 'Taskfile.yml', 'justfile', 'magefile.go',
+    'Dockerfile', 'compose.yml', 'compose.yaml', 'docker-compose.yml']) await probe(rel);
+  await probeDir('.husky');
+  await probeDir('.github/workflows', item => !item.directory && /\.ya?ml$/i.test(item.name));
+  await probeDir(docsDir);
+  const readinessFacts: ReadinessFacts = { configured: s.configured,
+    contextSkill: s.skills.includes('aif') || s.skills.includes('aif-analyze'),
+    files, paths: { description, architecture, roadmap, rulesBase, docs: docsDir },
+    ruleAreas: Object.keys(obj(config.rules)).filter(k => k !== 'base') };
   const branch = await git(root, ['branch', '--show-current'], signal);
   const head = await git(root, ['rev-parse', 'HEAD'], signal);
   const dirtyDiff = await git(root, ['diff', '--no-ext-diff', '--no-textconv', '--binary', 'HEAD', '--', '.'], signal);
@@ -390,6 +419,7 @@ export async function collectSnapshot(input: HostInput, signal?: AbortSignal): P
       files: [...read.seen].sort(), untracked: [...extra.seen].sort() }));
   } catch { s.inputsFingerprint = null; }
   s.fingerprint = hash(JSON.stringify([s.fingerprint, s.inputsFingerprint]));
+  s.readiness = s.profile === 'invalid' ? [] : readinessSteps(readinessFacts, []);
   s.actions = workflowActions(s);
   return snapshotSchema.parse(s);
 }

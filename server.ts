@@ -5,6 +5,7 @@ import { hostContract, rpcContract, type DelegationView } from './contract.ts';
 import type { DelegationChoice } from './delegation.ts';
 import { requestSchema, phaseSchema, snapshotSchema, type CardRequest, type Snapshot, type Phase, type Suggestions } from './model.ts';
 import { actionPrompt, workflowActions } from './workflow.ts';
+import { applySkipped } from './readiness.ts';
 import { analyzeReply } from './suggestions.ts';
 import { blockedByGate } from './gate.ts';
 import { attachChatChecks, readChatChecks, type ChatCheck } from './check-history.ts';
@@ -206,6 +207,7 @@ export default async function plugin(bb: BbPluginApi) {
       snapshot.phase = phase;
       snapshot.phaseSource = phase === 'unknown' ? 'Этап не указан; состояние файлов не доказывает активный вызов' : 'Этап указан агентом в карточке; выполнение проверяется BB';
     }
+    snapshot.readiness = applySkipped(snapshot.readiness, await bb.storage.kv.get<string[]>(`readiness-skip:${environment.hostId}:${environment.path!}`) ?? []);
     snapshot.actions = workflowActions(snapshot);
     snapshot.threadState = thread.runtime.displayStatus;
     try {
@@ -266,6 +268,20 @@ export default async function plugin(bb: BbPluginApi) {
     suggestions: async input => (await suggested(input.threadId)).view,
     delegation: input => delegationView(input.threadId),
     setDelegation: input => serial(`delegation:${input.threadId}`, () => setDelegation(input.threadId, input.choice)),
+    setReadinessSkip: async input => {
+      const { environment } = await context(input.threadId);
+      const key = `readiness-skip:${environment.hostId}:${environment.path!}`;
+      return serial(key, async () => {
+        const list = await bb.storage.kv.get<string[]>(key) ?? [];
+        if (list.includes(input.stepId) === input.skipped) return { ok: true as const };
+        const next = input.skipped ? [...list, input.stepId] : list.filter(id => id !== input.stepId);
+        await bb.storage.kv.set(key, next);
+        bb.log.info(`aif-chat: readiness skip threadId=${input.threadId} stepId=${input.stepId} skipped=${input.skipped}`);
+        cache.invalidate(k => !!watchers.get(k)?.has(input.threadId));
+        bb.realtime.publish('changed', { threadId: input.threadId });
+        return { ok: true as const };
+      });
+    },
     dismissSuggestion: input => serial(input.threadId, async () => {
       const current = await suggested(input.threadId);
       if (current.view.sourceKey !== input.sourceKey || !current.ids.includes(input.commandId)) throw new Error('Предложения изменились. Обновите их.');

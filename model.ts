@@ -10,6 +10,11 @@ export const actionSchema = z.object({
   id: z.string(), label: z.string(), command: z.string(), group: z.enum(['next', 'check', 'setup', 'maintenance']),
   reason: z.string(), available: z.boolean(), disabledReason: z.literal('unchanged').optional(),
 });
+export const readinessStepSchema = z.object({
+  id: z.string(), label: z.string(), actionId: z.string(),
+  state: z.enum(['done', 'todo', 'skipped']), optional: z.boolean(), skippable: z.boolean(),
+  missing: z.array(z.string()),
+});
 export const snapshotSchema = z.object({
   schemaVersion: z.literal('aif-chat/v1'), collectedAt: z.string(), fingerprint: z.string(),
   inputsFingerprint: z.string().length(64).nullable().default(null),
@@ -34,10 +39,11 @@ export const snapshotSchema = z.object({
     chat: z.object({ seq: z.number(), at: z.string(), target: z.string(),
       result: z.lazy(() => gateResultSchema), freshness: z.enum(['unknown', 'unchanged', 'changed']),
       inputFingerprint: z.string().length(64).optional(), observedAt: z.string().optional() }).optional() })),
-  actions: z.array(actionSchema), diagnostics: z.array(z.string()),
+  actions: z.array(actionSchema), readiness: z.array(readinessStepSchema).default([]), diagnostics: z.array(z.string()),
 });
 export type Snapshot = z.infer<typeof snapshotSchema>;
 export type Action = z.infer<typeof actionSchema>;
+export type ReadinessStep = z.infer<typeof readinessStepSchema>;
 export type Phase = z.infer<typeof phaseSchema>;
 export type CardRequest = z.infer<typeof requestSchema>;
 export const selectionSchema = z.object({ target: z.string().max(1000), phase: phaseSchema }).strict();

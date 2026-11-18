@@ -236,3 +236,24 @@ test('gate report remains reported PASS; preparation artifacts never become gree
     assert.equal(s.checks.find(c => c.id === 'rules')?.required, true);
   } finally { await f.cleanup(); }
 });
+
+test('readiness reflects project files and config.yaml paths; an invalid profile has no steps', async () => {
+  const f = await fixture();
+  try {
+    const state = (s: Awaited<ReturnType<typeof collectSnapshot>>, id: string) => s.readiness.find(r => r.id === id);
+    let s = await collectSnapshot(input(f.root));
+    assert.equal(state(s, 'install')?.state, 'done');
+    assert.equal(state(s, 'context')?.state, 'todo');
+    assert.deepEqual(state(s, 'context')?.missing, ['.ai-factory/DESCRIPTION.md', '.ai-factory/rules/base.md', 'AGENTS.md']);
+    assert.equal(state(s, 'ci')?.state, 'todo');
+    await f.write('.ai-factory/config.yaml', 'paths:\n  description: docs/about.md\nrules:\n  base: rules/base.md\n');
+    for (const rel of ['docs/about.md', 'rules/base.md', 'AGENTS.md', '.github/workflows/ci.yml', '.husky/pre-commit']) await f.write(rel, 'x');
+    s = await collectSnapshot(input(f.root));
+    assert.equal(state(s, 'context')?.state, 'done');
+    assert.equal(state(s, 'ci')?.state, 'done');
+    assert.equal(state(s, 'quality')?.state, 'done');
+    assert.equal(state(s, 'architecture')?.state, 'todo');
+    await f.write('.ai-factory.json', '{');
+    assert.deepEqual((await collectSnapshot(input(f.root))).readiness, []);
+  } finally { await f.cleanup(); }
+});

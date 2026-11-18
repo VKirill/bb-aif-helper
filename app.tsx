@@ -2,7 +2,8 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { definePluginApp, useRpc, useRealtime, useComposer, useBbNavigate, experimental_ProviderModelPicker as ProviderModelPicker, type ExperimentalProviderModelPickerValue as PickerValue, type PluginMessageDirectiveProps, type ExperimentalThreadContextCardProps, type ExperimentalThreadTabProps, type ExperimentalCodeFenceRendererProps, type PluginComposerApi } from '@get-bb/plugin-sdk/app';
 import type { rpcContract, DelegationView } from './contract.ts';
 import type { DelegationChoice } from './delegation.ts';
-import { phaseSchema, type Snapshot, type Phase, type Action, type Suggestions } from './model.ts';
+import { phaseSchema, type Snapshot, type Phase, type Action, type ReadinessStep, type Suggestions } from './model.ts';
+import { readinessComplete, nextReadinessStep } from './readiness.ts';
 import { parseReplyGate } from './gate.ts';
 import { rowActions, supplementaryChecks } from './check-actions.ts';
 import { updateInVersionDetails, VERSION_TTL } from './versions.ts';
@@ -78,13 +79,20 @@ function WorkflowCard({ threadId, initialTarget = '', phase = 'unknown', openFil
     } catch (e) { if (mounted.current) setError(e instanceof Error ? e.message : String(e)); }
     finally { sendingRef.current = false; if (mounted.current) { setSending(false); void refresh(); } }
   }
+  const setReadinessSkip = async (stepId: 'roadmap' | 'quality' | 'ci', skipped: boolean) => {
+    try { await rpc.call('setReadinessSkip', { threadId, stepId, skipped }); }
+    catch (e) { setError(e instanceof Error ? e.message : String(e)); return; }
+    await refresh();
+  };
   const busy = !!snapshot && !['idle', 'error'].includes(snapshot.threadState);
   const tasks = snapshot?.target?.tasks ?? [];
   const completed = tasks.filter(t => t.done).length;
   const nextVersionCheck = snapshot?.upstream.checkedAt ? Date.parse(snapshot.upstream.checkedAt) + VERSION_TTL : 0;
   // One primary action per card: the first "next" step. Everything else is outline.
+  // In the tab the readiness block owns its steps' actions, so they never take primary styling there.
+  const readinessActionIds = new Set(snapshot?.readiness.map(s => s.actionId) ?? []);
   const primaryId = snapshot && (snapshot.actions.find(a => a.group === 'next' && a.available)
-    ?? snapshot.actions.find(a => a.group === 'maintenance' && a.available && !updateInVersionDetails(snapshot, a.id) && !contextSetupInDetails(snapshot, a.id)))?.id;
+    ?? snapshot.actions.find(a => a.group === 'maintenance' && a.available && !updateInVersionDetails(snapshot, a.id) && !contextSetupInDetails(snapshot, a.id) && !(delegation && readinessActionIds.has(a.id))))?.id;
   const renderAction = (a: Action) => <Hint key={a.id} text={`${a.reason}\n${a.command}`}><Button type="button" size="sm" variant={a.id === primaryId ? 'default' : 'outline'}
     disabled={sending || busy || !a.available} onClick={() => void run(a)}>
     {a.label}{!a.available && (a.disabledReason === 'unchanged' ? ' · без изменений' : ' · не установлен')}</Button></Hint>;
@@ -96,7 +104,7 @@ function WorkflowCard({ threadId, initialTarget = '', phase = 'unknown', openFil
   };
   return <section aria-label="AI Factory workflow" className={cn('aif-card flex min-w-0 flex-col gap-4 text-sm text-foreground [overflow-wrap:anywhere]',
     compact ? '' : 'my-3 rounded-xl border border-border bg-card p-4')}>
-    <header className={cn('flex min-h-8 items-center gap-2', delegation && 'sticky top-0 z-10 -mx-4 -mt-4 border-b border-border bg-background/90 px-4 py-3 backdrop-blur')}>
+    <header className={cn('flex min-h-8 items-center gap-2', delegation && 'sticky -top-4 z-10 -mx-4 -mt-4 border-b border-border bg-background/90 px-4 py-3 backdrop-blur')}>
       <span className="grid size-6 shrink-0 place-items-center rounded-md bg-primary text-primary-foreground"><Icon name="Workflow" className="size-3.5" /></span>
       <strong className="text-base font-semibold tracking-tight whitespace-nowrap">AI Factory</strong>
       {snapshot && <Badge variant="secondary" className="truncate font-medium">{profileNames[snapshot.profile]}</Badge>}
@@ -113,6 +121,8 @@ function WorkflowCard({ threadId, initialTarget = '', phase = 'unknown', openFil
         {snapshot.versions.sourceVersion && <span>Git <b className="font-semibold text-foreground">{snapshot.versions.sourceVersion}</b> @{snapshot.versions.sourceSha?.slice(0, 7)}{snapshot.versions.sourceDirty ? ' · изменён' : ''}</span>}
         {snapshot.extensions.map(e => <span key={e.name} title={e.installedVersion ? 'Установленная версия расширения' : 'Записанная версия; установленные файлы не подтверждены'}>{e.name} <b className="font-semibold text-foreground">{e.installedVersion ?? e.recordedVersion ?? 'неизвестна'}</b>{!e.installedVersion && ' · не подтверждена'}</span>)}
       </div>
+
+      {delegation && snapshot.readiness.length > 0 && <ReadinessSection snapshot={snapshot} run={run} busy={busy} sending={sending} setReadinessSkip={setReadinessSkip} />}
 
       <Section label="Текущий этап" title="Сейчас">
         <p className="m-0 flex flex-wrap items-center gap-2" title={snapshot.phaseSource}>
@@ -138,9 +148,9 @@ function WorkflowCard({ threadId, initialTarget = '', phase = 'unknown', openFil
           </Disclosure>
         </div>}
         {renderActions(snapshot.actions.filter(a => a.group === 'next').slice(0, 3))}
-        {(() => { const items = snapshot.actions.filter(a => a.group === 'maintenance' && !updateInVersionDetails(snapshot, a.id) && !contextSetupInDetails(snapshot, a.id));
+        {(() => { const items = snapshot.actions.filter(a => a.group === 'maintenance' && !updateInVersionDetails(snapshot, a.id) && !contextSetupInDetails(snapshot, a.id) && !(delegation && a.id === 'setup-context'));
           return items.length ? <div className="aif-maintenance" role="group" aria-label="Обновление и настройка AI Factory">{renderActions(items)}</div> : null; })()}
-        {snapshot.actions.some(a => contextSetupInDetails(snapshot, a.id)) && <Disclosure className="aif-context-setup" summary="Настройка контекста проекта">
+        {!delegation && snapshot.actions.some(a => contextSetupInDetails(snapshot, a.id)) && <Disclosure className="aif-context-setup" summary="Настройка контекста проекта">
           <p className="m-0 text-xs text-muted-foreground">Выполнение плана уже начато. Настройка контекста запускается отдельно и не продолжает выбранный план.</p>
           {renderActions(snapshot.actions.filter(a => contextSetupInDetails(snapshot, a.id)))}
         </Disclosure>}
@@ -168,7 +178,7 @@ function WorkflowCard({ threadId, initialTarget = '', phase = 'unknown', openFil
             {c.chat.result.suggested_next?.reason && <span>{` ${c.chat.result.suggested_next.reason}`}</span>}</p>}
           <p className="m-0 text-xs text-muted-foreground">{c.chat ? `Файловый отчёт: ${c.path ? checkLabels[c.state] + '. ' + c.detail : 'не найден.'}` : c.detail}</p>
         </li>)}</ul>
-        <Disclosure summary="Настройка инструментов">{renderActions(snapshot.actions.filter(a => a.group === 'setup'))}</Disclosure>
+        <Disclosure summary="Настройка инструментов">{renderActions(snapshot.actions.filter(a => a.group === 'setup' && (a.id === 'quality-setup' || a.id === 'ci-setup')))}</Disclosure>
       </Disclosure>}
 
       <Disclosure className="aif-details" summary={<>Версии и расширения{snapshot.extensions.length ? <span className="font-normal text-muted-foreground"> · {snapshot.extensions.length}</span> : null}</>}>
@@ -286,6 +296,61 @@ function DelegationSection({ threadId, environmentId, busy }: { threadId: string
         </li>;
       })}</ul>
     </div>}
+  </Section>;
+}
+
+function ReadinessSection({ snapshot, run, busy, sending, setReadinessSkip }: {
+  snapshot: Snapshot; run: (action: Action) => void; busy: boolean; sending: boolean;
+  setReadinessSkip: (stepId: 'roadmap' | 'quality' | 'ci', skipped: boolean) => Promise<void>;
+}) {
+  const [pendingSkip, setPendingSkip] = useState<string | null>(null);
+  const steps = snapshot.readiness;
+  const required = steps.filter(s => !s.optional);
+  const optional = steps.filter(s => s.optional);
+  const next = nextReadinessStep(steps);
+  const actionFor = (s: ReadinessStep) => snapshot.actions.find(a => a.id === s.actionId);
+  const iconFor = (s: ReadinessStep) => s.state === 'done' ? 'CircleCheck' : s.state === 'skipped' ? 'CircleDashed' : 'Circle';
+  const stateLabel = (s: ReadinessStep) => s.state === 'done' ? 'Выполнен' : s.state === 'skipped' ? 'Пропущен' : 'Ожидает очереди';
+  async function toggleSkip(s: ReadinessStep, skipped: boolean) {
+    if (pendingSkip) return;
+    setPendingSkip(s.id);
+    try { await setReadinessSkip(s.id as 'roadmap' | 'quality' | 'ci', skipped); }
+    finally { setPendingSkip(null); }
+  }
+  function stepRow(s: ReadinessStep, n: number | null, runVariant: 'default' | 'outline' | null) {
+    const action = runVariant ? actionFor(s) : undefined;
+    const skip = s.state === 'skipped'
+      ? <Button type="button" size="sm" variant="ghost" disabled={pendingSkip !== null} onClick={() => void toggleSkip(s, false)}>Вернуть</Button>
+      : s.skippable && s.state === 'todo'
+        ? <Button type="button" size="sm" variant="ghost" disabled={pendingSkip !== null} onClick={() => void toggleSkip(s, true)}>Пропустить</Button>
+        : null;
+    return <li key={s.id} className="flex items-start gap-2">
+      <Icon name={iconFor(s)} aria-label={stateLabel(s)} className={cn('mt-0.5 size-4 shrink-0', s.state === 'done' ? 'text-primary' : 'text-muted-foreground')} />
+      <div className="flex min-w-0 flex-1 flex-col gap-1">
+        <span className="flex flex-wrap items-baseline gap-x-2">
+          {n !== null && <span className="text-xs tabular-nums text-muted-foreground">{n}.</span>}
+          <span className={cn('text-sm font-medium', s.state === 'done' && 'text-muted-foreground')}>{s.label}</span>
+          {s.state !== 'done' && s.missing.length > 0 && <span className="text-xs text-muted-foreground">{s.missing.join(', ')}</span>}
+        </span>
+        {(action || skip) && <span className="flex flex-wrap gap-2">
+          {action && <Hint text={`${action.reason}\n${action.command}`}><Button type="button" size="sm" variant={runVariant ?? 'outline'}
+            disabled={sending || busy || !action.available} onClick={() => void run(action)}>
+            {action.label}{!action.available && (action.disabledReason === 'unchanged' ? ' · без изменений' : ' · не установлен')}</Button></Hint>}
+          {skip}
+        </span>}
+      </div>
+    </li>;
+  }
+  const list = <>
+    <ol className="m-0 flex list-none flex-col gap-2 p-0">{required.map((s, i) => stepRow(s, i + 1, next?.id === s.id ? 'default' : null))}</ol>
+    {optional.length > 0 && <Disclosure summary="Дополнительно">
+      <ul className="m-0 flex list-none flex-col gap-2 p-0">{optional.map(s => stepRow(s, null, s.state === 'todo' ? 'outline' : null))}</ul>
+    </Disclosure>}
+  </>;
+  if (readinessComplete(steps)) return <Disclosure summary="Проект готов к работе через AI Factory">{list}</Disclosure>;
+  return <Section label="Подготовка проекта" title="Подготовка проекта">
+    <p className="m-0 text-xs text-muted-foreground">Выполните шаги по порядку, чтобы AI Factory работал полностью</p>
+    {list}
   </Section>;
 }
 
