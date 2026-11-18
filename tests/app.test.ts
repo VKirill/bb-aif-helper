@@ -471,7 +471,7 @@ test('non-blocking gate reason and command render independently; dismiss does no
 });
 
 test('readiness block in the tab: one run button on the first todo step, skip RPC, collapsed when ready, absent from chat cards', async () => {
-  const { readinessSteps } = await import('../readiness.ts');
+  const { applyRan, readinessSteps } = await import('../readiness.ts');
   const tab = app.tabs.find(t => t.id === 'workflow')!;
   const s = data(); s.readiness = readinessSteps({ configured: true, contextSkill: true, files: {}, paths: {} });
   let runs: string[] = []; const skips: unknown[] = [];
@@ -493,7 +493,7 @@ test('readiness block in the tab: one run button on the first todo step, skip RP
     await waitFor(() => assert.deepEqual(skips, [{ threadId: 'thr_panel', stepId: 'ci', skipped: true }]));
   } finally { slot.lifecycle.unmount(); }
   const files = Object.fromEntries(['.ai-factory/DESCRIPTION.md', '.ai-factory/config.yaml', '.ai-factory/rules/base.md', 'AGENTS.md', '.ai-factory/ARCHITECTURE.md', 'lefthook.yml', 'Jenkinsfile', 'docs/index.md', '.ai-factory/RULES.md', 'Makefile', 'Dockerfile'].map(f => [f, true]));
-  s.readiness = readinessSteps({ configured: true, contextSkill: true, files, paths: {} });
+  s.readiness = applyRan(readinessSteps({ configured: true, contextSkill: true, files, paths: {} }), ['docs']);
   slot = renderSlot(tab as any, { threadId: 'thr_panel', environment: { id: 'env_panel' } }, { rpc });
   try {
     await slot.findByText('Проект готов к работе через AI Factory');

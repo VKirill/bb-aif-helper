@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readinessSteps, readinessComplete, nextReadinessStep, type ReadinessFacts } from '../readiness.ts';
+import { applyRan, readinessSteps, readinessComplete, nextReadinessStep, type ReadinessFacts } from '../readiness.ts';
 
 const facts = (patch: Partial<ReadinessFacts> = {}): ReadinessFacts => ({ configured: true, contextSkill: true, files: {}, paths: {}, ...patch });
 const byId = (steps: ReturnType<typeof readinessSteps>) => Object.fromEntries(steps.map(s => [s.id, s]));
@@ -72,16 +72,25 @@ test('detected artifacts complete their steps', () => {
     ...contextFiles, '.ai-factory/ARCHITECTURE.md': true, 'lefthook.yml': true, '.github/workflows/ci.yml': true,
     'docs/usage.md': true, '.ai-factory/RULES.md': true, 'Makefile': true, 'compose.yml': true,
   };
-  const s = byId(readinessSteps(facts({ files })));
+  const s = byId(applyRan(readinessSteps(facts({ files })), ['docs']));
   assert(Object.values(s).every(v => v.state === 'done'));
   assert.equal(readinessComplete(Object.values(s)), true);
 });
 
 test('docs, rules, build and docker follow config.yaml paths and any-of file lists', () => {
-  const s = byId(readinessSteps(facts({ files: { 'manual/intro.md': true, 'rules.md': true, 'Justfile': true, 'Dockerfile': true }, paths: { docs: 'manual/', rulesFile: 'rules.md' } })));
+  const s = byId(applyRan(readinessSteps(facts({ files: { 'manual/intro.md': true, 'rules.md': true, 'Justfile': true, 'Dockerfile': true }, paths: { docs: 'manual/', rulesFile: 'rules.md' } })), ['docs']));
   for (const id of ['docs', 'rules', 'build', 'docker']) assert.equal(s[id].state, 'done', id);
   const empty = byId(readinessSteps(facts()));
   assert.deepEqual(empty.docs.missing, ['docs/']); assert.deepEqual(empty.rules.missing, ['.ai-factory/RULES.md']);
   assert.equal(empty.build.anyOf, true); assert.equal(empty.docker.anyOf, true);
   for (const id of ['docs', 'rules', 'build', 'docker']) assert.equal(empty[id].skippable, true, id);
+});
+
+test('an existing docs/ folder alone does not complete documentation; a run from the block does', () => {
+  const steps = readinessSteps(facts({ files: { 'docs/notes.md': true } }));
+  assert.equal(byId(steps).docs.state, 'todo');
+  assert.deepEqual(byId(steps).docs.missing, []);
+  assert.equal(byId(applyRan(steps, ['docs'])).docs.state, 'done');
+  const noFolder = readinessSteps(facts());
+  assert.equal(byId(applyRan(noFolder, ['docs'])).docs.state, 'todo', 'a run that produced no docs/ stays todo');
 });

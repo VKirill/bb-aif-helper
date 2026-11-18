@@ -36,7 +36,7 @@ export const readinessHelp: Record<string, string> = {
   architecture: '/aif-architecture описывает, из каких частей состоит проект и где какой код должен лежать (ARCHITECTURE.md). По нему агенты кладут новый код в нужные места и не нарушают границы модулей.',
   quality: 'Git-хуки: перед каждым git commit сами запускаются typecheck, тесты и линтер. Если проверка падает, коммит не создаётся и сломанный код не попадает в историю. Шаг выполнен, если в проекте есть любой из: .husky/, lefthook.yml, .lefthook.yml, .pre-commit-config.yaml.',
   ci: 'CI проверяет код на сервере (например, GitHub Actions) после каждого git push: ставит зависимости с нуля и прогоняет тесты. Результат виден у коммита (✅/❌) и в строке «CI» в «Что проверить». Хуки можно обойти, CI — нет. Шаг выполнен, если есть любой из: .github/workflows/, .gitlab-ci.yml, .circleci/config.yml, Jenkinsfile, bitbucket-pipelines.yml. Если над проектом работает один человек с одной машины, шаг можно пропустить.',
-  docs: '/aif-docs пишет документацию проекта: короткий README как стартовую страницу и подробные страницы по темам в папке docs/. Шаг выполнен, когда есть папка docs/ с файлами.',
+  docs: '/aif-docs пишет документацию проекта: короткий README как стартовую страницу и подробные страницы по темам в папке docs/. Шаг засчитывается, когда /aif-docs запущен кнопкой «Запустить» в этом блоке и в проекте есть папка docs/: одна папка docs/ ещё не значит, что документация написана по методике AI Factory.',
   rules: '/aif-rules записывает правила кода проекта в RULES.md: соглашения, запреты, «всегда делай так». /aif-implement читает их перед каждой задачей, /aif-rules-check проверяет по ним изменения. Навык спросит, какие правила добавить.',
   build: '/aif-build-automation создаёт или дополняет файл команд сборки (Makefile, Taskfile, Justfile), чтобы установка, тесты и сборка запускались одной командой. Если проекту хватает npm-скриптов, шаг можно пропустить.',
   docker: '/aif-dockerize готовит Docker: Dockerfile, compose для разработки и продакшена, .dockerignore, и проверяет безопасность продакшен-образа. Может спросить про базу данных, прокси и кэш. Если проект не запускается в контейнере, шаг можно пропустить.',
@@ -64,12 +64,20 @@ export function readinessSteps(facts: ReadinessFacts, skipped: string[] = []): R
     step('architecture', 'Описать архитектуру', 'setup-architecture', has(architecture), [architecture]),
     step('quality', 'Настроить проверки', 'quality-setup', any(QUALITY_FILES), QUALITY_FILES, true, true),
     step('ci', 'Настроить CI', 'ci-setup', any(CI_FILES), CI_FILES, true, true),
-    step('docs', 'Написать документацию', 'docs-setup', hasDir(docs), [`${docs}/`], true),
+    // A docs/ folder alone is not proof: plenty of projects have one. Done needs a run from this block (applyRan).
+    step('docs', 'Написать документацию', 'docs-setup', false, hasDir(docs) ? [] : [`${docs}/`], true),
     step('rules', 'Добавить правила кода', 'rules-setup', has(rulesFile), [rulesFile], true),
     step('build', 'Настроить команды сборки', 'build-setup', any(BUILD_FILES), BUILD_FILES, true, true),
     step('docker', 'Настроить Docker', 'docker-setup', any(DOCKER_FILES), DOCKER_FILES, true, true),
   ];
   return applySkipped(steps, skipped);
+}
+
+/** Steps whose files exist in many projects anyway; they count only after a run from the readiness block. */
+export const RUN_CONFIRMED_STEPS = ['docs'] as const;
+/** Marks a run-confirmed step done when it was launched from the block and its files are now present. */
+export function applyRan(steps: ReadinessStep[], ran: string[]): ReadinessStep[] {
+  return steps.map(s => (RUN_CONFIRMED_STEPS as readonly string[]).includes(s.id) && s.state === 'todo' && !s.missing.length && ran.includes(s.id) ? { ...s, state: 'done' } : s);
 }
 
 export function applySkipped(steps: ReadinessStep[], skipped: string[]): ReadinessStep[] {

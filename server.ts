@@ -5,7 +5,7 @@ import { hostContract, rpcContract, type DelegationView } from './contract.ts';
 import type { DelegationChoice } from './delegation.ts';
 import { requestSchema, phaseSchema, snapshotSchema, type CardRequest, type Snapshot, type Phase, type Suggestions } from './model.ts';
 import { actionPrompt, workflowActions } from './workflow.ts';
-import { applySkipped } from './readiness.ts';
+import { applyRan, applySkipped, RUN_CONFIRMED_STEPS } from './readiness.ts';
 import { analyzeReply } from './suggestions.ts';
 import { blockedByGate } from './gate.ts';
 import { attachChatChecks, readChatChecks, type ChatCheck } from './check-history.ts';
@@ -207,7 +207,9 @@ export default async function plugin(bb: BbPluginApi) {
       snapshot.phase = phase;
       snapshot.phaseSource = phase === 'unknown' ? 'Этап не указан; состояние файлов не доказывает активный вызов' : 'Этап указан агентом в карточке; выполнение проверяется BB';
     }
-    snapshot.readiness = applySkipped(snapshot.readiness, await bb.storage.kv.get<string[]>(`readiness-skip:${environment.hostId}:${environment.path!}`) ?? []);
+    const projectKey = `${environment.hostId}:${environment.path!}`;
+    snapshot.readiness = applySkipped(applyRan(snapshot.readiness, await bb.storage.kv.get<string[]>(`readiness-ran:${projectKey}`) ?? []),
+      await bb.storage.kv.get<string[]>(`readiness-skip:${projectKey}`) ?? []);
     snapshot.actions = workflowActions(snapshot);
     snapshot.threadState = thread.runtime.displayStatus;
     try {
@@ -303,7 +305,7 @@ export default async function plugin(bb: BbPluginApi) {
       if (!item || !current.snapshot) throw new Error('Команда недоступна или удалена из предложений.');
       if (current.snapshot.pendingQuestions === null) throw new Error('Не удалось проверить открытые вопросы. Обновите предложения.');
       if (current.snapshot.pendingQuestions) throw new Error('Сначала ответьте на открытые вопросы текущего workflow.');
-      const { thread } = await context(input.threadId);
+      const { thread, environment } = await context(input.threadId);
       if (!['idle', 'error'].includes(thread.status) || thread.queuedMessageCount > 0 || thread.activeBackgroundAgentCount > 0) throw new Error('В чате выполняется или уже ожидает работа. Дождитесь завершения.');
       // Reading project files may take time; the last answer can change during it.
       const latest = await bb.sdk.threads.output({ threadId: input.threadId });
@@ -333,7 +335,7 @@ export default async function plugin(bb: BbPluginApi) {
         if (reply.error || blockedByGate(skill, reply.gate)) throw new Error('Последний gate содержит блокирующие проблемы или некорректен. Сначала разберите его результат.');
       }
       if (current.pendingQuestions) throw new Error('Сначала ответьте на открытые вопросы текущего workflow.');
-      const { thread } = await context(input.threadId);
+      const { thread, environment } = await context(input.threadId);
       if (!['idle', 'error'].includes(thread.status) || thread.queuedMessageCount > 0 || thread.activeBackgroundAgentCount > 0) throw new Error('В чате выполняется или уже ожидает работа. Дождитесь завершения.');
       if (deliveries.some(d => d.fingerprint === input.fingerprint && d.actionId === input.actionId && Date.now() - d.at < 15000)) throw new Error('Эта команда только что отправлена. Повторный запуск предотвращён.');
       const record: Delivery = { requestId: input.requestId, fingerprint: input.fingerprint, actionId: input.actionId, state: 'attempting', at: Date.now() };
@@ -350,6 +352,13 @@ export default async function plugin(bb: BbPluginApi) {
         await bb.sdk.threads.send({ threadId: input.threadId, input: commandInput(action.command, actionPrompt(current, action)), mode: 'queue-if-active' });
         record.state = 'sent';
         await bb.storage.kv.set(`deliveries:${input.threadId}`, next);
+        const ranStep = current.readiness.find(r => r.actionId === action.id && (RUN_CONFIRMED_STEPS as readonly string[]).includes(r.id));
+        if (ranStep) {
+          const ranKey = `readiness-ran:${environment.hostId}:${environment.path!}`;
+          const ran = await bb.storage.kv.get<string[]>(ranKey) ?? [];
+          if (!ran.includes(ranStep.id)) await bb.storage.kv.set(ranKey, [...ran, ranStep.id]);
+          bb.log.info(`aif-chat: readiness step launched threadId=${input.threadId} stepId=${ranStep.id}`);
+        }
       } catch {
         record.state = 'uncertain';
         await bb.storage.kv.set(`deliveries:${input.threadId}`, next);

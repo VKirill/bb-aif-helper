@@ -619,3 +619,17 @@ test('readiness skip marks persist per project, overlay status and reject non-sk
     await assert.rejects(h.harness.behavior.callRpc('setReadinessSkip', { threadId: 'thr_test', stepId: 'context', skipped: true }));
   } finally { await h.harness.lifecycle.dispose(); }
 });
+
+test('documentation counts as done only after /aif-docs was launched from the readiness block', async () => {
+  const h = await setup();
+  try {
+    const value = snapshot({ phase: 'unknown', target: null, skills: [...snapshot().skills, 'aif-docs'] });
+    value.readiness = readinessSteps({ configured: true, contextSkill: true, files: { 'docs/notes.md': true }, paths: {} }); h.value = value;
+    const docs = (view: any) => view.readiness.find((r: any) => r.id === 'docs').state;
+    const view = await h.harness.behavior.callRpc('status', { threadId: 'thr_test', force: true }) as any;
+    assert.equal(docs(view), 'todo', 'an existing docs/ folder is not proof of /aif-docs');
+    await h.harness.behavior.callRpc('run', { ...runInput(view.fingerprint), phase: 'unknown', target: '', actionId: 'docs-setup' });
+    assert.deepEqual(await h.bb.storage.kv.get('readiness-ran:host_test:/project'), ['docs']);
+    assert.equal(docs(await h.harness.behavior.callRpc('status', { threadId: 'thr_test', force: true })), 'done');
+  } finally { await h.harness.lifecycle.dispose(); }
+});
