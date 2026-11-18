@@ -17,16 +17,16 @@ const profileNames: Record<Snapshot['profile'], string> = { none: 'Нет уст
 const checkLabels = { notrun: 'Нет evidence', 'reported-pass': 'PASS в отчёте', warn: 'С замечаниями', fail: 'Ошибка', unknown: 'Не подтверждено' };
 
 const actionIcons: Record<string, string> = {
-  commit: 'GitCommit', fix: 'Wrench', 'fix-new': 'Wrench', 'fix-findings': 'Wrench', 'execute-fix': 'Wrench',
-  verify: 'RotateCw', 'check-verify': 'ListChecks', implement: 'Play', 'implement-proposed': 'Play',
-  explore: 'Search', plan: 'ListTodo', improve: 'Sparkles', 'apply-improvements': 'CheckCheck',
-  done: 'Archive', 'ultra-receipt': 'FileCheck', sync: 'RefreshCw', 'context-sync': 'RefreshCw',
+  commit: 'GitBranch', fix: 'ToolCase', 'fix-new': 'ToolCase', 'fix-findings': 'ToolCase', 'execute-fix': 'ToolCase',
+  verify: 'CircleCheck', 'check-verify': 'ListTodo', implement: 'Play', 'implement-proposed': 'Play',
+  explore: 'Search', plan: 'ListTodo', improve: 'Edit', 'apply-improvements': 'Check',
+  done: 'Archive', 'ultra-receipt': 'FileText', sync: 'FolderSync', 'context-sync': 'FolderSync',
   'context-compile': 'FileText', 'setup-context': 'Settings', analyze: 'Search', init: 'Download',
-  install: 'Download', 'install-factory': 'Download', 'update-factory': 'Download', 'update-extensions': 'Package',
-  'check-rules': 'ScrollText', 'rules-check': 'ScrollText', 'check-security': 'ShieldCheck', 'security-checklist': 'ShieldCheck',
+  install: 'Download', 'install-factory': 'Download', 'update-factory': 'PackageReceive', 'update-extensions': 'Puzzle',
+  'check-rules': 'FileText', 'rules-check': 'FileText', 'check-security': 'SecurityCheck', 'security-checklist': 'SecurityCheck',
   'check-review': 'GitPullRequest', review: 'GitPullRequest', 'check-mode': 'Settings', mode: 'Settings',
-  'check-worktree': 'FolderCheck', 'check-coupling': 'Network', 'qa-prepare': 'ClipboardList', qa: 'ClipboardList',
-  'qa-run': 'ListChecks', 'qa-check': 'ListChecks', quality: 'CheckCheck', 'quality-setup': 'Settings',
+  'check-worktree': 'FolderGit', 'check-coupling': 'Workflow', 'qa-prepare': 'ListView', qa: 'ListView',
+  'qa-run': 'ListTodo', 'qa-check': 'ListTodo', quality: 'CircleCheck', 'quality-setup': 'Settings',
   ci: 'Workflow', 'ci-setup': 'Settings',
 };
 function ActionIcon({ id, command = '' }: { id: string; command?: string }) {
@@ -203,7 +203,7 @@ function WorkflowCard({ threadId, initialTarget = '', phase = 'unknown', openFil
     const showAction = !!action && (step.optional || current || step.id === 'describe' && step.state === 'found');
     return <li key={step.id} className="aif-prep-step" data-state={step.state} aria-current={current ? 'step' : undefined}>
       <span className="aif-prep-mark" role="img" aria-label={step.state === 'found' ? 'Файлы найдены' : step.state === 'unknown' ? 'Не удалось проверить файлы' : 'Файлы не найдены'}>
-        <Icon name={step.state === 'found' ? 'CircleCheck' : step.state === 'unknown' ? 'CircleHelp' : 'Circle'} className="aif-button-icon" aria-hidden="true" />
+        <Icon name={step.state === 'found' ? 'CircleCheck' : step.state === 'unknown' ? 'CircleQuestion' : 'Circle'} className="aif-button-icon" aria-hidden="true" />
       </span>
       <div>
         <ExplainedLabel label={step.label} help={preparationHelp[step.id]}
@@ -227,7 +227,7 @@ function WorkflowCard({ threadId, initialTarget = '', phase = 'unknown', openFil
         {!!preparation?.length && <button className="aif-header-button" type="button" disabled={savingPreparation}
           aria-label={preparationVisible ? 'Скрыть подготовку проекта' : 'Показать подготовку проекта'} aria-expanded={preparationVisible}
           aria-controls={preparationId} title={preparationVisible ? 'Скрыть подготовку проекта' : 'Показать подготовку проекта'}
-          onClick={() => void togglePreparation(!preparationVisible)}><Icon name="ListChecks" className="aif-button-icon" aria-hidden="true" /></button>}
+          onClick={() => void togglePreparation(!preparationVisible)}><Icon name="ListTodo" className="aif-button-icon" aria-hidden="true" /></button>}
         {snapshot && <button className="aif-header-button" type="button" aria-label="Версии и обновления" title="Версии и обновления"
           aria-expanded={updatesOpen} aria-controls={updatesId} data-update={showUpdateIndicator || undefined}
           onClick={() => {
@@ -235,8 +235,8 @@ function WorkflowCard({ threadId, initialTarget = '', phase = 'unknown', openFil
             if (!details) return;
             details.open = !details.open;
             if (details.open) details.querySelector('summary')?.focus();
-          }}><Icon name="Download" className="aif-button-icon" aria-hidden="true" /></button>}
-        <button className="aif-header-button" type="button" onClick={() => void refresh(false, true)} aria-label="Обновить статус AI Factory" title="Перечитать задачи и проверки; версии CLI/Git и GitHub кэшируются на сутки"><Icon name="RefreshCw" className="aif-button-icon" aria-hidden="true" /></button>
+          }}><Icon name="PackageReceive" className="aif-button-icon" aria-hidden="true" /></button>}
+        <button className="aif-header-button" type="button" onClick={() => void refresh(false, true)} aria-label="Обновить статус AI Factory" title="Перечитать задачи и проверки; версии CLI/Git и GitHub кэшируются на сутки"><Icon name="RotateCcw" className="aif-button-icon" aria-hidden="true" /></button>
       </div>
     </header>
     {loading && <p role="status" className="aif-muted">Читаю локальный статус…</p>}

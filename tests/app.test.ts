@@ -69,6 +69,10 @@ test('preparation is hidden until requested and its help and visibility never di
   } });
   try {
     const show = await slot.findByRole('button', { name: 'Показать подготовку проекта' });
+    const updates = slot.getByRole('button', { name: 'Версии и обновления' });
+    const refreshStatus = slot.getByRole('button', { name: 'Обновить статус AI Factory' });
+    assert.deepEqual([show, updates, refreshStatus].map(button => button.querySelector('[data-icon]')?.getAttribute('data-icon')),
+      ['ListTodo', 'PackageReceive', 'RotateCcw']);
     assert.equal(show.getAttribute('aria-expanded'), 'false');
     assert.equal(slot.queryByRole('region', { name: 'Подготовка проекта' }), null);
     fireEvent.click(show);

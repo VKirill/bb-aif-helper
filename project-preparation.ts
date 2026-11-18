@@ -1,12 +1,12 @@
 export const preparationCommands: Record<string, { skill: string; args?: string; icon: string }> = {
   architecture: { skill: 'aif-architecture', icon: 'Layers' },
-  roadmap: { skill: 'aif-roadmap', icon: 'Map' },
-  quality: { skill: 'aif-quality-setup', args: ' setup', icon: 'ListChecks' },
+  roadmap: { skill: 'aif-roadmap', icon: 'ListEnd' },
+  quality: { skill: 'aif-quality-setup', args: ' setup', icon: 'ListTodo' },
   ci: { skill: 'aif-ci', icon: 'Workflow' },
-  rules: { skill: 'aif-rules', icon: 'ScrollText' },
-  docs: { skill: 'aif-docs', icon: 'BookOpen' },
-  build: { skill: 'aif-build-automation', icon: 'Hammer' },
-  docker: { skill: 'aif-dockerize', icon: 'Box' },
+  rules: { skill: 'aif-rules', icon: 'FileText' },
+  docs: { skill: 'aif-docs', icon: 'News01' },
+  build: { skill: 'aif-build-automation', icon: 'Terminal' },
+  docker: { skill: 'aif-dockerize', icon: 'PackageReceive' },
 };
 
 export const preparationHelp: Readonly<Record<string, string>> = {
