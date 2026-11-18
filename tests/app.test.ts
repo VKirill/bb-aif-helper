@@ -480,12 +480,15 @@ test('readiness block in the tab: one run button on the first todo step, skip RP
   let slot = renderSlot(tab as any, { threadId: 'thr_panel', environment: { id: 'env_panel' } }, { rpc });
   try {
     await slot.findByText('Подготовка проекта', { selector: '*' });
+    await slot.findByText('Выполнено · 1', { exact: false });
     const run = await slot.findByRole('button', { name: /^Запустить: Описать проект/ });
     assert.equal(slot.getAllByRole('button', { name: /^Запустить: / }).length, s.readiness.filter(step => step.state === 'todo').length, 'every unfinished step can be run');
     await slot.findByRole('button', { name: 'Запустить: Настроить CI' });
     assert.equal(slot.queryByText('Настройка контекста проекта'), null);
     assert.equal(slot.queryByText('Дополнительно'), null);
-    await slot.findByText('нет: .ai-factory/DESCRIPTION.md, .ai-factory/config.yaml, .ai-factory/rules/base.md, AGENTS.md');
+    assert.equal(slot.queryByText(/^Не найдено:/), null, 'missing files stay behind «?» to keep rows one line high');
+    fireEvent.click(await slot.findByRole('button', { name: 'Что делает шаг «Описать проект (/aif или aif-analyze)»' }));
+    await slot.findByText('Не найдено: .ai-factory/DESCRIPTION.md, .ai-factory/config.yaml, .ai-factory/rules/base.md, AGENTS.md');
     assert.equal(slot.queryByText(/^любой из:/), null, "any-of file lists live behind «?» to keep phone rows short");
     fireEvent.click(run);
     await waitFor(() => assert.deepEqual(runs, ['setup-context']));

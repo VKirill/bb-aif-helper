@@ -345,33 +345,41 @@ function ReadinessSection({ snapshot, run, busy, sending, setReadinessSkip }: {
   }
   function stepRow(s: ReadinessStep, n: number, isNext: boolean) {
     const action = s.state === 'todo' ? actionFor(s) : undefined;
+    const small = 'h-7 px-2.5 text-xs';
     const skip = s.state === 'skipped'
-      ? <Button type="button" size="sm" variant="ghost" disabled={pendingSkip !== null} onClick={() => void toggleSkip(s, false)}>Вернуть</Button>
+      ? <Button type="button" size="sm" variant="ghost" className={cn(small, 'text-muted-foreground')} disabled={pendingSkip !== null} onClick={() => void toggleSkip(s, false)}>Вернуть</Button>
       : s.skippable && s.state === 'todo'
-        ? <Button type="button" size="sm" variant="ghost" disabled={pendingSkip !== null} onClick={() => void toggleSkip(s, true)}>Пропустить</Button>
+        ? <Button type="button" size="sm" variant="ghost" className={cn(small, 'text-muted-foreground')} disabled={pendingSkip !== null} onClick={() => void toggleSkip(s, true)}>Пропустить</Button>
         : null;
-    return <li key={s.id} className="flex items-start gap-2">
-      <Icon name={iconFor(s)} aria-label={stateLabel(s)} className={cn('mt-0.5 size-4 shrink-0', s.state === 'done' ? 'text-primary' : 'text-muted-foreground')} />
-      <div className="flex min-w-0 flex-1 flex-col gap-1">
-        <span className="flex items-start gap-2">
-          <span className={cn('min-w-0 flex-1 text-sm font-medium', s.state === 'done' && 'text-muted-foreground')}>
-            <span className="mr-1.5 text-xs tabular-nums text-muted-foreground">{n}.</span>{s.label}{readinessHelp[s.id] && <HelpMark label={`Что делает шаг «${s.label}»`} open={help === s.id} onToggle={() => setHelp(help === s.id ? null : s.id)} />}
-          </span>
-          {skip && <span className="-my-1 shrink-0">{skip}</span>}
+    return <li key={s.id} className="flex flex-col gap-1">
+      <div className="flex min-h-7 items-center gap-2">
+        <Icon name={iconFor(s)} aria-label={stateLabel(s)} className={cn('size-4 shrink-0', s.state === 'done' ? 'text-primary' : 'text-muted-foreground')} />
+        <span className={cn('min-w-0 flex-1 text-sm', s.state === 'todo' ? 'font-medium' : 'text-muted-foreground')}>
+          <span className="mr-1.5 text-xs tabular-nums text-muted-foreground">{n}.</span>{s.label}{readinessHelp[s.id] && <HelpMark label={`Что делает шаг «${s.label}»`} open={help === s.id} onToggle={() => setHelp(help === s.id ? null : s.id)} />}
         </span>
-        {help === s.id && <p className="m-0 rounded-md bg-muted px-3 py-2 text-xs">{readinessHelp[s.id]}</p>}
-        {s.state === 'todo' && s.missing.length > 0 && !s.anyOf && <span className="break-words text-xs text-muted-foreground">нет: {s.missing.join(', ')}</span>}
-        {action && <span><Hint text={`${action.reason}\n${action.command}`}><Button type="button" size="sm" variant={isNext ? 'default' : 'outline'}
-          aria-label={`Запустить: ${s.label}`} disabled={sending || busy || !action.available} onClick={() => void run(action)}>
-          Запустить{!action.available && (action.disabledReason === 'unchanged' ? ' · без изменений' : ' · не установлен')}</Button></Hint></span>}
+        {(action || skip) && <span className="flex shrink-0 items-center gap-1">
+          {action && <Hint text={`${action.reason}\n${action.command}`}><Button type="button" size="sm" variant={isNext ? 'default' : 'outline'} className={small}
+            aria-label={`Запустить: ${s.label}`} disabled={sending || busy || !action.available} onClick={() => void run(action)}>
+            Запустить{!action.available && (action.disabledReason === 'unchanged' ? ' · без изменений' : ' · не установлен')}</Button></Hint>}
+          {skip}
+        </span>}
       </div>
+      {help === s.id && <div className="ml-6 rounded-md bg-muted px-3 py-2 text-xs">
+        <p className="m-0">{readinessHelp[s.id]}</p>
+        {s.state === 'todo' && s.missing.length > 0 && !s.anyOf && <p className="m-0 mt-1 break-words text-muted-foreground">Не найдено: {s.missing.join(', ')}</p>}
+      </div>}
     </li>;
   }
-  const list = <ol className="m-0 flex list-none flex-col gap-2 p-0">{steps.map((s, i) => stepRow(s, i + 1, next?.id === s.id))}</ol>;
-  if (readinessComplete(steps)) return <Disclosure summary="Проект готов к работе через AI Factory">{list}</Disclosure>;
+  const numbered = steps.map((s, i) => ({ s, n: i + 1 }));
+  const rows = (items: typeof numbered) => <ol className="m-0 flex list-none flex-col gap-1 p-0">{items.map(({ s, n }) => stepRow(s, n, next?.id === s.id))}</ol>;
+  if (readinessComplete(steps)) return <Disclosure summary="Проект готов к работе через AI Factory">{rows(numbered)}</Disclosure>;
+  const finished = numbered.filter(({ s }) => s.state !== 'todo');
+  const doneCount = finished.filter(({ s }) => s.state === 'done').length, skippedCount = finished.length - doneCount;
   return <Section label="Подготовка проекта" title="Подготовка проекта">
     <p className="m-0 text-xs text-muted-foreground">Выполните шаги по порядку, чтобы AI Factory работал полностью</p>
-    {list}
+    {finished.length > 0 && <Disclosure className="aif-readiness-finished" summary={<span className="text-sm font-normal text-muted-foreground">
+      Выполнено · {doneCount}{skippedCount ? ` · пропущено · ${skippedCount}` : ''}</span>}>{rows(finished)}</Disclosure>}
+    {rows(numbered.filter(({ s }) => s.state === 'todo'))}
   </Section>;
 }
 
