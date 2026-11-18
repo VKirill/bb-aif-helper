@@ -232,6 +232,27 @@ test('without AI Factory the installer appears only in preparation and the bundl
   } finally { slot.lifecycle.unmount(); }
 });
 
+test('preparation offers an update for a project with AI Factory installed', async () => {
+  const s = snapshot({ preparationVisible: true, preparation: [
+    { id: 'install', label: 'Установить AI Factory', optional: false, state: 'found', paths: ['.ai-factory.json'] },
+  ] });
+  s.actions = workflowActions(s);
+  const dispatched: string[] = [];
+  const slot = renderSlot(app.threadContextCardSections[0], { threadId: 'thr_test' } as any, { rpc: {
+    status: () => s,
+    run: (input: any) => { dispatched.push(input.actionId); return { sent: true, message: 'Отправлено' }; },
+  } });
+  try {
+    const preparation = within(await slot.findByRole('region', { name: 'Подготовка проекта' }));
+    assert(preparation.getByText('AI Factory установлен'));
+    assert.equal(Boolean(preparation.queryByRole('button', { name: 'Установить AI Factory' })), false);
+    const update = preparation.getByRole('button', { name: 'Обновить AI Factory' });
+    assert.deepEqual(dispatched, []);
+    fireEvent.click(update);
+    await waitFor(() => assert.deepEqual(dispatched, ['update-factory']));
+  } finally { slot.lifecycle.unmount(); }
+});
+
 test('the document renders before its form and only a completed saved plan exposes workflow actions', async () => {
   const renderer = app.codeFenceRenderers.find(r => r.id === 'plan-document')!;
   const code = '# Ready\n\n## Tasks\n- [ ] 1. Work';

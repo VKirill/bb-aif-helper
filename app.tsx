@@ -274,16 +274,18 @@ function WorkflowCard({ threadId, initialTarget = '', phase = 'unknown', openFil
   const optional = preparation?.filter(step => step.optional) ?? [];
   const nextSetupStep = required.find(step => step.state === 'missing')?.id;
   const renderSetupStep = (step: NonNullable<Snapshot['preparation']>[number], number?: number) => {
-    const actionId = step.id === 'install' ? 'basic-install' : step.id === 'describe' ? 'setup-context' : `prep-${step.id}`;
+    const installed = step.id === 'install' && step.state === 'found';
+    const actionId = step.id === 'install' ? installed ? 'update-factory' : 'basic-install'
+      : step.id === 'describe' ? 'setup-context' : `prep-${step.id}`;
     const action = snapshot?.actions.find(item => item.id === actionId);
     const current = step.id === nextSetupStep;
-    const showAction = !!action && (step.optional || current || step.id === 'describe' && step.state === 'found');
+    const showAction = !!action && (installed || step.optional || current || step.id === 'describe' && step.state === 'found');
     return <li key={step.id} className="aif-prep-step" data-state={step.state} aria-current={current ? 'step' : undefined}>
       <span className="aif-prep-mark" role="img" aria-label={step.state === 'found' ? 'Файлы найдены' : step.state === 'unknown' ? 'Не удалось проверить файлы' : 'Файлы не найдены'}>
         <Icon name={step.state === 'found' ? 'CircleCheck' : step.state === 'unknown' ? 'CircleQuestion' : 'Circle'} className="aif-button-icon" aria-hidden="true" />
       </span>
       <div>
-        <ExplainedLabel label={step.label} help={preparationHelp[step.id]}
+        <ExplainedLabel label={installed ? 'AI Factory установлен' : step.label} help={preparationHelp[installed ? 'update' : step.id]}
           prefix={number !== undefined && <span className="aif-muted" aria-hidden="true">{number}.</span>}
           detail={<div className="aif-prep-paths">{step.paths.map(file => <code key={file}>{file}</code>)}</div>} />
         {showAction && <div className={current ? 'aif-prep-action aif-prep-current' : 'aif-prep-action'}>{renderAction(action)}</div>}

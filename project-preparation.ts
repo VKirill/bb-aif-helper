@@ -11,6 +11,7 @@ export const preparationCommands: Record<string, { skill: string; args?: string;
 
 export const preparationHelp: Readonly<Record<string, string>> = {
   install: 'Устанавливает AI Factory и добавляет навыки в текущий проект.',
+  update: 'Обновляет существующий CLI, навыки проекта и зарегистрированные расширения.',
   describe: 'Фиксирует назначение проекта, его стек и контекст для следующих задач.',
   architecture: 'Описывает устройство проекта, границы модулей и расположение кода.',
   roadmap: 'Фиксирует цели проекта и порядок работ.',
