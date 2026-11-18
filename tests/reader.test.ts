@@ -272,3 +272,14 @@ test('Spec coverage and Done readiness rows exist only with AIFHub; a missing re
     } finally { await f.cleanup(); }
   }
 });
+
+test('plan and QA directories from config.yaml may end with a slash', async () => {
+  const f = await fixture(); try {
+    await f.write('.ai-factory/config.yaml', 'paths:\n  plans: .ai-factory/plans/\n  qa: .ai-factory/qa/\n');
+    await f.write('.ai-factory/plans/feature.md', '# Feature\n## Tasks\n- [ ] Task 1: Work\n');
+    const s = await collectSnapshot(input(f.root, '.ai-factory/plans/feature.md'));
+    assert.notEqual(s.profile, 'invalid'); assert(!s.diagnostics.some(d => /не найден в допустимых|Недопустимый путь/.test(d)));
+    assert.equal(s.target?.path, '.ai-factory/plans/feature.md'); assert.equal(s.target?.tasks.length, 1);
+    assert(s.candidates.every(c => !c.path.includes('//')));
+  } finally { await f.cleanup(); }
+});

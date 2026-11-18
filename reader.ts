@@ -272,9 +272,11 @@ export async function collectSnapshot(input: HostInput, signal?: AbortSignal): P
   const native = hub && (Object.keys(tools).length ? tools.openspec === true : aifhub.artifactProtocol === 'openspec-native');
   if (native && s.profile !== 'invalid') s.profile = 'aifhub-openspec';
   const paths = obj(config.paths);
-  const planRoot = str(paths.plans) ?? '.ai-factory/plans';
-  const qaRoot = str(paths.qa) ?? '.ai-factory/qa';
-  const openRoot = str(obj(aifhub.openspec).root) ?? 'openspec';
+  // Directory paths in config.yaml usually end with `/`; strip it so joined paths match candidate paths.
+  const dir = (v: unknown, fallback: string) => (str(v) ?? fallback).replace(/(?<=[^/])\/+$/, '');
+  const planRoot = dir(paths.plans, '.ai-factory/plans');
+  const qaRoot = dir(paths.qa, '.ai-factory/qa');
+  const openRoot = dir(obj(aifhub.openspec).root, 'openspec');
   // Readiness probes share Reader limits and the fingerprint's seen set; a failed path is a false fact, not a failed snapshot.
   const files: Record<string, boolean> = {};
   const probe = async (rel: string) => {
