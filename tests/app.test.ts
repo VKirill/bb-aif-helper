@@ -523,3 +523,21 @@ test('each check row has a «?» button that toggles a plain explanation without
     assert.equal(runs, 0);
   } finally { slot.lifecycle.unmount(); }
 });
+
+test('each readiness step has a «?» button that explains the step without running it', async () => {
+  const { readinessSteps, readinessHelp } = await import('../readiness.ts');
+  const tab = app.tabs.find(t => t.id === 'workflow')!;
+  const s = data(); s.readiness = readinessSteps({ configured: true, contextSkill: true, files: {}, paths: {} });
+  let runs = 0;
+  const slot = renderSlot(tab as any, { threadId: 'thr_panel', environment: { id: 'env_panel' } }, { rpc: { status: () => s, run: () => { runs++; return { sent: true, message: 'Отправлено' }; } } });
+  try {
+    for (const step of s.readiness) assert.ok(readinessHelp[step.id], `help for ${step.id}`);
+    const button = await slot.findByRole('button', { name: 'Что делает шаг «Настроить CI»' });
+    assert.equal(slot.queryByText(readinessHelp.ci), null);
+    fireEvent.click(button);
+    await slot.findByText(readinessHelp.ci);
+    fireEvent.click(button);
+    await waitFor(() => assert.equal(slot.queryByText(readinessHelp.ci), null));
+    assert.equal(runs, 0);
+  } finally { slot.lifecycle.unmount(); }
+});

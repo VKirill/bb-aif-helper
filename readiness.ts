@@ -22,6 +22,15 @@ const norm = (p: string) => p.replaceAll('\\', '/').replace(/^\.\//, '').replace
 const step = (id: string, label: string, actionId: string, done: boolean, missing: string[], skippable = false, anyOf = false): ReadinessStep =>
   ({ id, label, actionId, state: done ? 'done' : 'todo', skippable, anyOf, missing: done ? [] : missing });
 
+/** Plain-language descriptions behind the «?» mark of each readiness step. */
+export const readinessHelp: Record<string, string> = {
+  install: 'Ставит AI Factory в проект: файл .ai-factory.json и навыки /aif-plan, /aif-implement, /aif-verify и другие. Без этого шага остальные команды недоступны.',
+  context: '/aif изучает проект и пишет его описание (DESCRIPTION.md), настройки AI Factory (config.yaml: язык, ветки, push) и базовые правила кода (rules/base.md). Эти файлы читают /aif-plan, /aif-implement, /aif-review и /aif-verify, чтобы понимать проект.',
+  architecture: '/aif-architecture описывает, из каких частей состоит проект и где какой код должен лежать (ARCHITECTURE.md). По нему агенты кладут новый код в нужные места и не нарушают границы модулей.',
+  quality: 'Git-хуки: перед каждым git commit сами запускаются typecheck, тесты и линтер. Если проверка падает, коммит не создаётся и сломанный код не попадает в историю. Подходит любой инструмент: .husky/, lefthook.yml или .pre-commit-config.yaml.',
+  ci: 'CI проверяет код на сервере (например, GitHub Actions) после каждого git push: ставит зависимости с нуля и прогоняет тесты. Результат виден у коммита (✅/❌) и в строке «CI» в «Что проверить». Хуки можно обойти, CI — нет. Если над проектом работает один человек с одной машины, шаг можно пропустить.',
+};
+
 export function readinessSteps(facts: ReadinessFacts, skipped: string[] = []): ReadinessStep[] {
   const present = new Set(Object.entries(facts.files).filter(([, v]) => v).map(([k]) => norm(k)));
   const has = (rel: string) => present.has(norm(rel));

@@ -3,7 +3,7 @@ import { definePluginApp, useRpc, useRealtime, useComposer, useBbNavigate, exper
 import type { rpcContract, DelegationView } from './contract.ts';
 import type { DelegationChoice } from './delegation.ts';
 import { phaseSchema, type Snapshot, type Phase, type Action, type ReadinessStep, type Suggestions } from './model.ts';
-import { readinessComplete, nextReadinessStep } from './readiness.ts';
+import { readinessComplete, nextReadinessStep, readinessHelp } from './readiness.ts';
 import { parseReplyGate } from './gate.ts';
 import { checkHelp, rowActions, supplementaryChecks } from './check-actions.ts';
 import { updateInVersionDetails, VERSION_TTL } from './versions.ts';
@@ -27,6 +27,11 @@ const checkLabels = { notrun: 'Не запускалась', 'reported-pass': 'P
 const InfoIcon = () => <svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" aria-hidden="true">
   <circle cx="8" cy="8" r="6.75" /><path d="M6.2 6.1a1.9 1.9 0 0 1 3.7.6c0 1.3-1.9 1.6-1.9 2.8" /><circle cx="8" cy="11.6" r="0.4" fill="currentColor" />
 </svg>;
+
+/** Superscript «?» that toggles a plain-language description below its row. */
+const HelpMark = ({ label, open, onToggle }: { label: string; open: boolean; onToggle: () => void }) =>
+  <button type="button" className="ml-0.5 inline-flex -translate-y-1.5 cursor-pointer rounded-full border-0 bg-transparent p-0.5 align-top text-muted-foreground hover:text-foreground"
+    aria-label={label} aria-expanded={open} onClick={onToggle}><InfoIcon /></button>;
 
 function GateData({ code, status, Original }: ExperimentalCodeFenceRendererProps) {
   const parsed = status === 'closed' ? parseReplyGate(`\`\`\`aif-gate-result\n${code}\n\`\`\``) : null;
@@ -168,8 +173,7 @@ function WorkflowCard({ threadId, initialTarget = '', phase = 'unknown', openFil
         <p className="m-0 text-xs text-muted-foreground">Дополнительные проверки — по выбору. Правила проекта и обязательные gates могут требовать их перед завершением; блокирующий FAIL сохраняет силу. Галочки задач и результаты проверок независимы. Актуальность отчётов подтверждает владелец workflow.</p>
         <ul className="m-0 flex list-none flex-col divide-y divide-border rounded-lg border border-border p-0">{snapshot.checks.map(c => <li key={c.id} className="flex flex-col gap-2 p-3">
           <div className="flex flex-wrap items-center gap-2">
-            <strong className="font-medium">{c.label}{checkHelp[c.id] && <button type="button" className="ml-0.5 inline-flex -translate-y-1.5 cursor-pointer rounded-full border-0 bg-transparent p-0.5 align-top text-muted-foreground hover:text-foreground" aria-label={`Что проверяет «${c.label}»`}
-              aria-expanded={help === c.id} onClick={() => setHelp(help === c.id ? null : c.id)}><InfoIcon /></button>}</strong>
+            <strong className="font-medium">{c.label}{checkHelp[c.id] && <HelpMark label={`Что проверяет «${c.label}»`} open={help === c.id} onToggle={() => setHelp(help === c.id ? null : c.id)} />}</strong>
             {c.required ? <span className="text-xs text-muted-foreground">нужно для завершения</span> : supplementaryChecks.has(c.id) && <span className="text-xs text-muted-foreground" title="Дополнительный шаг flow; действующие правила проекта сохраняют приоритет">по выбору</span>}
             <Badge variant={checkTone(c)} className="ml-auto" title={c.detail}>{c.chat ? `${c.chat.result.status.toUpperCase()} · из чата` : checkLabels[c.state]}</Badge>
           </div>
@@ -312,6 +316,7 @@ function ReadinessSection({ snapshot, run, busy, sending, setReadinessSkip }: {
   setReadinessSkip: (stepId: 'quality' | 'ci', skipped: boolean) => Promise<void>;
 }) {
   const [pendingSkip, setPendingSkip] = useState<string | null>(null);
+  const [help, setHelp] = useState<string | null>(null);
   const steps = snapshot.readiness;
   const next = nextReadinessStep(steps);
   const actionFor = (s: ReadinessStep) => snapshot.actions.find(a => a.id === s.actionId);
@@ -335,9 +340,10 @@ function ReadinessSection({ snapshot, run, busy, sending, setReadinessSkip }: {
       <div className="flex min-w-0 flex-1 flex-col gap-1">
         <span className="flex flex-wrap items-center gap-x-2">
           <span className="text-xs tabular-nums text-muted-foreground">{n}.</span>
-          <span className={cn('text-sm font-medium', s.state === 'done' && 'text-muted-foreground')}>{s.label}</span>
+          <span className={cn('text-sm font-medium', s.state === 'done' && 'text-muted-foreground')}>{s.label}{readinessHelp[s.id] && <HelpMark label={`Что делает шаг «${s.label}»`} open={help === s.id} onToggle={() => setHelp(help === s.id ? null : s.id)} />}</span>
           {skip && <span className="ml-auto">{skip}</span>}
         </span>
+        {help === s.id && <p className="m-0 rounded-md bg-muted px-3 py-2 text-xs">{readinessHelp[s.id]}</p>}
         {s.state === 'todo' && s.missing.length > 0 && <span className="text-xs text-muted-foreground">{s.anyOf ? 'любой из' : 'нет'}: {s.missing.join(', ')}</span>}
         {action && <span><Hint text={`${action.reason}\n${action.command}`}><Button type="button" size="sm"
           disabled={sending || busy || !action.available} onClick={() => void run(action)}>
