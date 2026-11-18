@@ -36,6 +36,7 @@ export const snapshotSchema = z.object({
     id: z.string(), label: z.string(), optional: z.boolean(), paths: z.array(z.string()),
     state: z.enum(['found', 'missing', 'unknown']),
   })).optional(),
+  preparationVisible: z.boolean().optional(),
   skills: z.array(z.string()), candidates: z.array(z.object({ path: z.string(), title: z.string(), kind: z.string(), closed: z.boolean().optional(),
     progress: z.object({ completed: z.number().int().nonnegative(), total: z.number().int().nonnegative(), verified: z.boolean() }).optional() })),
   target: z.object({ path: z.string(), title: z.string(), id: z.string(), kind: z.enum(['fast', 'full', 'fix', 'ultra', 'classic', 'openspec', 'basic']),

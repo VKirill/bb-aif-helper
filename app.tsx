@@ -1,16 +1,16 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useId, useRef, useState, type ReactNode } from 'react';
 import { definePluginApp, useRpc, useRealtime, useComposer, Markdown, experimental_Icon as Icon, experimental_FileLink as FileLink, type PluginMessageDirectiveProps, type ExperimentalThreadContextCardProps, type ExperimentalThreadTabProps, type ExperimentalCodeFenceRendererProps } from '@get-bb/plugin-sdk/app';
 import type { rpcContract } from './contract.ts';
 import { phaseSchema, cardIdSchema, RESEARCH_TASK_MAX_LENGTH, type Snapshot, type Phase, type Action, type Suggestions } from './model.ts';
 import { sessionBriefBlocked } from './session-brief.ts';
 import { parseReplyGate } from './gate.ts';
-import { rowActions, supplementaryChecks } from './check-actions.ts';
+import { checkHelp, rowActions, supplementaryChecks } from './check-actions.ts';
 import { updateInVersionDetails, VERSION_TTL } from './versions.ts';
 import { contextSetupInDetails } from './workflow.ts';
 import { isBasicPlanPath, usesBasicWorkflow, isCompletedPlan } from './basic-workflow.ts';
 import './aif-chat.css';
 import { mountPlanPresentation } from './plan-presentation.ts';
-import { preparationCommands } from './project-preparation.ts';
+import { preparationCommands, preparationHelp } from './project-preparation.ts';
 
 const phaseNames: Record<Phase, string> = { unknown: 'Контекст задачи', explore: 'Исследование', plan: 'Планирование', improve: 'Уточнение плана', implement: 'Выполнение плана', verify: 'Проверка', fix: 'Исправление замечаний', done: 'Финализация' };
 const profileNames: Record<Snapshot['profile'], string> = { none: 'Нет установки', upstream: 'AI Factory', 'aifhub-classic': 'AIFHub · classic', 'aifhub-openspec': 'AIFHub · OpenSpec', 'aifhub-ultra': 'AIFHub · legacy ultra', invalid: 'Проверьте конфигурацию' };
@@ -33,6 +33,21 @@ function ActionIcon({ id, command = '' }: { id: string; command?: string }) {
   const skill = command.match(/(?:^|[\s$/])aif-([a-z][a-z0-9-]*)\b/)?.[1];
   if (id.startsWith('prep-')) return <Icon name={preparationCommands[id.slice(5)]?.icon ?? 'Settings'} className="aif-button-icon" aria-hidden="true" />;
   return <Icon name={actionIcons[id.replace(/^basic-/, '')] ?? actionIcons[skill ?? ''] ?? 'ArrowRight'} className="aif-button-icon" aria-hidden="true" />;
+}
+
+function ExplainedLabel({ label, help, prefix, detail }: { label: string; help?: string; prefix?: ReactNode; detail?: ReactNode }) {
+  const [open, setOpen] = useState(false);
+  const id = useId();
+  return <div className="aif-explained-label">
+    <span className="aif-help-heading">
+      {prefix}<strong>{label}</strong>
+      {help && <button type="button" className="aif-help-toggle" aria-label={`Подробнее: ${label}`}
+        aria-expanded={open} aria-controls={id} onClick={() => setOpen(value => !value)}>
+        <span aria-hidden="true">?</span>
+      </button>}
+    </span>
+    {help && <div className="aif-help-text" id={id} hidden={!open}>{help}{detail}</div>}
+  </div>;
 }
 
 function GateData({ code, status, Original }: ExperimentalCodeFenceRendererProps) {
@@ -86,12 +101,17 @@ function WorkflowCard({ threadId, initialTarget = '', phase = 'unknown', openFil
   const [loading, setLoading] = useState(true);
   const [sending, setSending] = useState(false);
   const [network, setNetwork] = useState(false);
+  const [savingPreparation, setSavingPreparation] = useState(false);
+  const [updatesOpen, setUpdatesOpen] = useState(false);
   const [researchOpen, setResearchOpen] = useState(false);
   const [researchTask, setResearchTask] = useState('');
   const [researchError, setResearchError] = useState('');
   const sequence = useRef(0);
   const mounted = useRef(true);
   const sendingRef = useRef(false);
+  const preparationId = useId();
+  const updatesId = useId();
+  const updatesDetails = useRef<HTMLDetailsElement>(null);
   useEffect(() => { mounted.current = true; return () => { mounted.current = false; sequence.current++; }; }, []);
   useEffect(() => { setTarget(initialTarget); setNewTask(false); setShowCompleted(false); setSnapshot(null); setResearchOpen(false); setResearchTask(''); setResearchError(''); }, [initialTarget, threadId]);
   const refresh = useCallback(async (checkUpdates = false, force = false) => {
@@ -114,13 +134,27 @@ function WorkflowCard({ threadId, initialTarget = '', phase = 'unknown', openFil
     return () => window.clearInterval(interval);
   }, [refresh]);
   useRealtime('changed', (payload: unknown) => { if ((payload as { threadId?: string })?.threadId === threadId) void refresh(); });
+  async function togglePreparation(visible: boolean) {
+    setSavingPreparation(true);
+    setError('');
+    try {
+      await rpc.call('setPreparationVisibility', { threadId, visible });
+      if (mounted.current) await refresh();
+    } catch (e) {
+      if (mounted.current) setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      if (mounted.current) setSavingPreparation(false);
+    }
+  }
   async function run(action: Action, task?: string) {
     if (!snapshot || sendingRef.current) return;
     sendingRef.current = true; setSending(true); setError(''); setNotice('');
     if (action.id === 'basic-explore') setResearchError('');
+    let stale = false;
     try {
       const result = await rpc.call('run', { threadId, target: snapshot.target?.path ?? target, phase: snapshot.phase,
         fingerprint: snapshot.fingerprint, actionId: action.id, requestId: crypto.randomUUID(), ...(newTask ? { newTask: true } : {}), ...(task === undefined ? {} : { researchTask: task }) });
+      stale = result.stale === true;
       if (mounted.current) {
         setNotice(result.message);
         if (result.sent && action.id === 'basic-explore') { setResearchOpen(false); setResearchTask(''); }
@@ -130,7 +164,14 @@ function WorkflowCard({ threadId, initialTarget = '', phase = 'unknown', openFil
       const message = e instanceof Error ? e.message : String(e);
       if (action.id === 'basic-explore') setResearchError(message); else setError(message);
     } }
-    finally { sendingRef.current = false; if (mounted.current) { setSending(false); void refresh(); } }
+    finally {
+      if (stale && mounted.current) await refresh(false, true);
+      sendingRef.current = false;
+      if (mounted.current) {
+        setSending(false);
+        if (!stale) void refresh();
+      }
+    }
   }
   const busy = !!snapshot && (!['idle', 'error'].includes(snapshot.threadState) || !!snapshot.pendingQuestions || snapshot.pendingConfirmation !== false);
   const tasks = snapshot?.target?.tasks ?? [];
@@ -149,10 +190,12 @@ function WorkflowCard({ threadId, initialTarget = '', phase = 'unknown', openFil
     }}><ActionIcon id={a.id} command={a.command} /><span>{a.label}{!a.available && (a.disabledReason === 'unchanged' ? ' · без изменений' : a.disabledReason === 'requires-cli222' ? ' · нужен CLI 2.22+' : a.disabledReason === 'context-blocked' ? ' · контекст неактуален' : ' · не установлен')}</span></button>;
   const renderActions = (actions: Action[]) => <div className="aif-actions">{actions.map(renderAction)}</div>;
   const preparation = snapshot?.preparation;
+  const preparationVisible = snapshot?.preparationVisible === true;
+  const updates = snapshot?.actions.filter(a => a.id === 'update-factory' || a.id === 'update-extensions') ?? [];
+  const showUpdateIndicator = snapshot && updates.some(a => a.available && !updateInVersionDetails(snapshot, a.id));
   const required = preparation?.filter(step => !step.optional) ?? [];
   const optional = preparation?.filter(step => step.optional) ?? [];
   const nextSetupStep = required.find(step => step.state === 'missing')?.id;
-  const setupInline = !!nextSetupStep && !snapshot?.target && !snapshot?.chatPlan;
   const renderSetupStep = (step: NonNullable<Snapshot['preparation']>[number], number?: number) => {
     const actionId = step.id === 'install' ? 'basic-install' : step.id === 'describe' ? 'setup-context' : `prep-${step.id}`;
     const action = snapshot?.actions.find(item => item.id === actionId);
@@ -163,8 +206,9 @@ function WorkflowCard({ threadId, initialTarget = '', phase = 'unknown', openFil
         <Icon name={step.state === 'found' ? 'CircleCheck' : step.state === 'unknown' ? 'CircleHelp' : 'Circle'} className="aif-button-icon" aria-hidden="true" />
       </span>
       <div>
-        <div className="aif-prep-label">{number !== undefined && <span className="aif-muted" aria-hidden="true">{number}.</span>} <strong>{step.label}</strong></div>
-        {step.state !== 'found' && <div className="aif-prep-paths">{step.paths.map(file => <code key={file}>{file}</code>)}</div>}
+        <ExplainedLabel label={step.label} help={preparationHelp[step.id]}
+          prefix={number !== undefined && <span className="aif-muted" aria-hidden="true">{number}.</span>}
+          detail={<div className="aif-prep-paths">{step.paths.map(file => <code key={file}>{file}</code>)}</div>} />
         {showAction && <div className={current ? 'aif-prep-action aif-prep-current' : 'aif-prep-action'}>{renderAction(action)}</div>}
       </div>
     </li>;
@@ -179,7 +223,21 @@ function WorkflowCard({ threadId, initialTarget = '', phase = 'unknown', openFil
   return <section className={`aif-card${compact ? ' aif-compact' : ''}`} aria-label="AI Factory workflow">
     <header className="aif-heading"><span className="aif-brand-icon"><Icon name="Workflow" aria-hidden="true" /></span><strong>AI Factory</strong>
       {snapshot && snapshot.profile !== 'upstream' && <span className="aif-profile">{profileNames[snapshot.profile]}</span>}
-      <button className="aif-refresh" type="button" onClick={() => void refresh(false, true)} aria-label="Обновить статус AI Factory" title="Перечитать задачи и проверки; версии CLI/Git и GitHub кэшируются на сутки"><Icon name="RefreshCw" className="aif-button-icon" aria-hidden="true" /></button>
+      <div className="aif-header-actions">
+        {!!preparation?.length && <button className="aif-header-button" type="button" disabled={savingPreparation}
+          aria-label={preparationVisible ? 'Скрыть подготовку проекта' : 'Показать подготовку проекта'} aria-expanded={preparationVisible}
+          aria-controls={preparationId} title={preparationVisible ? 'Скрыть подготовку проекта' : 'Показать подготовку проекта'}
+          onClick={() => void togglePreparation(!preparationVisible)}><Icon name="ListChecks" className="aif-button-icon" aria-hidden="true" /></button>}
+        {snapshot && <button className="aif-header-button" type="button" aria-label="Версии и обновления" title="Версии и обновления"
+          aria-expanded={updatesOpen} aria-controls={updatesId} data-update={showUpdateIndicator || undefined}
+          onClick={() => {
+            const details = updatesDetails.current;
+            if (!details) return;
+            details.open = !details.open;
+            if (details.open) details.querySelector('summary')?.focus();
+          }}><Icon name="Download" className="aif-button-icon" aria-hidden="true" /></button>}
+        <button className="aif-header-button" type="button" onClick={() => void refresh(false, true)} aria-label="Обновить статус AI Factory" title="Перечитать задачи и проверки; версии CLI/Git и GitHub кэшируются на сутки"><Icon name="RefreshCw" className="aif-button-icon" aria-hidden="true" /></button>
+      </div>
     </header>
     {loading && <p role="status" className="aif-muted">Читаю локальный статус…</p>}
     {error && <p role="alert" className="aif-error">{error}</p>}
@@ -188,8 +246,8 @@ function WorkflowCard({ threadId, initialTarget = '', phase = 'unknown', openFil
       <div className="aif-versions"><span>CLI <b>{snapshot.versions.globalCli ?? 'не найден'}</b></span><span>Проект <b>{snapshot.versions.installed ?? 'не указан'}</b></span>
         {snapshot.versions.sourceVersion && <span>Git <b>{snapshot.versions.sourceVersion}</b><small> @{snapshot.versions.sourceSha?.slice(0, 7)}{snapshot.versions.sourceDirty ? ' · изменён' : ''}</small></span>}
         {snapshot.extensions.map(e => <span key={e.name} title={e.installedVersion ? 'Установленная версия расширения' : 'Записанная версия; установленные файлы не подтверждены'}>{e.name} <b>{e.installedVersion ?? e.recordedVersion ?? 'неизвестна'}</b>{!e.installedVersion && <small> · не подтверждена</small>}</span>)}</div>
-      {setupInline && <section className="aif-preparation" aria-label="Подготовка проекта">
-        <h3>Подготовка проекта</h3>{setupContent}
+      {!!preparation?.length && <section id={preparationId} className="aif-preparation" aria-label="Подготовка проекта" hidden={!preparationVisible}>
+        {preparationVisible && <><h3>Подготовка проекта</h3>{setupContent}</>}
       </section>}
       <section className="aif-current" aria-label="Текущий этап">
         <div className="aif-section-caption">Сейчас</div>
@@ -240,8 +298,9 @@ function WorkflowCard({ threadId, initialTarget = '', phase = 'unknown', openFil
           </div>
         </form>}
       </section>
-      <div className="aif-maintenance" role="group" aria-label="Обновление и настройка AI Factory">{renderActions(snapshot.actions.filter(a => a.group === 'maintenance' && !updateInVersionDetails(snapshot, a.id) && !contextSetupInDetails(snapshot, a.id) && (!preparation || !['setup-context', 'basic-install'].includes(a.id))))}</div>
-      {preparation && !setupInline && <details className="aif-context-setup aif-preparation"><summary>Подготовка проекта</summary>{setupContent}</details>}
+      <div className="aif-maintenance" role="group" aria-label="Установка и настройка AI Factory">{renderActions(snapshot.actions.filter(a =>
+        a.group === 'maintenance' && !updates.includes(a) && !contextSetupInDetails(snapshot, a.id) &&
+        (!preparation?.length || a.id !== 'setup-context') && (!preparationVisible || a.id !== 'basic-install')))}</div>
       {!preparation && snapshot.actions.some(a => contextSetupInDetails(snapshot, a.id)) && <details className="aif-context-setup"><summary>Настройка контекста проекта</summary>
         <p className="aif-muted aif-small">Выполнение плана уже начато. Настройка контекста запускается отдельно и не продолжает выбранный план.</p>
         {renderActions(snapshot.actions.filter(a => contextSetupInDetails(snapshot, a.id)))}
@@ -249,7 +308,9 @@ function WorkflowCard({ threadId, initialTarget = '', phase = 'unknown', openFil
       {snapshot.checks.length > 0 && <details className="aif-checks"><summary>Что проверить <span className="aif-muted">· из чата: {snapshot.checks.filter(c => c.chat).length} · отчётов PASS: {snapshot.checks.filter(c => c.state === 'reported-pass').length}</span></summary>
         <p className="aif-muted aif-small">Дополнительные проверки — по выбору. Правила проекта и обязательные gates могут требовать их перед завершением; блокирующий FAIL сохраняет силу.</p>
         <p className="aif-muted aif-small">Галочки задач и результаты проверок независимы. Актуальность evidence подтверждает владелец workflow.</p>
-        <ul>{snapshot.checks.map(c => <li key={c.id}><div><strong>{c.label}</strong>{c.required ? <small className="aif-required">нужно для завершения</small> : supplementaryChecks.has(c.id) && <small className="aif-required" title="Дополнительный шаг flow; действующие правила проекта сохраняют приоритет">по выбору</small>}</div>
+        <ul>{snapshot.checks.map(c => <li key={c.id}><div className="aif-check-label">
+          <ExplainedLabel label={c.label} help={checkHelp[c.id]} />
+          {c.required ? <small className="aif-required">нужно для завершения</small> : supplementaryChecks.has(c.id) && <small className="aif-required" title="Дополнительный шаг flow; действующие правила проекта сохраняют приоритет">по выбору</small>}</div>
           <span className={`aif-check-state aif-${c.chat ? c.chat.result.status === 'pass' ? 'reported-pass' : c.chat.result.status : c.state}`} title={c.detail}>{c.chat ? `${c.chat.result.status.toUpperCase()} · из чата` : checkLabels[c.state]}</span>
           {snapshot.actions.filter(a => a.id === rowActions[c.id]).map(renderAction)}
           {c.path && openFile && <button className="aif-link" onClick={() => { if (!openFile(c.path!)) setError('Просмотр файла недоступен в этой поверхности.'); }}>Отчёт</button>}
@@ -262,8 +323,8 @@ function WorkflowCard({ threadId, initialTarget = '', phase = 'unknown', openFil
           <small className="aif-check-detail">{c.chat ? `Файловый отчёт: ${c.path ? checkLabels[c.state] + '. ' + c.detail : 'не найден.'}` : c.detail}</small></li>)}</ul>
         <details className="aif-setup"><summary>Настройка инструментов</summary>{renderActions(snapshot.actions.filter(a => a.group === 'setup' && !a.id.startsWith('prep-')))}</details>
       </details>}
-      <details className="aif-details"><summary>Версии и расширения{snapshot.extensions.length ? ` · ${snapshot.extensions.length}` : ''}</summary>
-        {renderActions(snapshot.actions.filter(a => a.group === 'maintenance' && updateInVersionDetails(snapshot, a.id)))}
+      <details id={updatesId} ref={updatesDetails} className="aif-details" onToggle={event => setUpdatesOpen(event.currentTarget.open)}><summary>Версии и расширения{snapshot.extensions.length ? ` · ${snapshot.extensions.length}` : ''}</summary>
+        {renderActions(updates)}
         {snapshot.versionsCheckedAt && <p className="aif-muted aif-small">Версии CLI/Git: снимок от {new Date(snapshot.versionsCheckedAt).toLocaleString('ru')}. Плановая проверка — раз в сутки.</p>}
         <dl><dt>Глобальный CLI</dt><dd>{snapshot.versions.globalCli ?? 'Не найден'}{snapshot.versions.globalSource && <small>{snapshot.versions.globalSource}</small>}</dd>
           <dt>Установка проекта</dt><dd>{snapshot.versions.installed ?? 'Не указана'} · {snapshot.runtime}</dd>

@@ -144,6 +144,11 @@ export default async function plugin(bb: BbPluginApi) {
     if (environment.projectId !== thread.projectId) throw new Error('Среда не соответствует проекту чата.');
     return { thread, environment };
   }
+  function preparationKey({ projectId, hostId, path }: { projectId: string; hostId: string; path: string | null }) {
+    if (projectId !== 'proj_personal') return `preparation-visible:${projectId}`;
+    const folder = createHash('sha256').update(JSON.stringify([hostId, path])).digest('hex');
+    return `preparation-visible:${projectId}:${folder}`;
+  }
   const readConfirmation = async (threadId: string) => pendingConfirmation(await bb.sdk.threads.events.list({ threadId,
     order: 'desc', limit: '100', types: ['item/completed', 'client/turn/requested'] }));
   async function requireConfirmationAnswer(threadId: string) {
@@ -278,6 +283,9 @@ export default async function plugin(bb: BbPluginApi) {
     snapshot.actions = workflowActions(snapshot);
     await chatChecks(input.threadId, environment.id, environment.hostId, snapshot, fresh);
     lockUnchangedChecks(snapshot);
+    if (snapshot.preparation?.length) {
+      snapshot.preparationVisible = await bb.storage.kv.get<boolean>(preparationKey(environment)) === true;
+    }
     return snapshot;
   }
   async function show(input: CardRequest) {
@@ -383,6 +391,14 @@ export default async function plugin(bb: BbPluginApi) {
       return { state: thread.environmentId === latest.environmentId ? 'current' as const : 'hidden' as const };
     },
     status: input => status(input, input.checkUpdates, input.force),
+    setPreparationVisibility: async ({ threadId, visible }) => {
+      const { environment } = await context(threadId);
+      const key = preparationKey(environment);
+      if (visible) await bb.storage.kv.set(key, true);
+      else await bb.storage.kv.delete(key);
+      bb.realtime.publish('changed', { threadId });
+      return { visible };
+    },
     planDocument: input => saveCompletedPlan(input.threadId, input.text),
     suggestions: async input => (await suggested(input.threadId)).view,
     dismissSuggestion: input => serial(input.threadId, async () => {
@@ -398,7 +414,8 @@ export default async function plugin(bb: BbPluginApi) {
       if (previous) return { sent: false, message: previous.state === 'sent' ? 'Команда уже отправлена.' : 'Исход отправки не подтверждён. Проверьте чат; автоматический повтор отключён.' };
       if (deliveries.some(d => d.state !== 'sent')) throw new Error('Есть отправка с неизвестным исходом. Сначала проверьте чат.');
       const current = await suggested(input.threadId, true);
-      if (current.view.sourceKey !== input.sourceKey || current.view.fingerprint !== input.fingerprint) throw new Error('Предложения устарели. Обновите их.');
+      const stale = { sent: false, stale: true as const, message: 'Предложения изменились. Проверьте обновлённый список перед запуском.' };
+      if (current.view.sourceKey !== input.sourceKey || current.view.fingerprint !== input.fingerprint) return stale;
       const item = current.view.items.find(i => i.id === input.commandId && i.available);
       if (!item || !current.snapshot) throw new Error('Команда недоступна или удалена из предложений.');
       const approval = item.kind === 'improve-approval';
@@ -412,7 +429,7 @@ export default async function plugin(bb: BbPluginApi) {
       const latest = await bb.sdk.threads.output({ threadId: input.threadId });
       const latestProposal = current.proposal ? pendingImproveProposal(await bb.sdk.threads.events.list({ threadId: input.threadId,
         order: 'desc', limit: '100', types: ['item/completed', 'client/turn/requested'] }), latest.output, current.snapshot.target) : null;
-      if ((approval && !latestProposal) || suggestionSource(current.snapshot.root, latest.output, latestProposal?.seq) !== input.sourceKey) throw new Error('Последний ответ изменился. Обновите предложения.');
+      if ((approval && !latestProposal) || suggestionSource(current.snapshot.root, latest.output, latestProposal?.seq) !== input.sourceKey) return stale;
       if (!approval) await requireConfirmationAnswer(input.threadId);
       const actionId = `suggestion:${input.sourceKey}:${item.id}`;
       if (deliveries.some(d => d.actionId === actionId && d.state === 'sent')) return { sent: false, message: 'Эта команда уже отправлена из данного ответа.' };
@@ -438,7 +455,9 @@ export default async function plugin(bb: BbPluginApi) {
       if (existing) return { sent: false, message: existing.state === 'sent' ? 'Команда уже отправлена.' : 'Исход отправки не подтверждён. Проверьте ленту чата; автоматический повтор отключён.' };
       if (deliveries.some(d => d.state !== 'sent')) throw new Error('Есть отправка с неизвестным исходом. Проверьте чат и явно сбросьте её через bb plugin run aif-chat reset-dispatch.');
       const current = await status(input, false, true);
-      if (current.fingerprint !== input.fingerprint) throw new Error('Карточка устарела. Обновите её и проверьте выбранную задачу.');
+      if (current.fingerprint !== input.fingerprint) return {
+        sent: false, stale: true as const, message: 'Карточка устарела. Проверьте обновлённую задачу и нажмите ещё раз.',
+      };
       const candidate = current.actions.find(a => a.id === input.actionId);
       if (candidate?.disabledReason === 'unchanged') throw new Error(unchangedReason);
       if (candidate?.disabledReason === 'context-blocked') throw new Error(candidate.reason);

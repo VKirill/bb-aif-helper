@@ -49,6 +49,38 @@ async function setup() {
 }
 function runInput(fingerprint = 'a'.repeat(64)) { return { threadId: 'thr_test', target: '.ai-factory/plans/demo.md', phase: 'plan', fingerprint, actionId: 'improve', requestId: randomUUID() }; }
 
+test('preparation visibility is shared within a project and scoped by folder in the personal project', async () => {
+  const h = await setup();
+  try {
+    h.value.preparation = [{ id: 'describe', label: 'Описать проект', optional: false, state: 'missing', paths: ['.ai-factory/DESCRIPTION.md'] }];
+    const projectId = (id: string) => id.startsWith('personal') ? 'proj_personal' : id === 'other' ? 'proj_other' : 'proj_test';
+    h.harness.sdk.stub('threads.get', async ({ threadId }) => makeThreadResponse({
+      id: threadId, projectId: projectId(threadId), environmentId: threadId, status: 'idle',
+    }));
+    h.harness.sdk.stub('environments.get', async ({ environmentId }) => ({
+      id: environmentId, projectId: projectId(environmentId), path: `/${environmentId}`,
+      hostId: 'host_test', status: 'ready', lifecycle: { phase: 'active' },
+    }) as any);
+    const status = async (threadId: string) =>
+      await h.harness.behavior.callRpc('status', { threadId }) as typeof h.value;
+    const setVisibility = (threadId: string, visible: boolean) =>
+      h.harness.behavior.callRpc('setPreparationVisibility', { threadId, visible });
+
+    const initial = await status('thr_test');
+    assert.equal(initial.preparationVisible, false);
+    await setVisibility('thr_test', true);
+    assert.equal((await status('same_project')).preparationVisible, true);
+    assert.equal((await status('other')).preparationVisible, false);
+    assert.equal((await status('thr_test')).fingerprint, initial.fingerprint);
+    await setVisibility('same_project', false);
+    assert.equal((await status('thr_test')).preparationVisible, false);
+    await setVisibility('personal_one', true);
+    assert.equal((await status('personal_one')).preparationVisible, true);
+    assert.equal((await status('personal_two')).preparationVisible, false);
+    assert.equal(h.sends, 0);
+  } finally { await h.harness.lifecycle.dispose(); }
+});
+
 test('2.22 commit boundaries also block a generic commit suggestion while coupling retains its explicit opt-in', async () => {
   const h = await setup(); try {
     h.value.versions.installed = '2.22.0'; h.value.worktree.hasUncommitted = true;
@@ -136,7 +168,8 @@ test('cards with different phases share a scan; force and action dispatch still 
     await h.harness.behavior.callRpc('status', { threadId: 'thr_test', target: runInput().target, force: true });
     assert.equal(h.collections, 2);
     h.value.fingerprint = 'b'.repeat(64);
-    await assert.rejects(h.harness.behavior.callRpc('run', runInput()));
+    const stale = await h.harness.behavior.callRpc('run', runInput());
+    assert.deepEqual(stale, { sent: false, stale: true, message: 'Карточка устарела. Проверьте обновлённую задачу и нажмите ещё раз.' });
     assert.equal(h.collections, 3); assert.equal(h.sends, 0);
   } finally { await h.harness.lifecycle.dispose(); }
 });
@@ -463,7 +496,8 @@ test('a proposed chat plan cannot dispatch after a new user request or a changed
       h.setEvents([request, reply]);
       const view = await h.harness.behavior.callRpc('status', { threadId: 'thr_test', phase: 'plan' }) as any;
       h.setEvents(changed ? [request, { ...reply, seq: 3 }] : [request, reply, { ...request, seq: 3 }]);
-      await assert.rejects(h.harness.behavior.callRpc('run', { ...runInput(view.fingerprint), target: '', phase: 'plan', actionId: 'basic-implement' }));
+      const result = await h.harness.behavior.callRpc('run', { ...runInput(view.fingerprint), target: '', phase: 'plan', actionId: 'basic-implement' }) as { stale?: true };
+      assert.equal(result.stale, true);
       assert.equal(h.sends, 0); assert.equal(await h.bb.storage.kv.get('chat-plan:thr_test'), undefined);
     } finally { await h.harness.lifecycle.dispose(); }
   }
@@ -604,9 +638,13 @@ test('commit after archive rechecks files, active work and the last gate before 
     assert.match(sent.input[1].text, /сохрани несвязанные изменения/); assert.equal(h.sends, 1);
   } finally { await h.harness.lifecycle.dispose(); }
 });
-test('stale card is rejected before dispatch', async () => {
+test('stale card returns a normal result without dispatch or delivery state', async () => {
   const h = await setup(); try {
-    await assert.rejects(h.harness.behavior.callRpc('run', runInput('b'.repeat(64)))); assert.equal(h.sends, 0);
+    const result = await h.harness.behavior.callRpc('run', runInput('b'.repeat(64))) as { sent: boolean; stale?: true };
+    assert.equal(result.sent, false); assert.equal(result.stale, true); assert.equal(h.sends, 0);
+    assert.equal(await h.bb.storage.kv.get('deliveries:thr_test'), undefined);
+    const retry = await h.harness.behavior.callRpc('run', runInput()) as { sent: boolean };
+    assert.equal(retry.sent, true); assert.equal(h.sends, 1);
   } finally { await h.harness.lifecycle.dispose(); }
 });
 test('active work or pending questions prevent a second workflow launch', async () => {
@@ -832,7 +870,7 @@ test('gate writer requires the installed command, exact selected change and a cu
     h.setActive(true);
     await assert.rejects(h.harness.behavior.callRpc('runSuggestion', suggestionInput(ready, 'aif-gate-evidence')));
     h.setActive(false); h.setOutput('Новый ответ без команды.');
-    await assert.rejects(h.harness.behavior.callRpc('runSuggestion', suggestionInput(ready, 'aif-gate-evidence')));
+    assert.equal((await h.harness.behavior.callRpc('runSuggestion', suggestionInput(ready, 'aif-gate-evidence')) as { stale?: true }).stale, true);
     h.setOutput('`$aif-gate-evidence`'); assert.equal((await read()).items[0].available, false);
     assert.equal(h.sends, 0);
   } finally { await h.harness.lifecycle.dispose(); }
@@ -868,12 +906,12 @@ test('apply-all rejects changed files, answered questions and identical text fro
     const view = await h.harness.behavior.callRpc('suggestions', { threadId: 'thr_test' }) as any;
     const input = suggestionInput(view, 'apply-improvements');
     h.value.fingerprint = 'b'.repeat(64);
-    await assert.rejects(h.harness.behavior.callRpc('runSuggestion', input), /устарели/);
+    assert.equal((await h.harness.behavior.callRpc('runSuggestion', input) as { stale?: true }).stale, true);
     h.value.fingerprint = 'a'.repeat(64);
     h.setEvents(improveEvents(10));
     const newer = await h.harness.behavior.callRpc('suggestions', { threadId: 'thr_test' }) as any;
     assert.notEqual(newer.sourceKey, view.sourceKey);
-    await assert.rejects(h.harness.behavior.callRpc('runSuggestion', input), /устарели/);
+    assert.equal((await h.harness.behavior.callRpc('runSuggestion', input) as { stale?: true }).stale, true);
     h.setEvents([...improveEvents(10), { seq: 12, type: 'client/turn/requested', data: { input: [{ type: 'text', text: 'Не применять' }] } }]);
     const answered = await h.harness.behavior.callRpc('suggestions', { threadId: 'thr_test' }) as any;
     assert(!answered.items.some((item: any) => item.id === 'apply-improvements')); assert.equal(h.sends, 0);
@@ -1023,9 +1061,9 @@ test('stale answers, changed files, hidden suggestions and missing skills cannot
     h.setOutput('$aif-plan');
     const view = await h.harness.behavior.callRpc('suggestions', { threadId: 'thr_test' }) as any;
     h.setOutput('$aif-explore');
-    await assert.rejects(h.harness.behavior.callRpc('runSuggestion', suggestionInput(view)));
+    assert.equal((await h.harness.behavior.callRpc('runSuggestion', suggestionInput(view)) as { stale?: true }).stale, true);
     h.setOutput('$aif-plan'); h.value = { ...h.value, fingerprint: 'b'.repeat(64) };
-    await assert.rejects(h.harness.behavior.callRpc('runSuggestion', suggestionInput(view)));
+    assert.equal((await h.harness.behavior.callRpc('runSuggestion', suggestionInput(view)) as { stale?: true }).stale, true);
     const fresh = await h.harness.behavior.callRpc('suggestions', { threadId: 'thr_test' }) as any;
     await h.harness.behavior.callRpc('dismissSuggestion', { threadId: 'thr_test', sourceKey: fresh.sourceKey, commandId: 'aif-plan' });
     await assert.rejects(h.harness.behavior.callRpc('runSuggestion', suggestionInput(fresh)));
@@ -1061,7 +1099,7 @@ test('a last answer changing during project inspection cannot dispatch an old co
     const view = await h.harness.behavior.callRpc('suggestions', { threadId: 'thr_test' }) as any;
     let reads = 0;
     h.harness.sdk.stub('threads.output', async () => ({ output: ++reads === 1 ? '$aif-plan' : '$aif-explore' }));
-    await assert.rejects(h.harness.behavior.callRpc('runSuggestion', suggestionInput(view)));
+    assert.equal((await h.harness.behavior.callRpc('runSuggestion', suggestionInput(view)) as { stale?: true }).stale, true);
     assert.equal(h.sends, 0);
   } finally { await h.harness.lifecycle.dispose(); }
 });
