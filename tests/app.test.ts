@@ -220,7 +220,7 @@ test('workflow panel reads its owning thread and exposes maintenance without a t
   });
   try {
     await slot.findByRole('button', { name: 'Обновить AI Factory' });
-    await slot.findByRole('button', { name: 'Запустить aif' });
+    await slot.findByRole('button', { name: 'Запустить: Описать проект (/aif или aif-analyze)' });
     assert.deepEqual(readThreads, ['thr_panel']); assert.equal(runs, 0);
   } finally { slot.lifecycle.unmount(); }
 });
@@ -480,8 +480,9 @@ test('readiness block in the tab: one run button on the first todo step, skip RP
   let slot = renderSlot(tab as any, { threadId: 'thr_panel', environment: { id: 'env_panel' } }, { rpc });
   try {
     await slot.findByText('Подготовка проекта', { selector: '*' });
-    const run = await slot.findByRole('button', { name: 'Запустить aif' });
-    assert.equal(slot.queryByRole('button', { name: 'Описать архитектуру' }), null);
+    const run = await slot.findByRole('button', { name: /^Запустить: Описать проект/ });
+    assert.equal(slot.getAllByRole('button', { name: /^Запустить: / }).length, s.readiness.filter(step => step.state === 'todo').length, 'every unfinished step can be run');
+    await slot.findByRole('button', { name: 'Запустить: Настроить CI' });
     assert.equal(slot.queryByText('Настройка контекста проекта'), null);
     assert.equal(slot.queryByText('Дополнительно'), null);
     await slot.findByText('нет: .ai-factory/DESCRIPTION.md, .ai-factory/config.yaml, .ai-factory/rules/base.md, AGENTS.md');

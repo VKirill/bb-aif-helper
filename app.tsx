@@ -344,7 +344,7 @@ function ReadinessSection({ snapshot, run, busy, sending, setReadinessSkip }: {
     finally { setPendingSkip(null); }
   }
   function stepRow(s: ReadinessStep, n: number, isNext: boolean) {
-    const action = isNext ? actionFor(s) : undefined;
+    const action = s.state === 'todo' ? actionFor(s) : undefined;
     const skip = s.state === 'skipped'
       ? <Button type="button" size="sm" variant="ghost" disabled={pendingSkip !== null} onClick={() => void toggleSkip(s, false)}>Вернуть</Button>
       : s.skippable && s.state === 'todo'
@@ -361,9 +361,9 @@ function ReadinessSection({ snapshot, run, busy, sending, setReadinessSkip }: {
         </span>
         {help === s.id && <p className="m-0 rounded-md bg-muted px-3 py-2 text-xs">{readinessHelp[s.id]}</p>}
         {s.state === 'todo' && s.missing.length > 0 && !s.anyOf && <span className="break-words text-xs text-muted-foreground">нет: {s.missing.join(', ')}</span>}
-        {action && <span><Hint text={`${action.reason}\n${action.command}`}><Button type="button" size="sm"
-          disabled={sending || busy || !action.available} onClick={() => void run(action)}>
-          {action.label}{!action.available && (action.disabledReason === 'unchanged' ? ' · без изменений' : ' · не установлен')}</Button></Hint></span>}
+        {action && <span><Hint text={`${action.reason}\n${action.command}`}><Button type="button" size="sm" variant={isNext ? 'default' : 'outline'}
+          aria-label={`Запустить: ${s.label}`} disabled={sending || busy || !action.available} onClick={() => void run(action)}>
+          Запустить{!action.available && (action.disabledReason === 'unchanged' ? ' · без изменений' : ' · не установлен')}</Button></Hint></span>}
       </div>
     </li>;
   }
