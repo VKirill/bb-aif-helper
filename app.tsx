@@ -118,7 +118,7 @@ function WorkflowCard({ threadId, initialTarget = '', phase = 'unknown', openFil
     <header className={cn('flex min-h-8 items-center gap-2', delegation && 'sticky -top-4 z-10 -mx-4 -mt-4 border-b border-border bg-background/90 px-4 py-3 backdrop-blur')}>
       <span className="grid size-6 shrink-0 place-items-center rounded-md bg-primary text-primary-foreground"><Icon name="Workflow" className="size-3.5" /></span>
       <strong className="text-base font-semibold tracking-tight whitespace-nowrap">AI Factory</strong>
-      {snapshot && <Badge variant="secondary" className="truncate font-medium">{profileNames[snapshot.profile]}</Badge>}
+      {snapshot && snapshot.profile !== 'upstream' && <Badge variant="secondary" className="min-w-0 truncate font-medium">{profileNames[snapshot.profile]}</Badge>}
       <span className="ml-auto"><Hint text="Перечитать задачи и проверки; версии CLI/Git и GitHub кэшируются на сутки"><Button type="button" variant="ghost" size="icon" className="size-8 text-muted-foreground" onClick={() => void refresh(false, true)}
         aria-label="Обновить статус AI Factory"><Icon name="RotateCcw" className="size-4" /></Button></Hint></span>
     </header>
@@ -338,13 +338,14 @@ function ReadinessSection({ snapshot, run, busy, sending, setReadinessSkip }: {
     return <li key={s.id} className="flex items-start gap-2">
       <Icon name={iconFor(s)} aria-label={stateLabel(s)} className={cn('mt-0.5 size-4 shrink-0', s.state === 'done' ? 'text-primary' : 'text-muted-foreground')} />
       <div className="flex min-w-0 flex-1 flex-col gap-1">
-        <span className="flex flex-wrap items-center gap-x-2">
-          <span className="text-xs tabular-nums text-muted-foreground">{n}.</span>
-          <span className={cn('text-sm font-medium', s.state === 'done' && 'text-muted-foreground')}>{s.label}{readinessHelp[s.id] && <HelpMark label={`Что делает шаг «${s.label}»`} open={help === s.id} onToggle={() => setHelp(help === s.id ? null : s.id)} />}</span>
-          {skip && <span className="ml-auto">{skip}</span>}
+        <span className="flex items-start gap-2">
+          <span className={cn('min-w-0 flex-1 text-sm font-medium', s.state === 'done' && 'text-muted-foreground')}>
+            <span className="mr-1.5 text-xs tabular-nums text-muted-foreground">{n}.</span>{s.label}{readinessHelp[s.id] && <HelpMark label={`Что делает шаг «${s.label}»`} open={help === s.id} onToggle={() => setHelp(help === s.id ? null : s.id)} />}
+          </span>
+          {skip && <span className="-my-1 shrink-0">{skip}</span>}
         </span>
         {help === s.id && <p className="m-0 rounded-md bg-muted px-3 py-2 text-xs">{readinessHelp[s.id]}</p>}
-        {s.state === 'todo' && s.missing.length > 0 && <span className="text-xs text-muted-foreground">{s.anyOf ? 'любой из' : 'нет'}: {s.missing.join(', ')}</span>}
+        {s.state === 'todo' && s.missing.length > 0 && !s.anyOf && <span className="break-words text-xs text-muted-foreground">нет: {s.missing.join(', ')}</span>}
         {action && <span><Hint text={`${action.reason}\n${action.command}`}><Button type="button" size="sm"
           disabled={sending || busy || !action.available} onClick={() => void run(action)}>
           {action.label}{!action.available && (action.disabledReason === 'unchanged' ? ' · без изменений' : ' · не установлен')}</Button></Hint></span>}

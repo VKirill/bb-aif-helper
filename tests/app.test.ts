@@ -485,7 +485,7 @@ test('readiness block in the tab: one run button on the first todo step, skip RP
     assert.equal(slot.queryByText('Настройка контекста проекта'), null);
     assert.equal(slot.queryByText('Дополнительно'), null);
     await slot.findByText('нет: .ai-factory/DESCRIPTION.md, .ai-factory/config.yaml, .ai-factory/rules/base.md, AGENTS.md');
-    await slot.findByText(/^любой из: \.husky\//);
+    assert.equal(slot.queryByText(/^любой из:/), null, "any-of file lists live behind «?» to keep phone rows short");
     fireEvent.click(run);
     await waitFor(() => assert.deepEqual(runs, ['setup-context']));
     fireEvent.click(slot.getAllByRole('button', { name: 'Пропустить' })[1]);
