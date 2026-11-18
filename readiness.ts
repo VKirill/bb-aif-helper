@@ -10,22 +10,17 @@ export interface ReadinessFacts {
   paths: {
     description?: string;
     architecture?: string;
-    roadmap?: string;
     rulesBase?: string;
-    docs?: string;
   };
-  /** config.rules keys other than `base`; their presence completes the optional rules step. */
-  ruleAreas?: string[];
 }
 
 const QUALITY_FILES = ['.husky/', 'lefthook.yml', '.lefthook.yml', '.pre-commit-config.yaml'];
 const CI_FILES = ['.github/workflows/', '.gitlab-ci.yml', '.circleci/config.yml', 'Jenkinsfile', 'bitbucket-pipelines.yml'];
-const BUILD_FILES = ['Makefile', 'Taskfile.yml', 'justfile', 'magefile.go'];
-const DOCKER_FILES = ['Dockerfile', 'compose.yml', 'compose.yaml', 'docker-compose.yml'];
 
 const norm = (p: string) => p.replaceAll('\\', '/').replace(/^\.\//, '').replace(/\/+$/, '');
-const step = (id: string, label: string, actionId: string, done: boolean, missing: string[], optional = false, skippable = false): ReadinessStep =>
-  ({ id, label, actionId, state: done ? 'done' : 'todo', optional, skippable, missing: done ? [] : missing });
+// anyOf: one of the listed files is enough (quality, CI); otherwise every listed file is required.
+const step = (id: string, label: string, actionId: string, done: boolean, missing: string[], skippable = false, anyOf = false): ReadinessStep =>
+  ({ id, label, actionId, state: done ? 'done' : 'todo', skippable, anyOf, missing: done ? [] : missing });
 
 export function readinessSteps(facts: ReadinessFacts, skipped: string[] = []): ReadinessStep[] {
   const present = new Set(Object.entries(facts.files).filter(([, v]) => v).map(([k]) => norm(k)));
@@ -39,21 +34,14 @@ export function readinessSteps(facts: ReadinessFacts, skipped: string[] = []): R
   const p = facts.paths;
   const description = p.description ?? '.ai-factory/DESCRIPTION.md';
   const architecture = p.architecture ?? '.ai-factory/ARCHITECTURE.md';
-  const roadmap = p.roadmap ?? '.ai-factory/ROADMAP.md';
   const rulesBase = p.rulesBase ?? '.ai-factory/rules/base.md';
-  const docs = p.docs ?? 'docs/';
   const contextFiles = [description, '.ai-factory/config.yaml', rulesBase, 'AGENTS.md'];
   const steps: ReadinessStep[] = [
     step('install', 'Установить AI Factory', facts.configured ? 'update-factory' : 'basic-install', facts.configured, ['.ai-factory.json']),
     step('context', 'Описать проект (/aif или aif-analyze)', 'setup-context', contextFiles.every(has), contextFiles.filter(rel => !has(rel))),
     step('architecture', 'Описать архитектуру', 'setup-architecture', has(architecture), [architecture]),
-    step('roadmap', 'Составить roadmap', 'setup-roadmap', has(roadmap), [roadmap], false, true),
-    step('quality', 'Настроить проверки', 'quality-setup', any(QUALITY_FILES), QUALITY_FILES, false, true),
-    step('ci', 'Настроить CI', 'ci-setup', any(CI_FILES), CI_FILES, false, true),
-    step('rules', 'Настроить правила проекта', 'setup-rules', (facts.ruleAreas?.length ?? 0) > 0, ['.ai-factory/rules/'], true),
-    step('docs', 'Создать документацию', 'setup-docs', hasDir(docs), [docs], true),
-    step('build', 'Настроить сборку', 'setup-build', BUILD_FILES.some(has), BUILD_FILES, true),
-    step('docker', 'Настроить Docker', 'setup-docker', DOCKER_FILES.some(has), DOCKER_FILES, true),
+    step('quality', 'Настроить проверки', 'quality-setup', any(QUALITY_FILES), QUALITY_FILES, true, true),
+    step('ci', 'Настроить CI', 'ci-setup', any(CI_FILES), CI_FILES, true, true),
   ];
   return applySkipped(steps, skipped);
 }
@@ -64,9 +52,9 @@ export function applySkipped(steps: ReadinessStep[], skipped: string[]): Readine
 }
 
 export function readinessComplete(steps: ReadinessStep[]): boolean {
-  return steps.every(s => s.optional || s.state !== 'todo');
+  return steps.every(s => s.state !== 'todo');
 }
 
 export function nextReadinessStep(steps: ReadinessStep[]): ReadinessStep | undefined {
-  return steps.find(s => !s.optional && s.state === 'todo');
+  return steps.find(s => s.state === 'todo');
 }

@@ -211,8 +211,8 @@ test('workflow panel reads its owning thread and exposes maintenance without a t
   const readThreads: string[] = []; let runs = 0;
   const s = data();
   s.readiness = [
-    { id: 'install', label: 'Установить AI Factory', actionId: 'update-factory', state: 'done', optional: false, skippable: false, missing: [] },
-    { id: 'context', label: 'Описать проект (/aif или aif-analyze)', actionId: 'setup-context', state: 'todo', optional: false, skippable: false, missing: [] },
+    { id: 'install', label: 'Установить AI Factory', actionId: 'update-factory', state: 'done', skippable: false, anyOf: false, missing: [] },
+    { id: 'context', label: 'Описать проект (/aif или aif-analyze)', actionId: 'setup-context', state: 'todo', skippable: false, anyOf: false, missing: [] },
   ];
   const tab = app.tabs.find((t): t is Extract<(typeof app.tabs)[number], { availability: 'fixed'; context: { kind: 'thread' } }> => t.id === 'workflow' && t.availability === 'fixed' && t.context.kind === 'thread')!;
   const slot = renderSlot(tab, { threadId: 'thr_panel', environment: { id: 'env_panel' } }, {
@@ -483,12 +483,15 @@ test('readiness block in the tab: one run button on the first todo step, skip RP
     const run = await slot.findByRole('button', { name: 'Запустить aif' });
     assert.equal(slot.queryByRole('button', { name: 'Описать архитектуру' }), null);
     assert.equal(slot.queryByText('Настройка контекста проекта'), null);
+    assert.equal(slot.queryByText('Дополнительно'), null);
+    await slot.findByText('нет: .ai-factory/DESCRIPTION.md, .ai-factory/config.yaml, .ai-factory/rules/base.md, AGENTS.md');
+    await slot.findByText(/^любой из: \.husky\//);
     fireEvent.click(run);
     await waitFor(() => assert.deepEqual(runs, ['setup-context']));
-    fireEvent.click(slot.getAllByRole('button', { name: 'Пропустить' })[2]);
+    fireEvent.click(slot.getAllByRole('button', { name: 'Пропустить' })[1]);
     await waitFor(() => assert.deepEqual(skips, [{ threadId: 'thr_panel', stepId: 'ci', skipped: true }]));
   } finally { slot.lifecycle.unmount(); }
-  const files = Object.fromEntries(['.ai-factory/DESCRIPTION.md', '.ai-factory/config.yaml', '.ai-factory/rules/base.md', 'AGENTS.md', '.ai-factory/ARCHITECTURE.md', '.ai-factory/ROADMAP.md', 'lefthook.yml', 'Jenkinsfile'].map(f => [f, true]));
+  const files = Object.fromEntries(['.ai-factory/DESCRIPTION.md', '.ai-factory/config.yaml', '.ai-factory/rules/base.md', 'AGENTS.md', '.ai-factory/ARCHITECTURE.md', 'lefthook.yml', 'Jenkinsfile'].map(f => [f, true]));
   s.readiness = readinessSteps({ configured: true, contextSkill: true, files, paths: {} });
   slot = renderSlot(tab as any, { threadId: 'thr_panel', environment: { id: 'env_panel' } }, { rpc });
   try {

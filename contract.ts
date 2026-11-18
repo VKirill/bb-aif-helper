@@ -19,7 +19,7 @@ export const rpcContract = defineRpcContract({
   dismissSuggestion: { input: suggestionActionSchema, output: z.object({ dismissed: z.literal(true) }) },
   delegation: { input: z.object({ threadId: z.string().min(1).max(200) }).strict(), output: delegationViewSchema },
   setDelegation: { input: z.object({ threadId: z.string().min(1).max(200), choice: delegationChoiceSchema }).strict(), output: delegationViewSchema },
-  setReadinessSkip: { input: z.object({ threadId: z.string().min(1).max(200), stepId: z.enum(['roadmap', 'quality', 'ci']), skipped: z.boolean() }).strict(), output: z.object({ ok: z.literal(true) }) },
+  setReadinessSkip: { input: z.object({ threadId: z.string().min(1).max(200), stepId: z.enum(['quality', 'ci']), skipped: z.boolean() }).strict(), output: z.object({ ok: z.literal(true) }) },
   runSuggestion: { input: suggestionActionSchema.extend({ fingerprint: z.string().length(64), requestId: z.string().uuid() }), output: z.object({ sent: z.boolean(), stale: z.boolean().optional(), message: z.string(),
     command: z.string().optional(),
     data: z.object({ source: z.literal('aif-chat'), sourceKey: z.string(), commandId: z.string(), fingerprint: z.string(), gate: gateResultSchema.nullable() }).optional() }) },

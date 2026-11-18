@@ -55,7 +55,7 @@ The supported command is singular `ai-factory extension update` (all registered 
 
 **Запустить aif** is used without AIFHub; **Запустить aif-analyze** is selected for a healthy installed `aifhub-extension`. A missing setup skill stays disabled. Setup never receives the selected plan as an argument.
 
-The tab opens with a **Подготовка проекта** block above "Сейчас": six required steps (install, project context, architecture, roadmap, checks, CI) marked done/todo/skipped from actual files, honoring custom paths from config.yaml; only the first unfinished step has a run button, roadmap/checks/CI can be skipped per project folder, optional steps sit under "Дополнительно", and the block collapses to "Проект готов к работе через AI Factory" once all required steps are done or skipped. In the tab the aif/aif-analyze setup button lives only inside this block; chat cards keep the context-setup spoiler.
+The tab opens with a **Подготовка проекта** block above "Сейчас" listing only the steps other AI Factory commands depend on: install, project context (aif/aif-analyze), architecture, quality checks and CI, marked done/todo/skipped from actual files and custom config.yaml paths. Only the first unfinished step has a run button; quality checks and CI can be skipped per project folder; the block collapses to "Проект готов к работе через AI Factory" once every step is done or skipped. In the tab the aif/aif-analyze setup button lives only inside this block; chat cards keep the context-setup spoiler.
 
 ## Code delegation
 

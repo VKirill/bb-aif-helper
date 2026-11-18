@@ -287,21 +287,15 @@ export async function collectSnapshot(input: HostInput, signal?: AbortSignal): P
   };
   const description = str(paths.description) ?? '.ai-factory/DESCRIPTION.md';
   const architecture = str(paths.architecture) ?? '.ai-factory/ARCHITECTURE.md';
-  const roadmap = str(paths.roadmap) ?? '.ai-factory/ROADMAP.md';
   const rulesBase = str(obj(config.rules).base) ?? '.ai-factory/rules/base.md';
-  const docsDir = str(paths.docs) ?? 'docs';
-  for (const rel of [description, '.ai-factory/config.yaml', architecture, roadmap, rulesBase, 'AGENTS.md',
+  for (const rel of [description, '.ai-factory/config.yaml', architecture, rulesBase, 'AGENTS.md',
     'lefthook.yml', '.lefthook.yml', '.pre-commit-config.yaml',
-    '.gitlab-ci.yml', '.circleci/config.yml', 'Jenkinsfile', 'bitbucket-pipelines.yml',
-    'Makefile', 'Taskfile.yml', 'justfile', 'magefile.go',
-    'Dockerfile', 'compose.yml', 'compose.yaml', 'docker-compose.yml']) await probe(rel);
+    '.gitlab-ci.yml', '.circleci/config.yml', 'Jenkinsfile', 'bitbucket-pipelines.yml']) await probe(rel);
   await probeDir('.husky');
   await probeDir('.github/workflows', item => !item.directory && /\.ya?ml$/i.test(item.name));
-  await probeDir(docsDir);
   const readinessFacts: ReadinessFacts = { configured: s.configured,
     contextSkill: s.skills.includes('aif') || s.skills.includes('aif-analyze'),
-    files, paths: { description, architecture, roadmap, rulesBase, docs: docsDir },
-    ruleAreas: Object.keys(obj(config.rules)).filter(k => k !== 'base') };
+    files, paths: { description, architecture, rulesBase } };
   const branch = await git(root, ['branch', '--show-current'], signal);
   const head = await git(root, ['rev-parse', 'HEAD'], signal);
   const dirtyDiff = await git(root, ['diff', '--no-ext-diff', '--no-textconv', '--binary', 'HEAD', '--', '.'], signal);

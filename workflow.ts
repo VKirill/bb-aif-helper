@@ -28,13 +28,8 @@ export function workflowActions(s: Snapshot): Action[] {
       reason: available ? reason : `Сначала установите ${skill} для ${s.runtime}`, available });
   };
   addSetup('setup-architecture', 'Описать архитектуру', 'aif-architecture', 'Сформировать архитектурные правила проекта');
-  addSetup('setup-roadmap', 'Составить roadmap', 'aif-roadmap', 'Сформировать roadmap проекта');
   addSetup('quality-setup', 'Настроить проверки', 'aif-quality-setup', 'Отдельная настройка подходящих quality tools', ' setup');
   addSetup('ci-setup', 'Настроить CI', 'aif-ci', 'Создание/аудит pipeline не означает успешный CI-run');
-  addSetup('setup-rules', 'Настроить правила проекта', 'aif-rules', 'Правила проекта для агентов');
-  addSetup('setup-docs', 'Создать документацию', 'aif-docs', 'Документация проекта по контракту skill');
-  addSetup('setup-build', 'Настроить сборку', 'aif-build-automation', 'Автоматизация сборки проекта');
-  addSetup('setup-docker', 'Настроить Docker', 'aif-dockerize', 'Docker-конфигурация проекта');
   if (s.extensions.length) maintenance.push({ id: 'update-extensions', label: 'Обновить расширения', command: 'ai-factory extension update', group: 'maintenance',
     reason: 'Сначала обновить AI Factory и установку проекта, затем зарегистрированные расширения и проверить версии/команды; без --force', available: s.configured });
   // Maintenance can repair an outdated installation even when a selected plan

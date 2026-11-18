@@ -12,7 +12,7 @@ export const actionSchema = z.object({
 });
 export const readinessStepSchema = z.object({
   id: z.string(), label: z.string(), actionId: z.string(),
-  state: z.enum(['done', 'todo', 'skipped']), optional: z.boolean(), skippable: z.boolean(),
+  state: z.enum(['done', 'todo', 'skipped']), skippable: z.boolean(), anyOf: z.boolean(),
   missing: z.array(z.string()),
 });
 export const snapshotSchema = z.object({

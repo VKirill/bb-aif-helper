@@ -195,7 +195,8 @@ test('readiness setup actions exist without a selected plan and follow installed
   const quality = actions.find(a => a.id === 'quality-setup')!, architecture = actions.find(a => a.id === 'setup-architecture')!;
   assert.equal(quality.group, 'setup'); assert.equal(quality.available, true); assert.equal(quality.command, '$aif-quality-setup setup');
   assert.equal(architecture.available, false); assert.match(architecture.reason, /Сначала установите aif-architecture/);
-  for (const id of ['setup-roadmap', 'ci-setup', 'setup-rules', 'setup-docs', 'setup-build', 'setup-docker']) assert(actions.some(a => a.id === id), id);
+  assert(actions.some(a => a.id === 'ci-setup'));
+  for (const id of ['setup-roadmap', 'setup-rules', 'setup-docs', 'setup-build', 'setup-docker']) assert(!actions.some(a => a.id === id), id);
   const prompt = actionPrompt(snapshot(), { ...architecture, available: true });
   assert.match(prompt, /^\$aif-architecture/); assert.match(prompt, /Не выполняй план/);
 });

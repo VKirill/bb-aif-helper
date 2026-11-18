@@ -79,7 +79,7 @@ function WorkflowCard({ threadId, initialTarget = '', phase = 'unknown', openFil
     } catch (e) { if (mounted.current) setError(e instanceof Error ? e.message : String(e)); }
     finally { sendingRef.current = false; if (mounted.current) { setSending(false); void refresh(); } }
   }
-  const setReadinessSkip = async (stepId: 'roadmap' | 'quality' | 'ci', skipped: boolean) => {
+  const setReadinessSkip = async (stepId: 'quality' | 'ci', skipped: boolean) => {
     try { await rpc.call('setReadinessSkip', { threadId, stepId, skipped }); }
     catch (e) { setError(e instanceof Error ? e.message : String(e)); return; }
     await refresh();
@@ -301,12 +301,10 @@ function DelegationSection({ threadId, environmentId, busy }: { threadId: string
 
 function ReadinessSection({ snapshot, run, busy, sending, setReadinessSkip }: {
   snapshot: Snapshot; run: (action: Action) => void; busy: boolean; sending: boolean;
-  setReadinessSkip: (stepId: 'roadmap' | 'quality' | 'ci', skipped: boolean) => Promise<void>;
+  setReadinessSkip: (stepId: 'quality' | 'ci', skipped: boolean) => Promise<void>;
 }) {
   const [pendingSkip, setPendingSkip] = useState<string | null>(null);
   const steps = snapshot.readiness;
-  const required = steps.filter(s => !s.optional);
-  const optional = steps.filter(s => s.optional);
   const next = nextReadinessStep(steps);
   const actionFor = (s: ReadinessStep) => snapshot.actions.find(a => a.id === s.actionId);
   const iconFor = (s: ReadinessStep) => s.state === 'done' ? 'CircleCheck' : s.state === 'skipped' ? 'CircleDashed' : 'Circle';
@@ -314,11 +312,11 @@ function ReadinessSection({ snapshot, run, busy, sending, setReadinessSkip }: {
   async function toggleSkip(s: ReadinessStep, skipped: boolean) {
     if (pendingSkip) return;
     setPendingSkip(s.id);
-    try { await setReadinessSkip(s.id as 'roadmap' | 'quality' | 'ci', skipped); }
+    try { await setReadinessSkip(s.id as 'quality' | 'ci', skipped); }
     finally { setPendingSkip(null); }
   }
-  function stepRow(s: ReadinessStep, n: number | null, runVariant: 'default' | 'outline' | null) {
-    const action = runVariant ? actionFor(s) : undefined;
+  function stepRow(s: ReadinessStep, n: number, isNext: boolean) {
+    const action = isNext ? actionFor(s) : undefined;
     const skip = s.state === 'skipped'
       ? <Button type="button" size="sm" variant="ghost" disabled={pendingSkip !== null} onClick={() => void toggleSkip(s, false)}>Вернуть</Button>
       : s.skippable && s.state === 'todo'
@@ -327,26 +325,19 @@ function ReadinessSection({ snapshot, run, busy, sending, setReadinessSkip }: {
     return <li key={s.id} className="flex items-start gap-2">
       <Icon name={iconFor(s)} aria-label={stateLabel(s)} className={cn('mt-0.5 size-4 shrink-0', s.state === 'done' ? 'text-primary' : 'text-muted-foreground')} />
       <div className="flex min-w-0 flex-1 flex-col gap-1">
-        <span className="flex flex-wrap items-baseline gap-x-2">
-          {n !== null && <span className="text-xs tabular-nums text-muted-foreground">{n}.</span>}
+        <span className="flex flex-wrap items-center gap-x-2">
+          <span className="text-xs tabular-nums text-muted-foreground">{n}.</span>
           <span className={cn('text-sm font-medium', s.state === 'done' && 'text-muted-foreground')}>{s.label}</span>
-          {s.state !== 'done' && s.missing.length > 0 && <span className="text-xs text-muted-foreground">{s.missing.join(', ')}</span>}
+          {skip && <span className="ml-auto">{skip}</span>}
         </span>
-        {(action || skip) && <span className="flex flex-wrap gap-2">
-          {action && <Hint text={`${action.reason}\n${action.command}`}><Button type="button" size="sm" variant={runVariant ?? 'outline'}
-            disabled={sending || busy || !action.available} onClick={() => void run(action)}>
-            {action.label}{!action.available && (action.disabledReason === 'unchanged' ? ' · без изменений' : ' · не установлен')}</Button></Hint>}
-          {skip}
-        </span>}
+        {s.state === 'todo' && s.missing.length > 0 && <span className="text-xs text-muted-foreground">{s.anyOf ? 'любой из' : 'нет'}: {s.missing.join(', ')}</span>}
+        {action && <span><Hint text={`${action.reason}\n${action.command}`}><Button type="button" size="sm"
+          disabled={sending || busy || !action.available} onClick={() => void run(action)}>
+          {action.label}{!action.available && (action.disabledReason === 'unchanged' ? ' · без изменений' : ' · не установлен')}</Button></Hint></span>}
       </div>
     </li>;
   }
-  const list = <>
-    <ol className="m-0 flex list-none flex-col gap-2 p-0">{required.map((s, i) => stepRow(s, i + 1, next?.id === s.id ? 'default' : null))}</ol>
-    {optional.length > 0 && <Disclosure summary="Дополнительно">
-      <ul className="m-0 flex list-none flex-col gap-2 p-0">{optional.map(s => stepRow(s, null, s.state === 'todo' ? 'outline' : null))}</ul>
-    </Disclosure>}
-  </>;
+  const list = <ol className="m-0 flex list-none flex-col gap-2 p-0">{steps.map((s, i) => stepRow(s, i + 1, next?.id === s.id))}</ol>;
   if (readinessComplete(steps)) return <Disclosure summary="Проект готов к работе через AI Factory">{list}</Disclosure>;
   return <Section label="Подготовка проекта" title="Подготовка проекта">
     <p className="m-0 text-xs text-muted-foreground">Выполните шаги по порядку, чтобы AI Factory работал полностью</p>
