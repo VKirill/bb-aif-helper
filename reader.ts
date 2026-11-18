@@ -367,10 +367,13 @@ export async function collectSnapshot(input: HostInput, signal?: AbortSignal): P
           const report = await read.read(rel);
           const parsed = report ? lastGate(report, gate) : null;
           s.checks.push({ id: gate, label, state: parsed ? parsed.status === 'pass' ? 'reported-pass' : parsed.status as 'warn' | 'fail' : report ? 'unknown' : 'notrun',
-            detail: parsed ? `${parsed.status.toUpperCase()} в отчёте; привязка к текущим inputs не подтверждена` : report ? 'Отчёт есть, валидный gate block не найден' : 'Evidence не найдено; факт запуска неизвестен',
+            detail: parsed ? `${parsed.status.toUpperCase()} в отчёте; привязка к текущим inputs не подтверждена` : report ? 'Отчёт есть, валидный gate block не найден' : 'Отчёт проверки не найден',
             path: report ? rel : null, required: native && (gate === 'verify' || gate === 'rules' && policy.requireRulesPassForDone !== false) });
         }
-        for (const [id, label, filename] of [['qa-plan', 'QA-сценарии', 'test-cases.md'], ['qa', 'Прохождение QA', 'qa-check.md'], ['coverage', 'Spec coverage', 'coverage.json'], ['readiness', 'Done readiness', 'done-readiness.json']]) {
+        // coverage.json and done-readiness.json are written only by the AIFHub extension.
+        const artifacts = [['qa-plan', 'QA-сценарии', 'test-cases.md'], ['qa', 'Прохождение QA', 'qa-check.md'],
+          ...(hub ? [['coverage', 'Spec coverage', 'coverage.json'], ['readiness', 'Done readiness', 'done-readiness.json']] : [])];
+        for (const [id, label, filename] of artifacts) {
           const rel = `${evidenceDir}/${filename}`;
           const report = await read.read(rel);
           s.checks.push({ id, label, state: report ? 'unknown' : 'notrun', detail: report ? 'Артефакт существует; результат и актуальность проверяет владелец' : 'Артефакт не найден', path: report ? rel : null,

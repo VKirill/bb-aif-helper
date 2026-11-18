@@ -257,3 +257,15 @@ test('readiness reflects project files and config.yaml paths; an invalid profile
     assert.deepEqual((await collectSnapshot(input(f.root))).readiness, []);
   } finally { await f.cleanup(); }
 });
+
+test('Spec coverage and Done readiness rows exist only with AIFHub; a missing report reads as not run', async () => {
+  for (const hub of [false, true]) {
+    const f = await fixture(hub);
+    try {
+      await f.write('.ai-factory/plans/demo.md', '# Demo\n## Tasks\n- [ ] 1 Implement');
+      const ids = (await collectSnapshot(input(f.root))).checks.map(c => c.id);
+      assert.equal(ids.includes('coverage'), hub); assert.equal(ids.includes('readiness'), hub);
+      assert.equal((await collectSnapshot(input(f.root))).checks.find(c => c.id === 'verify')?.detail, 'Отчёт проверки не найден');
+    } finally { await f.cleanup(); }
+  }
+});
