@@ -176,3 +176,24 @@ test('research choice lives in a managed block of the global skill-context and l
   await writeDelegation(bare, { mode: 'self' }, 'research');
   assert.ok(!(await exists(join(bare, RESEARCH_PATH))), 'an otherwise empty context file is removed');
 });
+
+test('each of the three research workers keeps its own model; workers 2 and 3 fall back to worker 1', async () => {
+  const root = await project();
+  const one = { mode: 'bb' as const, providerId: 'codex', model: 'gpt-6.2-luna', reasoning: 'medium' };
+  const two = { mode: 'bb' as const, providerId: 'acp-antigravity', model: 'gemini-4-hydrogen', reasoning: 'high' };
+  await writeDelegation(root, two, 'research2');
+  let text = await readFile(join(root, RESEARCH_PATH), 'utf8');
+  assert.match(text, /Research worker 1 [^\n]*: your own native subagent/, 'worker 1 stays native while only worker 2 is set');
+  assert.match(text, /Research worker 2 [^\n]*--provider 'acp-antigravity' --model 'gemini-4-hydrogen'/);
+  assert.match(text, /Research worker 3 [^\n]*: your own native subagent/, 'worker 3 follows worker 1');
+  await writeDelegation(root, one, 'research');
+  const state = await readDelegation(root);
+  assert.deepEqual([state.research, state.research2, state.research3], [one, two, { mode: 'self' }]);
+  text = await readFile(join(root, RESEARCH_PATH), 'utf8');
+  assert.match(text, /Research worker 3 [^\n]*--model 'gpt-6\.2-luna'/, 'worker 3 falls back to worker 1');
+  const back = await writeDelegation(root, { mode: 'self' }, 'research2');
+  assert.deepEqual(back.research, one, 'clearing worker 2 keeps worker 1');
+  assert.doesNotMatch(await readFile(join(root, RESEARCH_PATH), 'utf8'), /gemini-4-hydrogen/);
+  await writeDelegation(root, { mode: 'self' }, 'research');
+  assert.ok(!(await exists(join(root, RESEARCH_PATH))), 'no block once every worker is native');
+});

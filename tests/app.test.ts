@@ -227,7 +227,7 @@ test('workflow panel reads its owning thread and exposes maintenance without a t
 test('panel uses the BB provider/model picker and saves exactly its selection', async () => {
   const tab = app.tabs.find(t => t.id === 'workflow')!;
   const saved: unknown[] = [];
-  const view = (choice: unknown, research: unknown = { mode: 'self' }) => ({ choice, research, configured: true, foreign: null, error: null, providers: [{ id: 'codex', name: 'Codex' }],
+  const view = (choice: unknown, research: unknown = { mode: 'self' }) => ({ choice, research, research2: { mode: 'self' }, research3: { mode: 'self' }, configured: true, foreign: null, error: null, providers: [{ id: 'codex', name: 'Codex' }],
     children: [{ id: 'thr_child', title: 'Задача 1', status: 'active', providerId: 'codex', updatedAt: '2026-11-17T00:00:00Z' }] });
   const slot = renderSlot(tab as any, { threadId: 'thr_panel', environment: { id: 'env_panel' } }, { rpc: {
     status: () => data(),
@@ -238,7 +238,9 @@ test('panel uses the BB provider/model picker and saves exactly its selection', 
     await slot.findByText('Задача 1');
     assert.ok(slot.getByText(/Codex · работает/));
     assert.equal(slot.queryByRole('button', { name: 'Сохранить' }), null);
-    assert.equal(slot.getAllByRole('radiogroup').length, 2, 'code and research each have their own choice');
+    assert.equal(slot.getAllByRole('radiogroup').length, 4, 'code and each of the three research workers have their own choice');
+    assert.ok(slot.getByRole('radiogroup', { name: 'Кто ищет шаблоны' }), 'worker 2 has its own choice');
+    assert.ok(within(slot.getByRole('radiogroup', { name: 'Кто ищет связи' })).getByRole('radio', { name: 'Как разведчик 1' }));
     fireEvent.click(within(slot.getByRole('radiogroup', { name: 'Кто пишет код' })).getByRole('radio', { name: 'Другая модель' }));
     const picker = await slot.findByTestId('bb-provider-model-picker');
     assert.equal(picker.dataset.routingKind, 'environment'); assert.equal(picker.dataset.routingId, 'env_panel');

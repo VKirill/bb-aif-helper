@@ -241,15 +241,21 @@ const roleText = {
     note: 'Хранится в .ai-factory.json → phases.implement. /aif-implement отдаёт каждую задачу дочернему треду на этой модели, затем сам проверяет diff и отмечает задачу в плане.' },
   research: { title: 'Разведка', skills: '/aif-plan, /aif-fix, /aif-qa', group: 'Кто исследует код',
     saved: 'Разведчики AI Factory будут запускаться дочерними тредами на выбранной модели.', self: 'Разведку снова делают встроенные помощники агента.',
-    note: 'Хранится в .ai-factory/skill-context/global-skill-context.md. Когда навык просит разведчиков (Explore), агент запускает их дочерними тредами на этой модели параллельно и собирает их отчёты.' },
-} as const;
+    note: 'Разведчик 1 — архитектура и затронутые модули; если навык просит одного разведчика, это он. Хранится в .ai-factory/skill-context/global-skill-context.md. Разведчики идут дочерними тредами параллельно, агент собирает их отчёты.' },
+  research2: { title: 'Разведчик 2', skills: 'шаблоны и соглашения', group: 'Кто ищет шаблоны',
+    saved: 'Разведчик 2 будет работать на выбранной модели.', self: 'Разведчик 2 снова работает как разведчик 1.',
+    selfLabel: 'Как разведчик 1', selfBadge: 'как разведчик 1', note: '' },
+  research3: { title: 'Разведчик 3', skills: 'зависимости и связи', group: 'Кто ищет связи',
+    saved: 'Разведчик 3 будет работать на выбранной модели.', self: 'Разведчик 3 снова работает как разведчик 1.',
+    selfLabel: 'Как разведчик 1', selfBadge: 'как разведчик 1', note: 'Разведчик 3 берёт и всех следующих, если навык просит больше трёх.' },
+} as const satisfies Record<DelegationRole, { title: string; skills: string; group: string; saved: string; self: string; note: string; selfLabel?: string; selfBadge?: string }>;
 
 /** «Этот агент / Другая модель» for one role; saves through setDelegation. */
 function ModelChoice({ role, saved, providerName, environmentId, busy, locked: lockedOuter, onSave }: {
   role: DelegationRole; saved: DelegationChoice; providerName: (id: string | null) => string | null; environmentId: string | null; busy: boolean; locked: boolean;
   onSave: (choice: DelegationChoice) => Promise<void>;
 }) {
-  const text = roleText[role];
+  const text: { title: string; skills: string; group: string; saved: string; self: string; note: string; selfLabel?: string; selfBadge?: string } = roleText[role];
   const [mode, setMode] = useState<'self' | 'bb'>(saved.mode);
   const [pick, setPick] = useState<PickerValue | null>(saved.mode === 'bb' ? toPicker(saved) : null);
   const [saving, setSaving] = useState(false);
@@ -258,7 +264,7 @@ function ModelChoice({ role, saved, providerName, environmentId, busy, locked: l
   const choice: DelegationChoice | null = mode === 'self' ? { mode: 'self' } : pick?.model ? fromPicker(pick) : null;
   const dirty = !!choice && JSON.stringify(choice) !== savedKey;
   const locked = saving || lockedOuter;
-  const savedLabel = saved.mode === 'bb' ? [providerName(saved.providerId), saved.model, saved.reasoning].filter(Boolean).join(' · ') : 'агент этого чата';
+  const savedLabel = saved.mode === 'bb' ? [providerName(saved.providerId), saved.model, saved.reasoning].filter(Boolean).join(' · ') : text.selfBadge ?? 'агент этого чата';
   async function save() {
     if (!choice) return;
     setSaving(true);
@@ -275,7 +281,7 @@ function ModelChoice({ role, saved, providerName, environmentId, busy, locked: l
       {(['self', 'bb'] as const).map(m => <button key={m} type="button" role="radio" aria-checked={mode === m} disabled={locked}
         onClick={() => { setMode(m); if (m === 'bb' && !pick) setPick(pickerSeed); }}
         className={cn('h-8 cursor-pointer rounded-md px-3 text-sm font-medium transition-colors outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-default disabled:opacity-50',
-          mode === m ? 'bg-background text-foreground shadow-xs' : 'text-muted-foreground hover:text-foreground')}>{m === 'self' ? 'Этот агент' : 'Другая модель'}</button>)}
+          mode === m ? 'bg-background text-foreground shadow-xs' : 'text-muted-foreground hover:text-foreground')}>{m === 'self' ? text.selfLabel ?? 'Этот агент' : 'Другая модель'}</button>)}
     </div>
     {mode === 'bb' && pick && <div className="flex min-w-0 flex-col gap-1">
       <span className="text-xs text-muted-foreground">Провайдер и модель</span>
@@ -286,7 +292,7 @@ function ModelChoice({ role, saved, providerName, environmentId, busy, locked: l
       <Hint text={busy ? 'Дождитесь, пока агент закончит текущую работу' : 'Сохранить выбор в проекте'}><Button type="button" size="sm" disabled={locked || busy} onClick={() => void save()}>{saving ? 'Сохраняю…' : 'Сохранить'}</Button></Hint>
       <Button type="button" size="sm" variant="outline" disabled={saving} onClick={() => { setMode(saved.mode); setPick(saved.mode === 'bb' ? toPicker(saved) : null); }}>Отменить</Button>
     </div>}
-    <p className="m-0 text-xs text-muted-foreground">{text.note}</p>
+    {text.note && <p className="m-0 text-xs text-muted-foreground">{text.note}</p>}
   </div>;
 }
 
@@ -322,6 +328,13 @@ function DelegationSection({ threadId, environmentId, busy }: { threadId: string
     <ModelChoice role="implement" saved={view.choice} providerName={providerName} environmentId={environmentId} busy={busy} locked={!!view.foreign} onSave={save('implement')} />
     <div className="border-t border-border" />
     <ModelChoice role="research" saved={view.research} providerName={providerName} environmentId={environmentId} busy={busy} locked={false} onSave={save('research')} />
+    <details className="group rounded-md border border-border px-3 py-2" open={view.research2.mode === 'bb' || view.research3.mode === 'bb' || undefined}>
+      <summary className="cursor-pointer text-xs font-medium text-muted-foreground">Разведчики 2 и 3 · свои модели</summary>
+      <div className="mt-3 flex flex-col gap-3">
+        <ModelChoice role="research2" saved={view.research2} providerName={providerName} environmentId={environmentId} busy={busy} locked={false} onSave={save('research2')} />
+        <ModelChoice role="research3" saved={view.research3} providerName={providerName} environmentId={environmentId} busy={busy} locked={false} onSave={save('research3')} />
+      </div>
+    </details>
     {error && <Callout tone="error" role="status">{error}</Callout>}
     {view.children.length > 0 && <div className="flex flex-col gap-2">
       <h4 className="m-0 text-xs font-medium text-muted-foreground">Дочерние треды · {view.children.length}</h4>

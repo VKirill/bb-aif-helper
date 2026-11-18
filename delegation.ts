@@ -13,12 +13,15 @@ const START = '<!-- bb-aif-helper:delegation:start -->';
 const END = '<!-- bb-aif-helper:delegation:end -->';
 // Research: every AI Factory skill reads the global skill-context, so Explore-style
 // subagents of /aif-plan, /aif-fix, /aif-qa… run as BB threads on the chosen model.
-// The block itself is the source of truth: its first line records the model spec.
+// The block itself is the source of truth: its first lines record the model spec
+// of each of the three research workers (the /aif-plan Explore agents 1-3).
 export const RESEARCH_PATH = '.ai-factory/skill-context/global-skill-context.md';
 const RESEARCH_START = '<!-- bb-aif-helper:research:start -->';
 const RESEARCH_END = '<!-- bb-aif-helper:research:end -->';
-const RESEARCH_SPEC = /<!-- research-model: (\S{1,400}) -->/;
-export const delegationRoleSchema = z.enum(['implement', 'research']);
+export const RESEARCH_ROLES = ['research', 'research2', 'research3'] as const;
+export type ResearchRole = typeof RESEARCH_ROLES[number];
+const RESEARCH_MARK: Record<ResearchRole, string> = { research: 'research-model', research2: 'research-model-2', research3: 'research-model-3' };
+export const delegationRoleSchema = z.enum(['implement', ...RESEARCH_ROLES]);
 export type DelegationRole = z.infer<typeof delegationRoleSchema>;
 const AGENT = 'bb';
 const TIMEOUT_MS = 4 * 60 * 60 * 1000;
@@ -31,8 +34,11 @@ export const delegationChoiceSchema = z.discriminatedUnion('mode', [
 export type DelegationChoice = z.infer<typeof delegationChoiceSchema>;
 export const delegationStateSchema = z.object({
   choice: delegationChoiceSchema,
-  /** Model for research subagents (Explore) of every AI Factory skill; self = the agent's own subagents. */
+  /** Model for research worker 1 (Explore) of every AI Factory skill; self = the agent's own subagent. */
   research: delegationChoiceSchema,
+  /** Research workers 2 and 3; self = same as worker 1. */
+  research2: delegationChoiceSchema,
+  research3: delegationChoiceSchema,
   configured: z.boolean(),
   // phases.implement points at an agent this plugin does not manage.
   foreign: z.string().nullable(),
@@ -77,21 +83,30 @@ async function readText(path: string): Promise<string> {
   try { return await readFile(path, 'utf8'); } catch (e) { if ((e as NodeJS.ErrnoException).code === 'ENOENT') return ''; throw e; }
 }
 
-/** The research choice recorded in the managed block of the global skill-context; self when absent or malformed. */
-export function parseResearch(text: string): DelegationChoice {
+export type ResearchSlots = Record<ResearchRole, DelegationChoice>;
+const selfSlots = (): ResearchSlots => ({ research: { mode: 'self' }, research2: { mode: 'self' }, research3: { mode: 'self' } });
+
+/** The research choices recorded in the managed block of the global skill-context; self when absent or malformed. */
+export function parseResearch(text: string): ResearchSlots {
+  const slots = selfSlots();
   const start = text.indexOf(RESEARCH_START), end = text.indexOf(RESEARCH_END);
-  if (start < 0 || end < start) return { mode: 'self' };
-  return parseSpec(RESEARCH_SPEC.exec(text.slice(start, end))?.[1]) ?? { mode: 'self' };
+  if (start < 0 || end < start) return slots;
+  const block = text.slice(start, end);
+  for (const role of RESEARCH_ROLES) {
+    const spec = new RegExp(`<!-- ${RESEARCH_MARK[role]}: (\\S{1,400}) -->`).exec(block)?.[1];
+    slots[role] = parseSpec(spec) ?? { mode: 'self' };
+  }
+  return slots;
 }
 
 export async function readDelegation(root: string): Promise<DelegationState> {
-  let research: DelegationChoice = { mode: 'self' };
+  let research = selfSlots();
   try { research = parseResearch(await readText(join(root, RESEARCH_PATH))); } catch { /* unreadable context: research stays self */ }
   const base = await readImplement(root);
-  return { ...base, research };
+  return { ...base, ...research };
 }
 
-async function readImplement(root: string): Promise<Omit<DelegationState, 'research'>> {
+async function readImplement(root: string): Promise<Omit<DelegationState, ResearchRole>> {
   let config: Json | null;
   try { config = await readConfig(root); } catch (e) {
     return { choice: { mode: 'self' }, configured: false, foreign: null, error: `Не читается .ai-factory.json: ${(e as Error).message.slice(0, 200)}` };
@@ -134,13 +149,30 @@ const spawnFlags = (c: Extract<DelegationChoice, { mode: 'bb' }>) => [
   ...(c.tier && c.tier !== 'default' ? [`--service-tier ${shellQuote(c.tier)}`] : []),
 ].join(' ');
 
-export function researchBlock(c: Extract<DelegationChoice, { mode: 'bb' }>) {
-  return `<!-- research-model: ${modelSpec(c)} -->
+type BbChoice = Extract<DelegationChoice, { mode: 'bb' }>;
+const workerText: Record<ResearchRole, string> = {
+  research: 'Research worker 1 — the first or only research subagent (in /aif-plan: architecture & affected modules)',
+  research2: 'Research worker 2 — the second subagent (in /aif-plan: existing patterns & conventions)',
+  research3: 'Research worker 3 — the third and any further subagents (in /aif-plan: dependencies & integration points)',
+};
+
+/** Managed block for the three research workers; null when every worker stays the agent's own subagent. Workers 2 and 3 fall back to worker 1. */
+export function researchBlock(slots: ResearchSlots): string | null {
+  const effective = (role: ResearchRole): DelegationChoice => slots[role].mode === 'bb' ? slots[role] : slots.research;
+  if (!RESEARCH_ROLES.some(r => effective(r).mode === 'bb')) return null;
+  const marks = RESEARCH_ROLES.flatMap(r => { const c = slots[r]; return c.mode === 'bb' ? [`<!-- ${RESEARCH_MARK[r]}: ${modelSpec(c)} -->`] : []; });
+  const lines = RESEARCH_ROLES.map(r => { const c = effective(r);
+    return `- ${workerText[r]}: ${c.mode === 'bb' ? `\`${modelSpec(c)}\` → spawn flags \`${spawnFlags(c as BbChoice)}\`` : 'your own native subagent, exactly as the skill says'}`; });
+  return `${marks.join('\n')}
 ## Research delegation (managed by BB AIF Helper)
 
-The project owner chose \`${modelSpec(c)}\` (BB provider/model?reasoning&tier) for research subagents. Whenever an AI Factory skill tells you to launch exploration or research subagents — for example \`Task(subagent_type: Explore, …)\` in /aif-plan, /aif-fix or /aif-qa — or you would use your own native subagents for read-only codebase research, start them as BB threads on that model instead. Ignore any model the skill names for those subagents.
+The project owner chose models (BB provider/model?reasoning&tier) for research subagents. Whenever an AI Factory skill tells you to launch exploration or research subagents — for example \`Task(subagent_type: Explore, …)\` in /aif-plan, /aif-fix or /aif-qa — or you would use your own native subagents for read-only codebase research, number them in the order the skill lists them and run each one as assigned below. Ignore any model the skill names for those subagents.
 
-1. Write each research prompt to its own temporary file. It starts with these rules (replace \`<thread-id>\` with your own \`BB_THREAD_ID\`), then gives the exact question, the paths to look at and the thoroughness the skill asked for:
+${lines.join('\n')}
+
+For each worker on a BB model:
+
+1. Write its research prompt to its own temporary file. It starts with these rules (replace \`<thread-id>\` with your own \`BB_THREAD_ID\`), then gives the exact question, the paths to look at and the thoroughness the skill asked for:
 
 \`\`\`
 You are a read-only research worker for an AI Factory skill run by BB thread <thread-id>.
@@ -148,10 +180,10 @@ Investigate the current workspace and answer the question below. Do not create, 
 Finish with a concise structured report: the relevant files and symbols with paths, the patterns and integration points you found, and open questions. No full file contents.
 \`\`\`
 
-2. Spawn all research workers at once — they only read, so they may run in parallel — and take each thread id from the JSON answer:
+2. Spawn all research workers at once — they only read, so they may run in parallel — with that worker's spawn flags, and take each thread id from the JSON answer:
 
 \`\`\`bash
-bb thread spawn --project "$BB_PROJECT_ID" --environment "$BB_ENVIRONMENT_ID" --parent-self --lifecycle-owner-thread "$BB_THREAD_ID" --parent-notifications off ${spawnFlags(c)} --title 'AIF research · <skill> · <topic>' --prompt-file <prompt> --json
+bb thread spawn --project "$BB_PROJECT_ID" --environment "$BB_ENVIRONMENT_ID" --parent-self --lifecycle-owner-thread "$BB_THREAD_ID" --parent-notifications off <spawn flags> --title 'AIF research · <skill> · <topic>' --prompt-file <prompt> --json
 \`\`\`
 
 3. Wait for each: \`bb thread wait <id> --status idle --timeout 8m\`, repeating while it still works. The report is \`bb thread output <id>\`.
@@ -195,9 +227,10 @@ If \`bb thread spawn\` returns an error, report it and implement that task yours
 export async function writeDelegation(root: string, choice: DelegationChoice, role: DelegationRole = 'implement'): Promise<DelegationState> {
   const config = await readConfig(root);
   if (!config) throw new Error('В проекте нет .ai-factory.json: сначала установите AI Factory.');
-  if (role === 'research') {
+  if (role !== 'implement') {
     const file = join(root, RESEARCH_PATH);
-    const next = mergeContextBlock(await readText(file), choice.mode === 'bb' ? researchBlock(choice) : null, RESEARCH_START, RESEARCH_END);
+    const text = await readText(file);
+    const next = mergeContextBlock(text, researchBlock({ ...parseResearch(text), [role]: choice }), RESEARCH_START, RESEARCH_END);
     if (next) await writeAtomic(file, next); else await rm(file, { force: true });
     return readDelegation(root);
   }
