@@ -195,16 +195,28 @@ test('configuration errors do not hide the installation update button', async ()
   } finally { slot.lifecycle.unmount(); }
 });
 
-test('without AI Factory the card shows a separate installer and usable bundled flow without automatic dispatch', async () => {
+test('without AI Factory the installer appears only in preparation and the bundled flow remains available', async () => {
   const s = snapshot({ configured: false, profile: 'none', target: null, candidates: [], skills: [], phase: 'unknown' });
   s.preparation = [{ id: 'install', label: 'Установить AI Factory', optional: false, state: 'missing', paths: ['.ai-factory.json'] }];
   s.actions = workflowActions(s); let runs = 0;
-  const slot = renderSlot(app.messageDirectives[0], props, { rpc: { status: () => s, run: (input: any) => {
-    assert.equal(input.actionId, 'basic-explore'); assert.equal(input.researchTask, 'Почему форма не принимает завтрашнюю дату?'); runs++; return { sent: true, message: 'Отправлено' };
-  } } });
+  const slot = renderSlot(app.messageDirectives[0], props, { rpc: {
+    status: () => s,
+    setPreparationVisibility: (input: any) => {
+      s.preparationVisible = input.visible;
+      return { visible: input.visible };
+    },
+    run: (input: any) => {
+      assert.equal(input.actionId, 'basic-explore'); assert.equal(input.researchTask, 'Почему форма не принимает завтрашнюю дату?'); runs++; return { sent: true, message: 'Отправлено' };
+    },
+  } });
   try {
-    const install = await slot.findByRole('button', { name: 'Установить AI Factory' }) as HTMLButtonElement;
-    assert.equal(install.disabled, false); assert(install.closest('.aif-maintenance'));
+    const showPreparation = await slot.findByRole('button', { name: 'Показать подготовку проекта' });
+    assert.equal(Boolean(slot.queryByRole('button', { name: 'Установить AI Factory' })), false);
+    fireEvent.click(showPreparation);
+    const preparation = await slot.findByRole('region', { name: 'Подготовка проекта' });
+    const install = within(preparation).getByRole('button', { name: 'Установить AI Factory' }) as HTMLButtonElement;
+    assert.equal(install.disabled, false);
+    assert.equal(slot.getAllByRole('button', { name: 'Установить AI Factory' }).length, 1);
     assert.match(slot.getByLabelText('Базовый workflow').textContent!, /исследование → Plan BB → выполнение → проверка → коммит/);
     const explore = slot.getByRole('button', { name: 'Исследовать задачу' }) as HTMLButtonElement;
     assert.equal(explore.disabled, false); assert.equal(runs, 0);
@@ -448,7 +460,9 @@ test('saved-data state is visible and the refresh button explicitly bypasses the
   const requests: any[] = [];
   const slot = renderSlot(app.messageDirectives[0], props, { rpc: { status: (input: any) => { requests.push(input); return s; } } });
   try {
-    await slot.findByText(/Сохранённые данные.*обновляются в фоне/);
+    const footer = (await slot.findByText('Сохранённые данные')).closest('footer')!;
+    assert.equal(footer.querySelector('time')?.dateTime, s.collectedAt);
+    assert(within(footer).getByText('Обновляются в фоне…'));
     fireEvent.click(slot.getByRole('button', { name: 'Обновить статус AI Factory' }));
     await waitFor(() => assert(requests.some(input => input.force === true)));
     assert.equal(requests[0].force, false);
@@ -626,7 +640,7 @@ test('persistent panel names a prose confirmation and prevents navigation withou
     await slot.findByText(/ожидается подтверждение пользователя/);
     await slot.findByText('0/1 задач');
     assert.equal((slot.getByRole('button', { name: 'Улучшить план' }) as HTMLButtonElement).disabled, true);
-    assert(slot.getByText(/действия доступны после ответа пользователя/));
+    assert(slot.getByText('Действия доступны после ответа пользователя'));
   } finally { slot.lifecycle.unmount(); }
 });
 test('metadata failure removes stale actions instead of keeping executable old snapshot', async () => {

@@ -190,8 +190,11 @@ function WorkflowCard({ threadId, initialTarget = '', phase = 'unknown', openFil
     }}><ActionIcon id={a.id} command={a.command} /><span>{a.label}{!a.available && (a.disabledReason === 'unchanged' ? ' · без изменений' : a.disabledReason === 'requires-cli222' ? ' · нужен CLI 2.22+' : a.disabledReason === 'context-blocked' ? ' · контекст неактуален' : ' · не установлен')}</span></button>;
   const renderActions = (actions: Action[]) => <div className="aif-actions">{actions.map(renderAction)}</div>;
   const preparation = snapshot?.preparation;
+  const hasPreparation = !!preparation?.length;
   const preparationVisible = snapshot?.preparationVisible === true;
   const updates = snapshot?.actions.filter(a => a.id === 'update-factory' || a.id === 'update-extensions') ?? [];
+  const maintenance = snapshot?.actions.filter(a => a.group === 'maintenance' && !updates.includes(a) &&
+    !contextSetupInDetails(snapshot, a.id) && (!hasPreparation || a.id !== 'setup-context' && a.id !== 'basic-install')) ?? [];
   const showUpdateIndicator = snapshot && updates.some(a => a.available && !updateInVersionDetails(snapshot, a.id));
   const required = preparation?.filter(step => !step.optional) ?? [];
   const optional = preparation?.filter(step => step.optional) ?? [];
@@ -224,7 +227,7 @@ function WorkflowCard({ threadId, initialTarget = '', phase = 'unknown', openFil
     <header className="aif-heading"><span className="aif-brand-icon"><Icon name="Workflow" aria-hidden="true" /></span><strong>AI Factory</strong>
       {snapshot && snapshot.profile !== 'upstream' && <span className="aif-profile">{profileNames[snapshot.profile]}</span>}
       <div className="aif-header-actions">
-        {!!preparation?.length && <button className="aif-header-button" type="button" disabled={savingPreparation}
+        {hasPreparation && <button className="aif-header-button" type="button" disabled={savingPreparation}
           aria-label={preparationVisible ? 'Скрыть подготовку проекта' : 'Показать подготовку проекта'} aria-expanded={preparationVisible}
           aria-controls={preparationId} title={preparationVisible ? 'Скрыть подготовку проекта' : 'Показать подготовку проекта'}
           onClick={() => void togglePreparation(!preparationVisible)}><Icon name="ListTodo" className="aif-button-icon" aria-hidden="true" /></button>}
@@ -243,10 +246,17 @@ function WorkflowCard({ threadId, initialTarget = '', phase = 'unknown', openFil
     {error && <p role="alert" className="aif-error">{error}</p>}
     {notice && <p role="status" className="aif-notice">{notice}</p>}
     {snapshot && <>
-      <div className="aif-versions"><span>CLI <b>{snapshot.versions.globalCli ?? 'не найден'}</b></span><span>Проект <b>{snapshot.versions.installed ?? 'не указан'}</b></span>
-        {snapshot.versions.sourceVersion && <span>Git <b>{snapshot.versions.sourceVersion}</b><small> @{snapshot.versions.sourceSha?.slice(0, 7)}{snapshot.versions.sourceDirty ? ' · изменён' : ''}</small></span>}
-        {snapshot.extensions.map(e => <span key={e.name} title={e.installedVersion ? 'Установленная версия расширения' : 'Записанная версия; установленные файлы не подтверждены'}>{e.name} <b>{e.installedVersion ?? e.recordedVersion ?? 'неизвестна'}</b>{!e.installedVersion && <small> · не подтверждена</small>}</span>)}</div>
-      {!!preparation?.length && <section id={preparationId} className="aif-preparation" aria-label="Подготовка проекта" hidden={!preparationVisible}>
+      <dl className="aif-versions" aria-label="Версии AI Factory">
+        <div><dt>CLI</dt><dd>{snapshot.versions.globalCli ?? 'не найден'}</dd></div>
+        <div><dt>Проект</dt><dd>{snapshot.versions.installed ?? 'не указан'}</dd></div>
+        {snapshot.versions.sourceVersion && <div><dt>Git</dt><dd>{snapshot.versions.sourceVersion}
+          {snapshot.versions.sourceSha && <small>@{snapshot.versions.sourceSha.slice(0, 7)}</small>}
+          {snapshot.versions.sourceDirty && <small>изменён</small>}</dd></div>}
+        {snapshot.extensions.map(e => <div key={e.name} title={e.installedVersion ? 'Установленная версия расширения' : 'Записанная версия; установленные файлы не подтверждены'}>
+          <dt>{e.name}</dt><dd>{e.installedVersion ?? e.recordedVersion ?? 'неизвестна'}{!e.installedVersion && <small>не подтверждена</small>}</dd>
+        </div>)}
+      </dl>
+      {hasPreparation && <section id={preparationId} className="aif-preparation" aria-label="Подготовка проекта" hidden={!preparationVisible}>
         {preparationVisible && <><h3>Подготовка проекта</h3>{setupContent}</>}
       </section>}
       <section className="aif-current" aria-label="Текущий этап">
@@ -258,7 +268,7 @@ function WorkflowCard({ threadId, initialTarget = '', phase = 'unknown', openFil
             {snapshot.pendingQuestions ? `ожидаю ответы: ${snapshot.pendingQuestions}` : snapshot.pendingConfirmation ? 'ожидается подтверждение пользователя' : snapshot.pendingConfirmation === null ? 'ожидание подтверждения не проверено' : busy ? 'агент занят' : snapshot.threadState === 'error' ? 'ошибка выполнения BB' : 'агент свободен'}
           </span>
         </div>
-        {usesBasicWorkflow(snapshot) && <p className="aif-muted" aria-label="Базовый workflow">Без AI Factory доступен встроенный flow: исследование → Plan BB → выполнение → проверка → коммит. «Составить план» включает штатный режим Plan. Установка — отдельная кнопка.</p>}
+        {usesBasicWorkflow(snapshot) && <p className="aif-muted" aria-label="Базовый workflow">Без AI Factory доступен встроенный flow: исследование → Plan BB → выполнение → проверка → коммит. «Составить план» включает штатный режим Plan.{hasPreparation && ' Установка доступна в «Подготовке проекта».'}</p>}
         {sessionBriefBlocked(snapshot) && <p className="aif-error" role="status" aria-label="Блокировка SessionBrief">SessionBrief: {snapshot.sessionBrief!.status.toUpperCase()} · из чата. Выполнение остановлено. Синхронизируйте выбранный change, затем пересоберите SessionBrief. Актуальность контекста проверяет владелец workflow.</p>}
         {snapshot.fixDefaults && <p className="aif-muted aif-small">Fix: <code>{snapshot.fixDefaults.mode}</code> · learning patch: {snapshot.fixDefaults.patch ? 'включён' : 'выключен'} · настройки применяет aif-fix</p>}
         {snapshot.candidates.length > 0 && <label className="aif-target">План
@@ -298,10 +308,8 @@ function WorkflowCard({ threadId, initialTarget = '', phase = 'unknown', openFil
           </div>
         </form>}
       </section>
-      <div className="aif-maintenance" role="group" aria-label="Установка и настройка AI Factory">{renderActions(snapshot.actions.filter(a =>
-        a.group === 'maintenance' && !updates.includes(a) && !contextSetupInDetails(snapshot, a.id) &&
-        (!preparation?.length || a.id !== 'setup-context') && (!preparationVisible || a.id !== 'basic-install')))}</div>
-      {!preparation && snapshot.actions.some(a => contextSetupInDetails(snapshot, a.id)) && <details className="aif-context-setup"><summary>Настройка контекста проекта</summary>
+      {maintenance.length > 0 && <div className="aif-maintenance" role="group" aria-label="Установка и настройка AI Factory">{renderActions(maintenance)}</div>}
+      {!hasPreparation && snapshot.actions.some(a => contextSetupInDetails(snapshot, a.id)) && <details className="aif-context-setup"><summary>Настройка контекста проекта</summary>
         <p className="aif-muted aif-small">Выполнение плана уже начато. Настройка контекста запускается отдельно и не продолжает выбранный план.</p>
         {renderActions(snapshot.actions.filter(a => contextSetupInDetails(snapshot, a.id)))}
       </details>}
@@ -323,23 +331,37 @@ function WorkflowCard({ threadId, initialTarget = '', phase = 'unknown', openFil
           <small className="aif-check-detail">{c.chat ? `Файловый отчёт: ${c.path ? checkLabels[c.state] + '. ' + c.detail : 'не найден.'}` : c.detail}</small></li>)}</ul>
         <details className="aif-setup"><summary>Настройка инструментов</summary>{renderActions(snapshot.actions.filter(a => a.group === 'setup' && !a.id.startsWith('prep-')))}</details>
       </details>}
-      <details id={updatesId} ref={updatesDetails} className="aif-details" onToggle={event => setUpdatesOpen(event.currentTarget.open)}><summary>Версии и расширения{snapshot.extensions.length ? ` · ${snapshot.extensions.length}` : ''}</summary>
-        {renderActions(updates)}
-        {snapshot.versionsCheckedAt && <p className="aif-muted aif-small">Версии CLI/Git: снимок от {new Date(snapshot.versionsCheckedAt).toLocaleString('ru')}. Плановая проверка — раз в сутки.</p>}
-        <dl><dt>Глобальный CLI</dt><dd>{snapshot.versions.globalCli ?? 'Не найден'}{snapshot.versions.globalSource && <small>{snapshot.versions.globalSource}</small>}</dd>
-          <dt>Установка проекта</dt><dd>{snapshot.versions.installed ?? 'Не указана'} · {snapshot.runtime}</dd>
-          <dt>Исходники Git</dt><dd>{snapshot.versions.sourceVersion ?? 'Checkout не задан'}{snapshot.versions.sourceSha && <small>{snapshot.versions.sourceSha}</small>}
-            {snapshot.versions.sourceWorktreeVersion && snapshot.versions.sourceWorktreeVersion !== snapshot.versions.sourceVersion && <small>Рабочее дерево: {snapshot.versions.sourceWorktreeVersion}</small>}</dd>
-          <dt>Git upstream</dt><dd>{snapshot.upstream.version ?? 'Не проверен'}{snapshot.upstream.ref && ` · ${snapshot.upstream.ref} @${snapshot.upstream.sha?.slice(0, 7)}`}
-            {snapshot.upstream.checkedAt && <small>Проверено {new Date(snapshot.upstream.checkedAt).toLocaleString()}</small>}{snapshot.upstream.error && <small>{snapshot.upstream.error}</small>}</dd></dl>
-        <button type="button" className="aif-action aif-secondary" disabled={network || nextVersionCheck > Date.now()} title={nextVersionCheck > Date.now() ? `Следующая проверка доступна ${new Date(nextVersionCheck).toLocaleString('ru')}` : 'Проверить upstream; результат сохраняется на сутки'} onClick={async () => { setNetwork(true); try { await refresh(true); } finally { if (mounted.current) setNetwork(false); } }}><Icon name="Github" className="aif-button-icon" aria-hidden="true" />{network ? 'Проверяю GitHub…' : 'Проверить версию в GitHub'}</button>
-        {nextVersionCheck > Date.now() && <p className="aif-muted aif-small">Следующая проверка GitHub — {new Date(nextVersionCheck).toLocaleString('ru')}.</p>}
-        {snapshot.extensions.length ? <ul className="aif-extensions">{snapshot.extensions.map(e => <li key={e.name}><strong>{e.name}</strong> {e.installedVersion ?? 'файлы отсутствуют'} <span className="aif-muted">· {e.state}</span>
-          <small>Записано: {e.recordedVersion ?? 'не указано'} · {e.source}</small>{e.contributions.length > 0 && <small>Настроенные injections: {e.contributions.join(', ')}. Это не подтверждение загрузки в текущую сессию.</small>}</li>)}</ul> : <p className="aif-muted">Расширения не зарегистрированы в этом проекте.</p>}
+      <details id={updatesId} ref={updatesDetails} className="aif-details aif-disclosure" onToggle={event => setUpdatesOpen(event.currentTarget.open)}>
+        <summary>Версии и расширения{snapshot.extensions.length ? ` · ${snapshot.extensions.length}` : ''}</summary>
+        <div className="aif-disclosure-body">
+          {updates.length > 0 && renderActions(updates)}
+          {snapshot.versionsCheckedAt && <p className="aif-muted aif-small">Версии CLI/Git: снимок от {new Date(snapshot.versionsCheckedAt).toLocaleString('ru')}. Плановая проверка — раз в сутки.</p>}
+          <dl><dt>Глобальный CLI</dt><dd>{snapshot.versions.globalCli ?? 'Не найден'}{snapshot.versions.globalSource && <small>{snapshot.versions.globalSource}</small>}</dd>
+            <dt>Установка проекта</dt><dd>{snapshot.versions.installed ?? 'Не указана'} · {snapshot.runtime}</dd>
+            <dt>Исходники Git</dt><dd>{snapshot.versions.sourceVersion ?? 'Checkout не задан'}{snapshot.versions.sourceSha && <small>{snapshot.versions.sourceSha}</small>}
+              {snapshot.versions.sourceWorktreeVersion && snapshot.versions.sourceWorktreeVersion !== snapshot.versions.sourceVersion && <small>Рабочее дерево: {snapshot.versions.sourceWorktreeVersion}</small>}</dd>
+            <dt>Git upstream</dt><dd>{snapshot.upstream.version ?? 'Не проверен'}{snapshot.upstream.ref && ` · ${snapshot.upstream.ref} @${snapshot.upstream.sha?.slice(0, 7)}`}
+              {snapshot.upstream.checkedAt && <small>Проверено {new Date(snapshot.upstream.checkedAt).toLocaleString()}</small>}{snapshot.upstream.error && <small>{snapshot.upstream.error}</small>}</dd></dl>
+          <button type="button" className="aif-action aif-secondary" disabled={network || nextVersionCheck > Date.now()} title={nextVersionCheck > Date.now() ? `Следующая проверка доступна ${new Date(nextVersionCheck).toLocaleString('ru')}` : 'Проверить upstream; результат сохраняется на сутки'} onClick={async () => { setNetwork(true); try { await refresh(true); } finally { if (mounted.current) setNetwork(false); } }}><Icon name="Github" className="aif-button-icon" aria-hidden="true" />{network ? 'Проверяю GitHub…' : 'Проверить версию в GitHub'}</button>
+          {nextVersionCheck > Date.now() && <p className="aif-muted aif-small">Следующая проверка GitHub — {new Date(nextVersionCheck).toLocaleString('ru')}.</p>}
+          {snapshot.extensions.length ? <ul className="aif-extensions">{snapshot.extensions.map(e => <li key={e.name}><strong>{e.name}</strong> {e.installedVersion ?? 'файлы отсутствуют'} <span className="aif-muted">· {e.state}</span>
+            <small>Записано: {e.recordedVersion ?? 'не указано'} · {e.source}</small>{e.contributions.length > 0 && <small>Настроенные injections: {e.contributions.join(', ')}. Это не подтверждение загрузки в текущую сессию.</small>}</li>)}</ul> : <p className="aif-muted">Расширения не зарегистрированы в этом проекте.</p>}
+        </div>
       </details>
-      {snapshot.diagnostics.length > 0 && <details className="aif-diagnostics"><summary>Примечания · {snapshot.diagnostics.length}</summary><ul>{snapshot.diagnostics.map((d, i) => <li key={i}>{d}</li>)}</ul></details>}
-      <footer className="aif-muted aif-small">{snapshot.cache?.source === 'saved' ? 'Сохранённые данные' : snapshot.cache?.source === 'memory' ? 'Данные из кэша' : 'Локальный статус'} · {new Date(snapshot.collectedAt).toLocaleTimeString()}
-        {snapshot.cache?.refreshing && ' · обновляются в фоне…'}{snapshot.cache?.refreshError && ' · обновление не удалось; нажмите ↻ для повторного чтения'} · {snapshot.pendingConfirmation || snapshot.pendingQuestions ? 'действия доступны после ответа пользователя' : busy ? 'действия доступны после завершения работы' : 'кнопки отправляют выбранную команду в этот чат'}</footer>
+      {snapshot.diagnostics.length > 0 && <details className="aif-diagnostics aif-disclosure">
+        <summary>Примечания · {snapshot.diagnostics.length}</summary>
+        <div className="aif-disclosure-body"><ul>{snapshot.diagnostics.map((d, i) => <li key={i}>{d}</li>)}</ul></div>
+      </details>}
+      <footer className="aif-footer">
+        <span className="aif-footer-source">
+          <Icon name="Clock" className="aif-button-icon" aria-hidden="true" />
+          <span>{snapshot.cache?.source === 'saved' ? 'Сохранённые данные' : snapshot.cache?.source === 'memory' ? 'Данные из кэша' : 'Локальный статус'}</span>
+          <time dateTime={snapshot.collectedAt}>{new Date(snapshot.collectedAt).toLocaleTimeString()}</time>
+        </span>
+        {snapshot.cache?.refreshing && <span>Обновляются в фоне…</span>}
+        {snapshot.cache?.refreshError && <span>Обновление не удалось. Нажмите ↻ для повторного чтения.</span>}
+        {busy && <span>{snapshot.pendingConfirmation || snapshot.pendingQuestions ? 'Действия доступны после ответа пользователя' : 'Действия доступны после завершения работы'}</span>}
+      </footer>
     </>}
   </section>;
 }
