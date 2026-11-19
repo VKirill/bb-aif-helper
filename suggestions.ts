@@ -1,37 +1,87 @@
-// Suggest installed skill names with either runtime prefix. A one-line inline
-// code span keeps the full command with its arguments (up to 300 chars); prose
-// keeps only the fixed "aif-mode sync" subcommand — other arguments are dropped.
+// These are literal agent messages, never shell commands. Markdown delimiters
+// and subsequent commands/shell statements do not belong to the invocation.
 import { parseReplyGate } from './gate.ts';
+import { briefCommands } from './session-brief.ts';
+import { gateEvidenceCommands } from './gate-evidence-command.ts';
 import type { Action, Suggestions } from './model.ts';
 
-const SPAN_COMMAND = /^[/\$](aif(?:-[a-z0-9]+)*)(\s+\S.*)?$/;
-const CONTROL_CHARS = /[\u0000-\u001f\u007f]/;
-const SPAN = /(?<!`)`([^`\n]+)`(?!`)/g;
-const INVOCATION = /(?<![\w$\\/.-])[/$](aif(?:-[a-z0-9]+)*)(?![\w/-])/g;
+function argumentsAfter(tail: string, code: boolean): string | null {
+  const tokens: string[] = [];
+  let offset = 0;
+  while (/^[ \t]/.test(tail.slice(offset, offset + 1))) {
+    while (/[ \t]/.test(tail[offset] ?? '') && offset < tail.length) offset++;
+    const start = offset;
+    if (!tail[offset] || /[\r\n`;,|&<>\x00-\x1f]/.test(tail[offset]) || /^[/$]aif\b/.test(tail.slice(offset))) break;
+    let quote = '';
+    while (offset < tail.length) {
+      const char = tail[offset];
+      if (/[\r\n]/.test(char)) { if (quote) return null; break; }
+      if (/[\x00-\x08\x0b-\x1f]/.test(char) || offset > 4000) return null;
+      if (quote) {
+        if (char === '\\' && tail[offset + 1] === quote) { offset += 2; continue; }
+        if (char === quote) quote = '';
+      } else {
+        if (char === '"' || char === "'") quote = char;
+        else if (/[ \t`;,|&<>]/.test(char) || (char === '$' && tail[offset + 1] === '(')) break;
+      }
+      offset++;
+    }
+    if (quote) return null; // Never silently drop an incomplete scoped argument.
+    const raw = tail.slice(start, offset);
+    const token = code ? raw : raw.replace(/[.,:!?\)\]\}]+$/, '');
+    if (!token || !code && /^(?:затем|потом|далее|then|and|или|и)$/i.test(token)) break;
+    tokens.push(token);
+    if (offset === start || tail.slice(start, offset) !== token) break;
+  }
+  return tokens.length ? ' ' + tokens.join(' ') : '';
+}
+
+// Prefix-free skill names are invocations only at the start of complete code
+// spans or code lines. Ordinary prose, paths and partial fences are not commands.
+function bareCodeInvocations(text: string) {
+  const result: { name: string; tail: string; index: number; code: boolean }[] = [];
+  const add = (body: string, index: number, into = result) => {
+    const match = body.match(/^[ \t]*(aif(?:-[a-z0-9]+)*)(?=$|[ \t])/);
+    if (match) into.push({ name: match[1], tail: body.slice(match[0].length), index, code: true });
+  };
+  let fence: { char: string; size: number; items: typeof result } | null = null;
+  let offset = 0;
+  for (const line of text.split(/(?<=\n)/)) {
+    const value = line.replace(/\r?\n$/, '');
+    const delimiter = value.match(/^ {0,3}(`{3,}|~{3,})([^\r\n]*)$/);
+    if (fence) {
+      if (delimiter && delimiter[1][0] === fence.char && delimiter[1].length >= fence.size && !delimiter[2].trim()) {
+        for (const item of fence.items) result.push(item);
+        fence = null;
+      } else add(value, offset, fence.items);
+    } else if (delimiter) {
+      fence = { char: delimiter[1][0], size: delimiter[1].length, items: [] };
+    } else {
+      for (const match of value.matchAll(/(?<!`)(`+)(?!`)([^\r\n]+?)\1(?!`)/g)) {
+        add(match[2], offset + match.index!);
+      }
+    }
+    offset += line.length;
+  }
+  return result;
+}
 
 export function extractAifInvocations(text: string): { id: string; command: string }[] {
+  const result: { id: string; command: string }[] = [];
   const bounded = text.slice(0, 1024 * 1024);
-  const found = new Map<string, { id: string; command: string; pos: number; rank: number }>();
-  const offer = (id: string, command: string, pos: number, rank: number) => {
-    if (id.length > 100) return;
-    const ex = found.get(id);
-    const first = ex ? Math.min(ex.pos, pos) : pos;
-    if (!ex || rank > ex.rank || (rank === ex.rank && pos < ex.pos)) found.set(id, { id, command, pos: first, rank });
-    else ex.pos = first;
-  };
-  for (const match of bounded.matchAll(INVOCATION)) {
-    const name = match[1];
-    const tail = bounded.slice(match.index! + match[0].length);
-    const command = name === 'aif-mode' && /^[ \t]+sync(?=$|[\s`.,;:!?)])/u.test(tail) ? 'aif-mode sync' : name;
-    offer(name, command, match.index!, command === 'aif-mode sync' ? 1 : 0);
+  const matches = [...bounded.matchAll(/(?<![\w$\\/.-])[/$](aif(?:-[a-z0-9]+)*)(?![\w/-])/g)].map(match => ({
+    name: match[1], tail: bounded.slice(match.index! + match[0].length), index: match.index!, code: bounded[match.index! - 1] === '`',
+  }));
+  for (const { name, tail, code } of matches.concat(bareCodeInvocations(bounded)).sort((a, b) => a.index - b.index)) {
+    const args = argumentsAfter(tail, code);
+    if (args === null) continue;
+    const command = name + args;
+    const existing = result.find(item => item.id === name);
+    if (existing && existing.command === name && args) existing.command = command;
+    else if (name.length <= 100 && !existing) result.push({ id: name, command });
+    if (result.length === 12) break;
   }
-  for (const match of bounded.matchAll(SPAN)) {
-    const span = match[1].trim();
-    if (span.length > 300 || CONTROL_CHARS.test(span)) continue;
-    const parsed = SPAN_COMMAND.exec(span);
-    if (parsed) offer(parsed[1], span.slice(1).replace(/\s+/g, ' '), match.index!, parsed[2] === undefined ? 0 : 2);
-  }
-  return [...found.values()].sort((a, b) => a.pos - b.pos).slice(0, 12).map(({ id, command }) => ({ id, command }));
+  return result;
 }
 export function extractAifCommands(text: string): string[] {
   return extractAifInvocations(text).map(item => item.id);
@@ -39,11 +89,13 @@ export function extractAifCommands(text: string): string[] {
 export function analyzeReply(text: string) {
   const parsed = parseReplyGate(text);
   const next = !parsed.error ? parsed.gate?.suggested_next?.command?.slice(1) : null;
-  const invocations = extractAifInvocations(parsed.prose);
+  const evidenceCommands = gateEvidenceCommands(parsed.prose);
+  const invocations = [...evidenceCommands, ...extractAifInvocations(parsed.prose), ...briefCommands(parsed.prose)];
   const commands = new Map(invocations.map(item => [item.id, item.command]));
+  for (const item of evidenceCommands) commands.set(item.id, item.command);
   if (next) commands.set(next, next); // Gate's allowlist remains authoritative.
   const ids = [...new Set([...(next ? [next] : []), ...invocations.map(item => item.id)])].slice(0, 12);
-  return { ...parsed, ids, next, commands };
+  return { ...parsed, ids, next, commands, evidenceCommands };
 }
 
 // Chips write into the composer draft: bare commands that need the user's

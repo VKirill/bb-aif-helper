@@ -6,15 +6,15 @@ const allowed: Record<GateResult['gate'], readonly string[]> = {
   security: ['/aif-fix', '/aif-security-checklist'],
   rules: ['/aif-rules', '/aif-fix', '/aif-rules-check', '/aif-mode'],
 };
-export const blockedByGate = (id: string, gate: GateResult | null) => !!gate?.blocking
+export const blockedByGate = (id: string, gate: GateResult | null, warning?: string | null) => !!(gate?.blocking || warning)
   && ['aif-commit', 'aif-done', 'aif-archive', 'aif-implement'].includes(id);
 
 /** Parse the last real, terminal gate fence. Quoted/nested examples are not results. */
-export function parseReplyGate(text: string): { gate: GateResult | null; error: string | null; prose: string } {
+export function parseReplyGate(text: string): { gate: GateResult | null; error: string | null; warning: string | null; prose: string } {
   const lines = text.slice(0, 1024 * 1024).split(/\r?\n/);
   const prose: string[] = [];
   let fence: { char: string; size: number; gate: boolean } | null = null;
-  let last: { body: string[]; end: number; closed: boolean } | null = null;
+  let last: { body: string[]; end: number; closed: boolean; proseEnd: number } | null = null;
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
     if (fence) {
@@ -31,21 +31,30 @@ export function parseReplyGate(text: string): { gate: GateResult | null; error: 
     if (open) {
       const isGate = open[1] === '```' && open[2].trim() === 'aif-gate-result';
       fence = { char: open[1][0], size: open[1].length, gate: isGate };
-      if (isGate) last = { body: [], end: -1, closed: false };
+      if (isGate) last = { body: [], end: -1, closed: false, proseEnd: prose.length };
       else prose.push(line);
     } else prose.push(line);
   }
-  const result = (gate: GateResult | null, error: string | null) => ({ gate, error, prose: prose.join('\n') });
+  const result = (gate: GateResult | null, error: string | null, warning: string | null = null) => ({ gate, error, warning,
+    prose: (last ? prose.slice(0, last.proseEnd) : prose).join('\n') });
   if (!last) return result(null, null);
   if (text.length > 1024 * 1024) return result(null, 'Ответ с gate превышает лимит 1 MiB.');
   if (!last.closed) return result(null, 'Последний блок aif-gate-result не закрыт.');
   let value: unknown;
   try { value = JSON.parse(last.body.join('\n')); }
   catch { return result(null, 'Последний блок aif-gate-result содержит некорректный JSON.'); }
+  // Some agents emit human-readable blocker strings. Adapt only that input
+  // shape; keep one canonical object contract for RPC, history and rendering.
+  if (value && typeof value === 'object' && 'blockers' in value && Array.isArray(value.blockers)) {
+    value = { ...value, blockers: value.blockers.map((blocker: unknown, index: number) => {
+      if (typeof blocker !== 'string') return blocker;
+      const label = blocker.match(/^([\w.-]{1,200}):\s*/);
+      return { id: label?.[1] ?? `blocker-${index + 1}`, severity: 'error', summary: blocker.slice(label?.[0].length ?? 0).trim() };
+    }) };
+  }
   const parsed = gateResultSchema.safeParse(value);
   if (!parsed.success) return result(null, 'Gate не соответствует схеме v1: проверьте gate, status, blockers и suggested_next.');
   const gate = parsed.data;
-  if (lines.slice(last.end + 1).join('\n').trim()) return result(gate, 'Gate должен быть завершающим блоком ответа; текст после него не считается handoff.');
   if (gate.blocking !== (gate.status === 'fail') || (gate.status === 'fail' ? !gate.blockers.length : !!gate.blockers.length)) {
     return result(gate, 'Противоречивые status, blocking и blockers. Следующий шаг не подтверждён.');
   }
@@ -56,5 +65,7 @@ export function parseReplyGate(text: string): { gate: GateResult | null; error: 
   if (next && (!allowed[gate.gate].includes(next.replace(/^\$/, '/')) || blockedByGate(next.slice(1), gate))) {
     return result(gate, 'suggested_next.command недопустим для этого gate или обходит блокирующие проблемы.');
   }
-  return result(gate, null);
+  const warning = lines.slice(last.end + 1).join('\n').trim()
+    ? 'После gate есть дополнительный текст. Gate должен завершать ответ; команды после него не считаются handoff.' : null;
+  return result(gate, null, warning);
 }

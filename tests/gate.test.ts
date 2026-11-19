@@ -46,6 +46,35 @@ test('blocking findings retain stable ids, severity, summary and files; prose ca
   assert.equal(reply.gate?.blockers[0].summary, fail.blockers[0].summary);
   assert(blockedByGate('aif-commit', reply.gate)); assert(!blockedByGate('aif-fix', reply.gate));
 });
+
+test('review FAIL accepts blocker strings without losing findings or weakening routing', () => {
+  const blockers = ['R1: TypeScript worker drops effective read_only restrictions from claim responses.',
+    'R2: Deleted review target with preserved head is accepted by worker policy guard.'];
+  const payload = { ...warnGate, gate: 'review', status: 'fail', blocking: true, blockers,
+    suggested_next: { command: '$aif-fix', reason: 'Fix R1 and R2, add regression tests and rerun CI gate.' } };
+  const reply = analyzeReply('$aif-commit\n' + gateBlock(payload));
+  assert.equal(reply.error, null); assert.equal(reply.gate?.status, 'fail'); assert.equal(reply.gate?.blocking, true);
+  assert.deepEqual(reply.gate?.blockers, blockers.map((summary, i) => ({ id: `R${i + 1}`, severity: 'error', summary: summary.slice(4) })));
+  assert.deepEqual(reply.ids, ['aif-fix', 'aif-commit']);
+  assert(blockedByGate('aif-commit', reply.gate)); assert(blockedByGate('aif-implement', reply.gate));
+  assert(!blockedByGate('aif-fix', reply.gate)); assert.equal(payload.blockers[0], blockers[0]);
+  const mixed = parseReplyGate(gateBlock({ ...payload, blockers: [blockers[0], 'Unlabelled blocker',
+    { id: 'existing', severity: 'warning', summary: 'Explicit severity is retained.', file: 'src/demo.ts' }] }));
+  assert.equal(mixed.error, null);
+  assert.deepEqual(mixed.gate?.blockers[1], { id: 'blocker-2', severity: 'error', summary: 'Unlabelled blocker' });
+  assert.deepEqual(mixed.gate?.blockers[2], { id: 'existing', severity: 'warning', summary: 'Explicit severity is retained.', file: 'src/demo.ts' });
+});
+
+test('string blocker compatibility preserves limits, contradictory states and next-step restrictions', () => {
+  const fail = { ...warnGate, gate: 'review', status: 'fail', blocking: true, blockers: ['R1: Required behavior is missing.'],
+    suggested_next: { command: '$aif-fix', reason: 'Fix findings.' } };
+  for (const patch of [{ blockers: [''] }, { blockers: ['  '] }, { blockers: ['R1: '] },
+    { blockers: ['x'.repeat(2001)] }, { blockers: Array(101).fill('Finding') }, { blockers: [false] },
+    { blockers: [{ summary: 'Incomplete object is not repaired.' }] }, { blocking: false }, { status: 'pass' },
+    { suggested_next: { command: '$aif-commit', reason: 'Bypass' } }, { schema_version: 2 }]) {
+    assert(analyzeReply(gateBlock({ ...fail, ...patch })).error);
+  }
+});
 test('last gate wins and data fields never become independent command suggestions', () => {
   const reply = analyzeReply(gateBlock(warnGate) + '\n' + gateBlock({ ...warnGate, affected_files: ['$aif-archive'], suggested_next: { command: '/aif-roadmap', reason: '$aif-commit is a quoted name, not another recommendation.' } }));
   assert.equal(reply.error, null); assert.deepEqual(reply.ids, ['aif-roadmap']);
@@ -55,7 +84,32 @@ test('invalid or unclosed final gate never falls back to an earlier valid result
     const reply = analyzeReply(gateBlock(warnGate) + '\n' + tail);
     assert(reply.error); assert.equal(reply.gate, null); assert.deepEqual(reply.ids, []);
   }
-  assert(parseReplyGate(gateBlock(warnGate) + '\nmore text').error);
+  const trailing = parseReplyGate(gateBlock(warnGate) + '\nmore text');
+  assert.equal(trailing.error, null); assert(trailing.warning);
+});
+
+test('a valid review FAIL followed by a summary keeps findings and fix with a separate format warning', () => {
+  const gate = { ...warnGate, gate: 'review', status: 'fail', blocking: true,
+    blockers: [{ id: 'windows-project-path-prefix', severity: 'error', summary: 'Windows project paths use incompatible slash styles.' },
+      { id: 'worker-failure-aborts-run-burns-attempts', severity: 'error', summary: 'A failed worker consumes sibling attempts.' }],
+    suggested_next: { command: '$aif-fix', reason: 'Two blocking findings.' } };
+  const reply = analyzeReply(gateBlock(gate) + '\n\nИтог: обе находки блокирующие. `$aif-commit` не выполнялся.');
+  assert.equal(reply.error, null); assert(reply.warning); assert.deepEqual(reply.gate, gate);
+  assert.deepEqual(reply.ids, ['aif-fix']); assert(!reply.prose.includes('Итог'));
+  assert(!blockedByGate('aif-fix', reply.gate, reply.warning));
+  assert(blockedByGate('aif-commit', reply.gate, reply.warning));
+  assert.equal(parseReplyGate(gateBlock(gate)).warning, null);
+});
+
+test('a format warning cannot authorize PASS advancement or override content validation', () => {
+  const pass = { ...warnGate, status: 'pass', suggested_next: null };
+  const reply = analyzeReply('$aif-commit\n' + gateBlock(pass) + '\n/aif-fix');
+  assert.equal(reply.error, null); assert(reply.warning); assert.equal(reply.gate?.status, 'pass');
+  assert.deepEqual(reply.ids, ['aif-commit']);
+  for (const id of ['aif-implement', 'aif-commit', 'aif-done', 'aif-archive']) assert(blockedByGate(id, reply.gate, reply.warning));
+  assert(!blockedByGate('aif-verify', reply.gate, reply.warning));
+  const invalid = parseReplyGate(gateBlock({ ...pass, blocking: true }) + '\nsummary');
+  assert(invalid.error); assert.equal(invalid.warning, null);
 });
 test('nested or quoted examples are not authoritative gate results', () => {
   assert.equal(parseReplyGate('````markdown\n' + gateBlock(warnGate) + '\n````').gate, null);

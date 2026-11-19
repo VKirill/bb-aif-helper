@@ -1,12 +1,12 @@
 import type { BbPluginApi } from '@get-bb/plugin-sdk';
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import { hostContract, hostSignals, rpcContract, type ChipScoringView, type DelegationView } from './contract.ts';
 import { DELEGATION_ROLES, delegationDefaultsSchema, modelSpec } from './delegation.ts';
 import { childModel, type ChildModel } from './child-model.ts';
 import type { DelegationChoice, DelegationDefaults, DelegationRole, DelegationState } from './delegation.ts';
 import { requestSchema, phaseSchema, snapshotSchema, chipScoringStateSchema, type CardRequest, type ChipScoringState, type Snapshot, type Phase, type Suggestions } from './model.ts';
-import { actionPrompt, workflowActions } from './workflow.ts';
+import { actionPrompt, workflowActions, commitNavigationDeferred } from './workflow.ts';
 import { applyRan, applySkipped, RUN_CONFIRMED_STEPS } from './readiness.ts';
 import { analyzeReply, nextStepItems, withTopic } from './suggestions.ts';
 import { blockedByGate } from './gate.ts';
@@ -15,15 +15,21 @@ import { lockUnchangedChecks, unchangedCheck, unchangedReason } from './check-ac
 import { SnapshotCache } from './snapshot-cache.ts';
 import { AIF_MENTION, aifMentionItems, aifModeInstructions, shouldContribute } from './aif-mode.ts';
 import { versionSampleFresh } from './versions.ts';
-import { BASIC_PLAN_ROOT } from './basic-workflow.ts';
 import { DECISIONS_URL, decisionsRequest, decisionsResponseSchema, probabilitiesFor, scoringKey } from './chip-scoring.ts';
 import { parallelGroups } from './parallel-plan.ts';
 import { CHIP_SCORING_TAG, projectTag, threadTag } from './live-updates.ts';
+import { isBasicPlanPath, nativePlanInput } from './basic-workflow.ts';
+import { readChatPlan, type ChatPlanRecord } from './chat-plan.ts';
+import { pendingConfirmation, asksToApplyPlanChanges } from './confirmation.ts';
+import { IMPROVE_APPROVAL, pendingImproveProposal } from './improve-approval.ts';
+import { readSessionBrief, sessionBriefBlocked, sessionBriefCommandAvailable, briefCommands, SESSION_BRIEF_COMMAND, type SessionBriefReport } from './session-brief.ts';
+import { GATE_EVIDENCE_COMMAND, gateEvidenceCommandAvailable } from './gate-evidence-command.ts';
 export { rpcContract } from './contract.ts';
-type Selection = { environmentId: string; target: string; phase: Phase };
+type Selection = { environmentId: string; target: string; phase: Phase; newTask?: boolean };
 type Delivery = { requestId: string; fingerprint: string; actionId: string; state: 'attempting' | 'sent' | 'uncertain'; at: number };
 type DismissedSuggestions = { sourceKey: string; ids: string[] };
-const suggestionSource = (root: string, output: string | null) => createHash('sha256').update(JSON.stringify([root, output])).digest('hex');
+const suggestionSource = (root: string, output: string | null, proposalSeq?: number) => createHash('sha256')
+  .update(JSON.stringify(proposalSeq === undefined ? [root, output] : [root, output, proposalSeq])).digest('hex');
 const CHIP_SCORE_CACHE_LIMIT = 200;
 const chipScoreCache = new Map<string, Record<string, number>>();
 const chipScoreInflight = new Set<string>();
@@ -37,8 +43,8 @@ const commandInput = (command: string, context: string) => [
   { type: 'text' as const, text: command, mentions: [] },
   { type: 'text' as const, text: context, mentions: [], visibility: 'agent-only' as const },
 ];
-export function cardDirective(request: { target?: string; phase?: Phase }): string {
-  const attrs = [request.target ? `target=${JSON.stringify(request.target)}` : '', request.phase && request.phase !== 'unknown' ? `phase=${JSON.stringify(request.phase)}` : ''].filter(Boolean).join(' ');
+export function cardDirective(request: { target?: string; phase?: Phase; cardId?: string }): string {
+  const attrs = [request.cardId ? `card=${JSON.stringify(request.cardId)}` : '', request.target ? `target=${JSON.stringify(request.target)}` : '', request.phase && request.phase !== 'unknown' ? `phase=${JSON.stringify(request.phase)}` : ''].filter(Boolean).join(' ');
   return `::aif-chat{${attrs}}`;
 }
 const envListOutputSchema = z.looseObject({ variables: z.array(z.looseObject({ name: z.string() })) });
@@ -47,14 +53,27 @@ export default async function plugin(bb: BbPluginApi) {
   const settings = bb.settings.define({
     enabled: { type: 'boolean', label: 'Карточки AI Factory в чате', default: true },
     sourceRepo: { type: 'string', label: 'Путь к исходникам AI Factory на хосте (необязательно)', default: '' },
-    runtime: { type: 'select', label: 'Runtime установки проекта', options: ['auto', 'codex', 'codex-app', 'claude', 'cursor', 'opencode', 'gemini'], default: 'auto' },
+    runtime: { type: 'select', label: 'Runtime установки проекта', options: ['auto', 'codex', 'codex-app', 'claude', 'cursor', 'opencode', 'gemini', 'devin', 'windsurf'], default: 'auto' },
     upstreamRepo: { type: 'string', label: 'GitHub upstream AI Factory', default: 'lee-to/ai-factory', experimental_schema: z.string().regex(/^[\w.-]+\/[\w.-]+$/) },
     upstreamRef: { type: 'string', label: 'Upstream ref (пусто — последний стабильный release)', default: '', experimental_schema: z.string().max(200) },
     decisionsKey: { type: 'string', label: 'Ключ Gemini Decisions (ручной ввод)', secret: true, default: '' },
   });
   const host = bb.hosts.experimental_client({ contract: hostContract, experimental_signals: hostSignals });
+  const watchers = new Map<string, Set<string>>();
+  const threadEnvironments = new Map<string, string | null>();
+  const noteEnvironment = (threadId: string, environmentId: string | null) => {
+    const previous = threadEnvironments.get(threadId);
+    if (previous === environmentId) return;
+    threadEnvironments.set(threadId, environmentId);
+    if (previous !== undefined) bb.rpc.experimental_invalidate([threadTag(threadId)]);
+  };
   let enabled = (await settings.get()).enabled;
-  settings.onChange(next => { enabled = next.enabled; });
+  settings.onChange(next => {
+    enabled = next.enabled;
+    const ids = new Set<string>();
+    for (const listeners of watchers.values()) for (const id of listeners) ids.add(id);
+    if (ids.size) bb.rpc.experimental_invalidate([...ids].map(threadTag));
+  });
   const queues = new Map<string, Promise<unknown>>();
   let disposed = false;
   const db = bb.storage.database();
@@ -76,7 +95,6 @@ export default async function plugin(bb: BbPluginApi) {
   const modeWrite = db.prepare('INSERT INTO project_modes (project_id, enabled, updated_at) VALUES (?, ?, ?) ON CONFLICT(project_id) DO UPDATE SET enabled=excluded.enabled, updated_at=excluded.updated_at');
   const getMode = (projectId: string) => (modeRead.get(projectId) as { enabled: number } | undefined)?.enabled === 1;
   const setMode = (projectId: string, on: boolean) => { modeWrite.run(projectId, on ? 1 : 0, Date.now()); };
-  const watchers = new Map<string, Set<string>>();
   const cache = new SnapshotCache({
     read(key) {
       const row = cacheRead.get(key) as { at: number; value: string } | undefined;
@@ -159,7 +177,32 @@ export default async function plugin(bb: BbPluginApi) {
     const environment = await bb.sdk.environments.get({ environmentId: thread.environmentId });
     if (environment.status !== 'ready' || environment.lifecycle.phase !== 'active' || !environment.path) throw new Error('Рабочая среда недоступна.');
     if (environment.projectId !== thread.projectId) throw new Error('Среда не соответствует проекту чата.');
+    noteEnvironment(threadId, environment.id);
     return { thread, environment };
+  }
+  const readConfirmation = async (threadId: string) => pendingConfirmation(await bb.sdk.threads.events.list({ threadId,
+    order: 'desc', limit: '100', types: ['item/completed', 'client/turn/requested'] }));
+  async function requireConfirmationAnswer(threadId: string) {
+    let pending: boolean;
+    try { pending = await readConfirmation(threadId); }
+    catch { throw new Error('Не удалось проверить ожидание подтверждения. Обновите статус.'); }
+    if (pending) throw new Error('Сначала ответьте на запрос подтверждения в чате.');
+  }
+  async function contextReport(threadId: string, environment: { id: string; path: string | null; hostId: string }, snapshot: Snapshot,
+    rows?: Parameters<typeof readSessionBrief>[0]) {
+    if (snapshot.profile !== 'aifhub-openspec' || snapshot.target?.kind !== 'openspec') return;
+    await serial(`session-brief:${threadId}`, async () => {
+      const key = `session-brief:${threadId}`;
+      const scope = JSON.stringify([environment.id, environment.path, environment.hostId]);
+      const saved = await bb.storage.kv.get<{ scope: string; reports: SessionBriefReport[] }>(key);
+      const reports = saved?.scope === scope ? saved.reports : [];
+      const previous = reports.find(r => r.target === snapshot.target!.path);
+      const report = rows ? readSessionBrief(rows, snapshot.target, previous) : previous;
+      if (report) snapshot.sessionBrief = report;
+      else delete snapshot.sessionBrief;
+      if (report && report.seq !== previous?.seq) await bb.storage.kv.set(key,
+        { scope, reports: [...reports.filter(r => r.target !== report.target).slice(-79), report] });
+    });
   }
   async function status(input: CardRequest, checkUpdates = false, fresh = false): Promise<Snapshot> {
     const config = await settings.get();
@@ -167,10 +210,11 @@ export default async function plugin(bb: BbPluginApi) {
     const { thread, environment } = await context(input.threadId);
     const saved = await bb.storage.kv.get<Selection>(`selection:${input.threadId}`);
     const selection = saved?.environmentId === environment.id ? saved : undefined;
-    const target = input.target || selection?.target || '';
+    const newTask = !input.target && (input.newTask ?? selection?.newTask ?? false);
+    const target = newTask ? '' : input.target || selection?.target || '';
     const phase = input.phase === 'unknown' ? selection?.phase ?? input.phase : input.phase;
     const runtime = config.runtime === 'auto' ? thread.providerId === 'codex' ? 'codex-app' : thread.providerId : config.runtime;
-    const key = JSON.stringify(['status/v1', environment.id, environment.path, environment.hostId, target, runtime, config.sourceRepo, config.upstreamRepo, config.upstreamRef]);
+    const key = JSON.stringify(['status/v1', environment.id, environment.path, environment.hostId, target, runtime, config.sourceRepo, config.upstreamRepo, config.upstreamRef, newTask]);
     const versionKey = JSON.stringify([environment.id, environment.path, environment.hostId, runtime, config.sourceRepo]);
     const remoteKey = `upstream:${environment.hostId}:${config.upstreamRepo}:${config.upstreamRef}`;
     if (versionScopes.size > 100) versionScopes.clear();
@@ -218,9 +262,22 @@ export default async function plugin(bb: BbPluginApi) {
     }, fresh || checkUpdates);
     // After installation, basic plans remain files but are not AI Factory plans.
     // Release only our managed selection, never reinterpret it as a native plan.
-    if (snapshot.configured && target.startsWith(BASIC_PLAN_ROOT + '/')) {
+    if (snapshot.configured && isBasicPlanPath(target)) {
       if (selection?.target === target) await bb.storage.kv.delete(`selection:${input.threadId}`);
       return status({ ...input, target: '', phase: 'unknown' }, false, true);
+    }
+    if (snapshot.selectionReset && snapshot.profile !== 'invalid' && target) {
+      await bb.storage.kv.set(`selection:${input.threadId}`, { environmentId: environment.id, target: '', phase, newTask: true } satisfies Selection);
+      await bb.storage.kv.delete(`chat-plan:${input.threadId}`);
+      const recovered = await status({ ...input, target: '', newTask: true }, false, true);
+      recovered.selectionReset = true;
+      recovered.diagnostics = [...new Set([...snapshot.diagnostics, ...recovered.diagnostics])];
+      return recovered;
+    }
+    if (newTask && snapshot.profile !== 'invalid') {
+      snapshot.target = null;
+      snapshot.checks = [];
+      snapshot.fingerprint = createHash('sha256').update(JSON.stringify([snapshot.fingerprint, 'new-task'])).digest('hex');
     }
     snapshot.upstream = await bb.storage.kv.get<Snapshot['upstream']>(remoteKey) ?? snapshot.upstream;
     if (snapshot.phase !== phase) {
@@ -231,12 +288,33 @@ export default async function plugin(bb: BbPluginApi) {
     const projectKey = `${environment.hostId}:${environment.path!}`;
     snapshot.readiness = applySkipped(applyRan(snapshot.readiness, await bb.storage.kv.get<string[]>(`readiness-ran:${projectKey}`) ?? []),
       await bb.storage.kv.get<string[]>(`readiness-skip:${projectKey}`) ?? []);
-    snapshot.actions = workflowActions(snapshot);
+    await contextReport(input.threadId, environment, snapshot);
     snapshot.threadState = thread.runtime.displayStatus;
     try {
       snapshot.pendingQuestions = (await bb.sdk.threads.interactions.list({ threadId: input.threadId })).length;
       if (snapshot.pendingQuestions > 0) snapshot.threadState = 'awaiting_input';
     } catch { snapshot.pendingQuestions = null; }
+    try {
+      const rows = await bb.sdk.threads.events.list({ threadId: input.threadId,
+        order: 'desc', limit: '100', types: ['item/completed', 'client/turn/requested'] });
+      snapshot.pendingConfirmation = pendingConfirmation(rows);
+      await contextReport(input.threadId, environment, snapshot, rows);
+      if (!snapshot.configured && snapshot.profile === 'none' && !snapshot.target) {
+        const savedPlan = await bb.storage.kv.get<ChatPlanRecord>(`chat-plan:${input.threadId}`);
+        const accepted = savedPlan?.environmentId === environment.id && savedPlan.root === snapshot.root ? savedPlan : null;
+        const proposed = readChatPlan(rows);
+        const plan = proposed ?? accepted;
+        if (plan) snapshot.chatPlan = { seq: plan.seq, hash: plan.hash, title: plan.title,
+          accepted: !!accepted && plan.seq === accepted.seq && plan.hash === accepted.hash };
+      }
+    } catch {
+      snapshot.pendingConfirmation = null;
+      snapshot.diagnostics.push('Не удалось проверить, ожидается ли подтверждение пользователя. Обновите статус.');
+    }
+    if (snapshot.pendingConfirmation !== false) snapshot.threadState = 'awaiting_input';
+    if (snapshot.sessionBrief) snapshot.fingerprint = createHash('sha256').update(JSON.stringify([snapshot.fingerprint, snapshot.sessionBrief])).digest('hex');
+    if (snapshot.chatPlan) snapshot.fingerprint = createHash('sha256').update(JSON.stringify([snapshot.fingerprint, snapshot.chatPlan])).digest('hex');
+    snapshot.actions = workflowActions(snapshot);
     await chatChecks(input.threadId, environment.id, environment.hostId, snapshot, fresh);
     lockUnchangedChecks(snapshot);
     return snapshot;
@@ -244,36 +322,114 @@ export default async function plugin(bb: BbPluginApi) {
   async function show(input: CardRequest) {
     const { environment } = await context(input.threadId);
     const snapshot = await status(input, false, true);
-    await bb.storage.kv.set(`selection:${input.threadId}`, { environmentId: environment.id, target: input.target, phase: input.phase } satisfies Selection);
+    const previous = await bb.storage.kv.get<Selection>(`selection:${input.threadId}`);
+    const selectedTarget = snapshot.selectionReset ? '' : input.target;
+    await bb.storage.kv.set(`selection:${input.threadId}`, { environmentId: environment.id, target: selectedTarget, phase: input.phase,
+      newTask: snapshot.selectionReset === true || !selectedTarget && (input.newTask ?? (previous?.environmentId === environment.id ? previous.newTask ?? false : false)) } satisfies Selection);
+    if (input.phase === 'plan' && !snapshot.configured && snapshot.profile === 'none') {
+      await bb.storage.kv.set(`inline-card:${input.threadId}`, { cardId: randomUUID(), environmentId: environment.id });
+      bb.rpc.experimental_invalidate([threadTag(input.threadId)]);
+      return { snapshot, previewDirective: '' };
+    }
+    if (snapshot.pendingConfirmation || snapshot.pendingQuestions) {
+      bb.rpc.experimental_invalidate([threadTag(input.threadId)]);
+      return { snapshot, previewDirective: '' };
+    }
+    const cardId = randomUUID();
+    await bb.storage.kv.set(`inline-card:${input.threadId}`, { cardId, environmentId: environment.id });
     bb.rpc.experimental_invalidate([threadTag(input.threadId)]);
-    return { snapshot, previewDirective: cardDirective({ target: snapshot.target?.path ?? input.target, phase: input.phase }) };
+    return { snapshot, previewDirective: cardDirective({ cardId, target: snapshot.target?.path ?? selectedTarget, phase: input.phase }) };
+  }
+  async function saveCompletedPlan(threadId: string, expectedText?: string) {
+    return serial(`plan-document:${threadId}`, async () => {
+      if (!enabled) return null;
+      const { thread, environment } = await context(threadId);
+      if (thread.status !== 'idle' || thread.queuedMessageCount || thread.activeBackgroundAgentCount) return null;
+      const rows = await bb.sdk.threads.events.list({ threadId, order: 'desc', limit: '100', types: ['item/completed', 'client/turn/requested'] });
+      const plan = readChatPlan(rows);
+      if (!plan || expectedText !== undefined && plan.text !== expectedText.trim()) return null;
+      type Saved = { environmentId: string; root: string; path: string; seq: number; hash: string };
+      const previous = await bb.storage.kv.get<Saved>(`plan-document:${threadId}`);
+      if (previous?.environmentId === environment.id && previous.root === environment.path && previous.seq === plan.seq && previous.hash === plan.hash)
+        return { path: previous.path, seq: previous.seq, hash: previous.hash, environmentId: environment.id };
+      const snapshot = await status({ threadId, target: '', phase: 'unknown' }, false, true);
+      if (snapshot.configured || snapshot.profile !== 'none') return null;
+      const latest = await context(threadId);
+      const check = readChatPlan(await bb.sdk.threads.events.list({ threadId, order: 'desc', limit: '100', types: ['item/completed', 'client/turn/requested'] }));
+      if (latest.environment.id !== environment.id || latest.environment.path !== snapshot.root || latest.thread.status !== 'idle'
+        || latest.thread.queuedMessageCount || !check || check.seq !== plan.seq || check.hash !== plan.hash) return null;
+      let result: { path: string };
+      try {
+        result = await host.call('savePlan', { root: snapshot.root, threadId, seq: plan.seq, hash: plan.hash, text: plan.text }, { hostId: environment.hostId });
+      } catch (error) {
+        bb.log.warn(`aif-chat: plan export failed threadId=${threadId}: ${errMessage(error)}`);
+        throw error;
+      }
+      await bb.storage.kv.set(`plan-document:${threadId}`, { environmentId: environment.id, root: snapshot.root, ...result, seq: plan.seq, hash: plan.hash } satisfies Saved);
+      await bb.storage.kv.set(`selection:${threadId}`, { environmentId: environment.id, target: result.path, phase: 'plan', newTask: false } satisfies Selection);
+      await bb.storage.kv.set(`inline-card:${threadId}`, { cardId: randomUUID(), environmentId: environment.id });
+      bb.log.debug(`aif-chat: plan exported threadId=${threadId} path=${result.path}`);
+      cache.invalidate(key => !!watchers.get(key)?.has(threadId));
+      bb.rpc.experimental_invalidate([threadTag(threadId)]);
+      return { ...result, seq: plan.seq, hash: plan.hash, environmentId: environment.id };
+    });
   }
   async function suggested(threadId: string, fresh = false) {
     const empty: Suggestions = { sourceKey: '', fingerprint: '', threadState: 'unknown', items: [], gate: null, gateError: null, origin: 'reply' };
-    if (!enabled) return { view: empty, ids: [] as string[], hidden: [] as string[], snapshot: null };
+    if (!enabled) return { view: empty, ids: [] as string[], hidden: [] as string[], snapshot: null, proposal: null };
     const { output } = await bb.sdk.threads.output({ threadId });
     const reply = analyzeReply(output ?? '');
-    const ids = reply.ids;
-    if (!ids.length && !reply.gate && !reply.error) {
+    const ids = [...reply.ids];
+    const applyQuestion = asksToApplyPlanChanges(output ?? '');
+    if (!ids.length && !reply.gate && !reply.error && !applyQuestion) {
       const projectId = (await bb.sdk.threads.get({ threadId })).projectId;
-      if (!getMode(projectId)) return { view: empty, ids, hidden: [] as string[], snapshot: null };
+      if (!getMode(projectId)) return { view: empty, ids, hidden: [] as string[], snapshot: null, proposal: null };
       return fallbackSuggestions(threadId, output, fresh);
     }
     const snapshot = await status({ threadId, target: '', phase: 'unknown' }, false, fresh);
-    const sourceKey = suggestionSource(snapshot.root, output);
+    let proposal: ReturnType<typeof pendingImproveProposal> = null;
+    if (applyQuestion && !reply.warning && snapshot.configured && snapshot.profile !== 'invalid') {
+      try { proposal = pendingImproveProposal(await bb.sdk.threads.events.list({ threadId,
+        order: 'desc', limit: '100', types: ['item/completed', 'client/turn/requested'] }), output, snapshot.target); }
+      catch { /* Unknown history cannot authorize an approval shortcut. */ }
+    }
+    if (proposal) ids.unshift(IMPROVE_APPROVAL);
+    const approvalThread = proposal ? (await context(threadId)).thread : null;
+    const sourceKey = suggestionSource(snapshot.root, output, proposal?.seq);
     const dismissed = await bb.storage.kv.get<DismissedSuggestions>(`suggestions-dismissed:${threadId}`);
     const hidden = dismissed?.sourceKey === sourceKey ? dismissed.ids : [];
     const prefix = ['codex', 'codex-app'].includes(snapshot.runtime) ? '$' : '/';
+    const blockedReason = reply.gate?.blocking ? 'Gate содержит блокирующие проблемы.' : reply.warning;
+    const specialChip = (id: string) => id === IMPROVE_APPROVAL || id === GATE_EVIDENCE_COMMAND || id === SESSION_BRIEF_COMMAND;
     const offered = ids.filter(id => !hidden.includes(id));
-    const items: Suggestions['items'] = offered.filter(id => snapshot.skills.includes(id) || id === 'aif-chat' || id === reply.next).map(id => ({ id, command: withTopic(`${prefix}${reply.commands.get(id) ?? id}`, id, reply.next === id ? reply.gate?.suggested_next?.reason : null),
-      available: !reply.error && !blockedByGate(id, reply.gate) && !unchangedCheck(snapshot, id) && snapshot.profile !== 'invalid' && (snapshot.skills.includes(id) || id === 'aif-chat'),
-      reason: reply.error ?? (blockedByGate(id, reply.gate) ? 'Gate содержит блокирующие проблемы.' : unchangedCheck(snapshot, id) ? unchangedReason : snapshot.profile === 'invalid' ? 'Проверьте конфигурацию проекта.' : !(snapshot.skills.includes(id) || id === 'aif-chat') ? `Skill не установлен для ${snapshot.runtime}` : reply.next === id ? reply.gate?.suggested_next?.reason ?? 'Следующий шаг из gate' : 'Команда из последнего ответа агента'),
+    const items: Suggestions['items'] = offered.filter(id => specialChip(id) || snapshot.skills.includes(id) || id === 'aif-chat' || id === reply.next).map(id => id === IMPROVE_APPROVAL && proposal ? {
+      id, label: 'Применить всё', kind: 'improve-approval' as const, command: proposal.command,
+      available: !reply.error && !reply.gate?.blocking && snapshot.skills.includes('aif-improve')
+        && snapshot.pendingQuestions === 0 && snapshot.pendingConfirmation === true && !!approvalThread
+        && ['idle', 'error'].includes(approvalThread.status) && !approvalThread.queuedMessageCount && !approvalThread.activeBackgroundAgentCount,
+      reason: 'Подтвердить только предложенные в этом ответе улучшения выбранного плана; без запуска выполнения',
+      probability: null,
+    } : id === GATE_EVIDENCE_COMMAND && reply.evidenceCommands.length ? { id,
+      label: `Сохранить результат ${reply.evidenceCommands.at(-1)!.gate}${reply.evidenceCommands.at(-1)!.placeholder ? ' · уточнить файл' : ''}`,
+      command: reply.commands.get(id)!,
+      available: !reply.error && gateEvidenceCommandAvailable(snapshot) && reply.evidenceCommands.at(-1)?.change === snapshot.target?.id,
+      reason: reply.evidenceCommands.at(-1)!.placeholder
+        ? 'Отправить команду агенту: <…> — шаблон пути, владелец workflow должен выбрать или подготовить исходный отчёт и проверить evidence.'
+        : 'Передать команду штатному writer выбранного change. Сохранение и актуальность evidence проверяет владелец workflow; отправка не означает PASS.',
+      probability: null,
+    } : id === SESSION_BRIEF_COMMAND ? { id, label: 'Пересобрать SessionBrief', command: reply.commands.get(id)!,
+      available: !reply.error && sessionBriefCommandAvailable(snapshot) && briefCommands(reply.commands.get(id)!).some(c => c.change === snapshot.target?.id),
+      reason: 'Пересобрать контекст только выбранного change; команда объявлена установленным расширением',
+      probability: null,
+    } : ({ id, command: withTopic(`${prefix}${reply.commands.get(id) ?? id}`, id, reply.next === id ? reply.gate?.suggested_next?.reason : null),
+      available: !reply.error && !blockedByGate(id, reply.gate, reply.warning) && !(id === 'aif-implement' && sessionBriefBlocked(snapshot)) && !(id === 'aif-commit' && commitNavigationDeferred(snapshot)) && !unchangedCheck(snapshot, id, reply.commands.get(id)) && snapshot.profile !== 'invalid' && (snapshot.skills.includes(id) || id === 'aif-chat'),
+      reason: reply.error ?? (id === 'aif-implement' && sessionBriefBlocked(snapshot) ? 'Сначала восстановите SessionBrief выбранного change.' : blockedByGate(id, reply.gate, reply.warning) ? blockedReason! : id === 'aif-commit' && commitNavigationDeferred(snapshot) ? 'Коммиты привязаны к плану; продолжите aif-implement до разрешённого commit-boundary.' : unchangedCheck(snapshot, id, reply.commands.get(id)) ? unchangedReason : snapshot.profile === 'invalid' ? 'Проверьте конфигурацию проекта.' : !(snapshot.skills.includes(id) || id === 'aif-chat') ? `Команда ${id} не установлена для ${snapshot.runtime}. Добавьте этот skill в установку AI Factory проекта.` : reply.next === id ? reply.gate?.suggested_next?.reason ?? 'Следующий шаг из gate' : 'Команда из последнего ответа агента'),
       probability: null,
     }));
     if (offered.length > items.length) bb.log.debug(`aif-chat: suggestions threadId=${threadId} shown=${items.length} hiddenUnknown=${offered.length - items.length}`);
     await chipScoringFor(threadId, sourceKey, reply.prose, items);
-    const view: Suggestions = { sourceKey, fingerprint: snapshot.fingerprint, threadState: snapshot.threadState, gate: reply.gate, gateError: reply.error, origin: 'reply', items };
-    return { view, ids, hidden, snapshot };
+    const view: Suggestions = { sourceKey, fingerprint: snapshot.fingerprint, threadState: snapshot.threadState, gate: reply.gate, gateError: reply.error, gateWarning: reply.warning, origin: 'reply', items };
+    return { view, ids, hidden, snapshot, proposal };
   }
   async function fallbackSuggestions(threadId: string, output: string | null, fresh: boolean) {
     const snapshot = await status({ threadId, target: '', phase: 'unknown' }, false, fresh);
@@ -285,7 +441,7 @@ export default async function plugin(bb: BbPluginApi) {
     bb.log.debug(`aif-chat: fallback suggestions threadId=${threadId} count=${items.length}`);
     await chipScoringFor(threadId, sourceKey, output ?? '', items);
     const view: Suggestions = { sourceKey, fingerprint: snapshot.fingerprint, threadState: snapshot.threadState, gate: null, gateError: null, origin: 'plan', items };
-    return { view, ids: items.map(i => i.id), hidden, snapshot };
+    return { view, ids: items.map(i => i.id), hidden, snapshot, proposal: null };
   }
   // Requested model per child thread, cached by id + updatedAt so panel refreshes do not re-read events.
   const childModels = new Map<string, ChildModel>();
@@ -508,7 +664,17 @@ export default async function plugin(bb: BbPluginApi) {
       .catch(() => {}).finally(() => { chipScoreInflight.delete(key); });
   }
   bb.rpc.register(rpcContract, {
+    cardVisibility: async input => {
+      if (!enabled) return { state: 'hidden' as const };
+      const latest = await bb.storage.kv.get<{ cardId: string; environmentId: string }>(`inline-card:${input.threadId}`);
+      if (!latest) return { state: 'hidden' as const };
+      if (latest.cardId !== input.cardId) return { state: 'superseded' as const };
+      const thread = await bb.sdk.threads.get({ threadId: input.threadId });
+      noteEnvironment(input.threadId, thread.environmentId);
+      return { state: thread.environmentId === latest.environmentId ? 'current' as const : 'hidden' as const };
+    },
     status: input => status(input, input.checkUpdates, input.force),
+    planDocument: input => saveCompletedPlan(input.threadId, input.text),
     suggestions: async input => (await suggested(input.threadId)).view,
     delegation: async input => {
       const appliedDefaults = await autoApplyDefaults(input.threadId);
@@ -555,18 +721,45 @@ export default async function plugin(bb: BbPluginApi) {
       }
       const item = current.view.items.find(i => i.id === input.commandId && i.available);
       if (!item || !current.snapshot) throw new Error('Команда недоступна или удалена из предложений.');
+      const approval = item.kind === 'improve-approval';
+      if (current.snapshot.pendingConfirmation === null) throw new Error('Не удалось проверить ожидание подтверждения. Обновите предложения.');
+      if (current.snapshot.pendingConfirmation && !approval) throw new Error('Сначала ответьте на запрос подтверждения в чате.');
       if (current.snapshot.pendingQuestions === null) throw new Error('Не удалось проверить открытые вопросы. Обновите предложения.');
       if (current.snapshot.pendingQuestions) throw new Error('Сначала ответьте на открытые вопросы текущего workflow.');
       const { thread, environment } = await context(input.threadId);
       if (!['idle', 'error'].includes(thread.status) || thread.queuedMessageCount > 0 || thread.activeBackgroundAgentCount > 0) throw new Error('В чате выполняется или уже ожидает работа. Дождитесь завершения.');
       // Reading project files may take time; the last answer can change during it.
       const latest = await bb.sdk.threads.output({ threadId: input.threadId });
-      if (suggestionSource(current.snapshot.root, latest.output) !== input.sourceKey) throw new Error('Последний ответ изменился. Обновите предложения.');
-      bb.log.info(`aif-chat: chip checked threadId=${input.threadId} commandId=${input.commandId}`);
-      return { sent: false, message: 'Команда подставлена в поле ввода.', command: item.command,
-        data: { source: 'aif-chat' as const, sourceKey: input.sourceKey, commandId: item.id, fingerprint: input.fingerprint, gate: current.view.gate ?? null } };
+      const latestProposal = current.proposal ? pendingImproveProposal(await bb.sdk.threads.events.list({ threadId: input.threadId,
+        order: 'desc', limit: '100', types: ['item/completed', 'client/turn/requested'] }), latest.output, current.snapshot.target) : null;
+      const special = approval || item.label !== undefined;
+      if ((approval && !latestProposal) || suggestionSource(current.snapshot.root, latest.output, latestProposal?.seq) !== input.sourceKey) throw new Error('Последний ответ изменился. Обновите предложения.');
+      if (!special) {
+        bb.log.info(`aif-chat: chip checked threadId=${input.threadId} commandId=${input.commandId}`);
+        return { sent: false, message: 'Команда подставлена в поле ввода.', command: item.command,
+          data: { source: 'aif-chat' as const, sourceKey: input.sourceKey, commandId: item.id, fingerprint: input.fingerprint, gate: current.view.gate ?? null } };
+      }
+      if (!approval) await requireConfirmationAnswer(input.threadId);
+      const actionId = `suggestion:${input.sourceKey}:${item.id}`;
+      if (deliveries.some(d => d.actionId === actionId && d.state === 'sent')) return { sent: false, message: 'Эта команда уже отправлена из данного ответа.' };
+      const record: Delivery = { requestId: input.requestId, fingerprint: input.fingerprint, actionId, state: 'attempting', at: Date.now() };
+      const next = [...deliveries.slice(-29), record];
+      await bb.storage.kv.set(`deliveries:${input.threadId}`, next);
+      try {
+        await bb.sdk.threads.send({ threadId: input.threadId, input: [{ type: 'text', text: item.command, mentions: [] }], mode: 'queue-if-active' });
+        record.state = 'sent'; await bb.storage.kv.set(`deliveries:${input.threadId}`, next);
+      } catch {
+        record.state = 'uncertain'; await bb.storage.kv.set(`deliveries:${input.threadId}`, next);
+        throw new Error('Исход отправки не подтверждён. Сначала проверьте чат; команда автоматически не повторяется.');
+      }
+      await bb.storage.kv.set(`suggestions-dismissed:${input.threadId}`, { sourceKey: input.sourceKey, ids: [...new Set([...current.hidden, item.id])] } satisfies DismissedSuggestions);
+      cache.invalidate(key => !!watchers.get(key)?.has(input.threadId));
+      bb.rpc.experimental_invalidate([threadTag(input.threadId)]);
+      return { sent: true, message: 'Команда отправлена в этот чат.' };
     }),
     run: input => serial(input.threadId, async () => {
+      if (input.actionId === 'basic-explore' && !input.researchTask) throw new Error('Опишите, что нужно исследовать.');
+      if (input.actionId !== 'basic-explore' && input.researchTask !== undefined) throw new Error('Описание исследования допустимо только для кнопки «Исследовать задачу».');
       const deliveries = await bb.storage.kv.get<Delivery[]>(`deliveries:${input.threadId}`) ?? [];
       const existing = deliveries.find(d => d.requestId === input.requestId);
       if (existing) return { sent: false, message: existing.state === 'sent' ? 'Команда уже отправлена.' : 'Исход отправки не подтверждён. Проверьте ленту чата; автоматический повтор отключён.' };
@@ -578,18 +771,40 @@ export default async function plugin(bb: BbPluginApi) {
       }
       const candidate = current.actions.find(a => a.id === input.actionId);
       if (candidate?.disabledReason === 'unchanged') throw new Error(unchangedReason);
+      if (candidate?.disabledReason === 'context-blocked') throw new Error(candidate.reason);
       const action = candidate?.available ? candidate : undefined;
       if (!action) throw new Error('Действие недоступно для текущего плана/runtime.');
+      if (current.pendingConfirmation === null) throw new Error('Не удалось проверить ожидание подтверждения. Обновите карточку.');
+      if (current.pendingConfirmation) throw new Error('Сначала ответьте на запрос подтверждения в чате.');
       const skill = action.id === 'basic-commit' ? 'aif-commit' : action.id === 'basic-implement' ? 'aif-implement'
         : action.command.match(/^[/$](aif(?:-[a-z0-9]+)*)\b/)?.[1];
       if (skill && ['aif-commit', 'aif-done', 'aif-archive', 'aif-implement'].includes(skill)) {
         const reply = analyzeReply((await bb.sdk.threads.output({ threadId: input.threadId })).output ?? '');
-        if (reply.error || blockedByGate(skill, reply.gate)) throw new Error('Последний gate содержит блокирующие проблемы или некорректен. Сначала разберите его результат.');
+        if (reply.error || blockedByGate(skill, reply.gate, reply.warning)) throw new Error('Последний gate содержит блокирующие проблемы или некорректен. Сначала разберите его результат.');
       }
       if (current.pendingQuestions) throw new Error('Сначала ответьте на открытые вопросы текущего workflow.');
+      if (action.id === 'basic-plan' && current.pendingQuestions === null) throw new Error('Не удалось проверить открытые вопросы. Обновите карточку.');
       const { thread, environment } = await context(input.threadId);
       if (!['idle', 'error'].includes(thread.status) || thread.queuedMessageCount > 0 || thread.activeBackgroundAgentCount > 0) throw new Error('В чате выполняется или уже ожидает работа. Дождитесь завершения.');
+      if (action.id === 'basic-plan') {
+        const providers = await bb.sdk.providers.list({ environmentId: environment.id });
+        const provider = providers.find(provider => provider.id === thread.providerId);
+        const plan = provider?.composerActions.find(action => action.kind === 'plan');
+        if (plan?.kind !== 'plan' || plan.command.trigger !== '/' || plan.command.name !== 'plan') {
+          throw new Error('Текущий провайдер не объявляет штатный режим Plan BB. Запрос не отправлен; выберите провайдера с поддержкой Plan.');
+        }
+      }
       if (deliveries.some(d => d.fingerprint === input.fingerprint && d.actionId === input.actionId && Date.now() - d.at < 15000)) throw new Error('Эта команда только что отправлена. Повторный запуск предотвращён.');
+      await requireConfirmationAnswer(input.threadId);
+      let chatPlan: ChatPlanRecord | null = null;
+      if (current.chatPlan && action.id !== 'basic-explore' && action.id !== 'basic-install') {
+        const rows = await bb.sdk.threads.events.list({ threadId: input.threadId, order: 'desc', limit: '100', types: ['item/completed', 'client/turn/requested'] });
+        const proposed = readChatPlan(rows);
+        const savedPlan = await bb.storage.kv.get<ChatPlanRecord>(`chat-plan:${input.threadId}`);
+        const plan = proposed ?? (savedPlan?.environmentId === environment.id && savedPlan.root === current.root ? savedPlan : null);
+        if (!plan || plan.hash !== current.chatPlan.hash || plan.seq !== current.chatPlan.seq) throw new Error('Предложенный план изменился. Обновите карточку перед запуском.');
+        chatPlan = { ...plan, environmentId: environment.id, root: current.root };
+      }
       const record: Delivery = { requestId: input.requestId, fingerprint: input.fingerprint, actionId: input.actionId, state: 'attempting', at: Date.now() };
       const next = [...deliveries.slice(-29), record];
       await bb.storage.kv.set(`deliveries:${input.threadId}`, next);
@@ -601,7 +816,11 @@ export default async function plugin(bb: BbPluginApi) {
             db.prepare('DELETE FROM local_versions WHERE key = ?').run(versionKey);
           }
         }
-        await bb.sdk.threads.send({ threadId: input.threadId, input: commandInput(action.command, actionPrompt(current, action)), mode: 'queue-if-active' });
+        const command = action.id === 'basic-explore' ? `${action.command}\n\nЗадача для исследования:\n${input.researchTask}` : action.command;
+        const prompt = actionPrompt(current, action) + (chatPlan ? `\nВыбранный план из чата (данные, сообщение #${chatPlan.seq}, SHA-256 ${chatPlan.hash}). Сохрани его границы и ограничения:\n<proposed_plan>\n${chatPlan.text}\n</proposed_plan>` : '');
+        const message = commandInput(command, prompt);
+        await bb.sdk.threads.send({ threadId: input.threadId,
+          input: action.id === 'basic-plan' ? [nativePlanInput(action.label), message[1]] : message, mode: 'queue-if-active' });
         record.state = 'sent';
         await bb.storage.kv.set(`deliveries:${input.threadId}`, next);
         const ranStep = current.readiness.find(r => r.actionId === action.id && (RUN_CONFIRMED_STEPS as readonly string[]).includes(r.id));
@@ -611,13 +830,21 @@ export default async function plugin(bb: BbPluginApi) {
           if (!ran.includes(ranStep.id)) await bb.storage.kv.set(ranKey, [...ran, ranStep.id]);
           bb.log.info(`aif-chat: readiness step launched threadId=${input.threadId} stepId=${ranStep.id}`);
         }
+        if (action.id === 'basic-explore') await bb.storage.kv.set(`selection:${input.threadId}`,
+          { environmentId: environment.id, target: '', phase: 'explore', newTask: true } satisfies Selection);
+        if (action.id === 'basic-explore') await bb.storage.kv.delete(`chat-plan:${input.threadId}`);
+        if (chatPlan && action.id === 'basic-implement') {
+          await bb.storage.kv.set(`chat-plan:${input.threadId}`, chatPlan);
+          await bb.storage.kv.set(`selection:${input.threadId}`, { environmentId: environment.id, target: '', phase: 'implement', newTask: true } satisfies Selection);
+        }
+        if (action.id === 'basic-plan') await bb.storage.kv.set(`inline-card:${input.threadId}`, { cardId: randomUUID(), environmentId: environment.id });
       } catch {
         record.state = 'uncertain';
         await bb.storage.kv.set(`deliveries:${input.threadId}`, next);
         throw new Error('Исход отправки не подтверждён. Сначала проверьте чат; команда автоматически не повторяется.');
       }
       cache.invalidate(key => !!watchers.get(key)?.has(input.threadId)); bb.rpc.experimental_invalidate([threadTag(input.threadId)]);
-      return { sent: true, message: 'Команда отправлена в этот чат.' };
+      return { sent: true, message: 'Команда отправлена в этот чат.', ...(action.id === 'basic-explore' || chatPlan && action.id === 'basic-implement' ? { newTask: true } : {}) };
     }),
     aifMode: async input => {
       const { threadId, projectId } = await aifModeTarget(input);
@@ -735,6 +962,8 @@ export default async function plugin(bb: BbPluginApi) {
       const result = await show({ threadId: ctx.threadId, target: input.target ?? '', phase: input.phase ?? 'unknown' });
       return JSON.stringify({ previewDirective: result.previewDirective, versions: result.snapshot.versions, profile: result.snapshot.profile,
         target: result.snapshot.target?.path ?? null, progress: result.snapshot.target ? { completed: result.snapshot.target.tasks.filter(t => t.done).length, total: result.snapshot.target.tasks.length } : null,
+        chatPlan: result.snapshot.chatPlan ?? null,
+        awaitingUser: !!(result.snapshot.pendingConfirmation || result.snapshot.pendingQuestions),
         checks: result.snapshot.checks, diagnostics: result.snapshot.diagnostics });
     },
   });
@@ -743,7 +972,7 @@ export default async function plugin(bb: BbPluginApi) {
     let modeOn = false;
     try { modeOn = getMode(ctx.project.id); } catch (error) { bb.log.warn(`aif-chat: aif-mode read failed projectId=${ctx.project.id}: ${error instanceof Error ? error.message : String(error)}`); }
     const mode = shouldContribute({ enabled, modeOn, parentThreadId: ctx.thread.parentThreadId }) ? '\n\n' + aifModeInstructions() : '';
-    return { tools: ["aif_chat_status"], skills: ["aif-chat"], instructions: 'For AI Factory/AIFHub work, use aif_chat_status at workflow boundaries or explicit status requests and emit its previewDirective exactly once on its own line. The directive renders real workflow buttons and read-only plan/check progress. Do not wrap it in code. Report the phase actually reached, preserve exact owner handoffs and gate blocks. Never add a directive after a required final aif-gate-result or inside an exact-handoff-only response. Do not call for unrelated tasks or repeat unchanged cards. Buttons are optional navigation, not required questions. No workflow action runs until the user clicks or has already authorized it. Plugin phase is a declaration; file reports are not proof of current PASS.' + mode };
+    return { tools: ["aif_chat_status"], skills: ["aif-chat"], instructions: 'For AI Factory/AIFHub work, use aif_chat_status at workflow boundaries or explicit status requests and emit its previewDirective exactly once on its own line. The directive renders real workflow buttons and read-only plan/check progress. Do not wrap it in code. Report the phase actually reached, preserve exact owner handoffs and gate blocks. Never add a directive after a required final aif-gate-result or proposed_plan, or inside an exact-handoff-only response. Native Plan responses must end with the plan block; the persistent panel discovers the proposal without extra markup. Do not call for unrelated tasks or repeat unchanged cards. When asking the user to confirm scope or answer a clarification, wait for their answer without adding a workflow card. If awaitingUser is true or previewDirective is empty, emit no directive. Existing authorization persists; do not invent approval questions. Buttons are optional navigation, not required questions. No workflow action runs until the user clicks or has already authorized it. Plugin phase is a declaration; file reports are not proof of current PASS.' + mode };
   });
   bb.ui.registerMentionProvider({
     id: AIF_MENTION.provider,
@@ -760,12 +989,12 @@ export default async function plugin(bb: BbPluginApi) {
   });
   bb.cli.register({
     name: 'aif-chat', summary: 'AI Factory versions, live workflow card and read-only plan/check progress',
-    commands: [...['status', 'show', 'check-updates', 'reset', 'reset-dispatch'].map(name => ({ name, summary: name === 'show' ? 'Show a live chat card' : name, usage: `bb plugin run aif-chat ${name} [--thread <id>] [--target <path>] [--phase <phase>] [--json]` })),
+    commands: [...['status', 'show', 'save-plan', 'mark-verified', 'check-updates', 'reset', 'reset-dispatch'].map(name => ({ name, summary: name === 'show' ? 'Show a live chat card' : name, usage: `bb plugin run aif-chat ${name} [--thread <id>] [--target <path>] [--phase <phase>] [--json]` })),
       { name: 'groups', summary: 'Parallel task groups of a plan', usage: 'bb plugin run aif-chat groups --target <path> [--max 1-4] [--json]' }],
     async run(argv, ctx) {
       try {
         const [command = 'help', ...args] = argv;
-        if (command === 'help' || command === '--help') return { exitCode: 0, stdout: 'bb plugin run aif-chat status|show|check-updates|reset|reset-dispatch|groups [--thread ID] [--target PATH] [--phase explore|plan|improve|implement|verify|fix|done] [--max 1-4] [--json]' };
+        if (command === 'help' || command === '--help') return { exitCode: 0, stdout: 'bb plugin run aif-chat status|show|save-plan|mark-verified|check-updates|reset|reset-dispatch|groups [--thread ID] [--target PATH] [--phase explore|plan|improve|implement|verify|fix|done] [--max 1-4] [--json]' };
         const options: Record<string, string> = {}; let json = false;
         for (let i = 0; i < args.length; i++) {
           if (args[i] === '--json') { json = true; continue; }
@@ -774,9 +1003,40 @@ export default async function plugin(bb: BbPluginApi) {
           const name = args[i]; options[name] = args[++i];
         }
         const input = requestSchema.parse({ threadId: options['--thread'] ?? ctx.threadId, target: options['--target'] ?? '', phase: options['--phase'] ?? 'unknown' });
+        if (command === 'mark-verified') return serial(`plan-verification:${input.threadId}`, async () => {
+          if (!input.target) throw new Error('Укажите точный путь базового плана через --target.');
+          const { environment } = await context(input.threadId);
+          const snapshot = await status({ ...input, phase: 'verify' }, false, true);
+          if (snapshot.profile !== 'none' || snapshot.target?.kind !== 'basic' || !snapshot.target.verification
+            || !snapshot.target.tasks.length || snapshot.target.tasks.some(task => !task.done)
+            || snapshot.pendingQuestions !== 0 || snapshot.pendingConfirmation !== false) throw new Error('Отметка недоступна: план не завершён, не является базовым или ожидается ответ пользователя.');
+          const latest = await context(input.threadId);
+          if (latest.environment.id !== environment.id || latest.environment.hostId !== environment.hostId || latest.environment.path !== snapshot.root
+            || !['idle', 'active'].includes(latest.thread.status) || latest.thread.queuedMessageCount || latest.thread.activeBackgroundAgentCount)
+            throw new Error('Контекст изменился или в чате ожидается другая работа. Перечитайте план.');
+          let result: { path: string; verified: true };
+          try {
+            result = await host.call('markPlanVerified', { root: snapshot.root, target: snapshot.target.path,
+              expectedHash: snapshot.target.verification.contentHash }, { hostId: environment.hostId });
+          } catch (error) {
+            bb.log.warn(`aif-chat: verification mark failed threadId=${input.threadId}: ${errMessage(error)}`);
+            throw error;
+          }
+          bb.log.debug(`aif-chat: plan verified threadId=${input.threadId} path=${result.path}`);
+          cache.invalidate(key => !!watchers.get(key)?.has(input.threadId));
+          bb.rpc.experimental_invalidate([threadTag(input.threadId)]);
+          return { exitCode: 0, stdout: json ? JSON.stringify(result) : 'Отметка проверки записана. Файл плана сохранён.' };
+        });
+        if (command === 'save-plan') {
+          if (input.target || input.phase !== 'unknown') throw new Error('save-plan сохраняет только последний готовый план из ответа, без --target и --phase.');
+          const result = await saveCompletedPlan(input.threadId);
+          if (!result) throw new Error('В последнем завершённом ответе нет готового плана или чат занят.');
+          return { exitCode: 0, stdout: json ? JSON.stringify(result) : result.path };
+        }
         if (command === 'reset' || command === 'reset-dispatch') {
           await context(input.threadId);
           await bb.storage.kv.delete(`${command === 'reset' ? 'selection' : 'deliveries'}:${input.threadId}`);
+          if (command === 'reset') await bb.storage.kv.delete(`chat-plan:${input.threadId}`);
           cache.invalidate(key => !!watchers.get(key)?.has(input.threadId)); return { exitCode: 0, stdout: 'Состояние интерфейса сброшено; проект не изменён.' };
         }
         if (command === 'groups') {
@@ -815,6 +1075,8 @@ export default async function plugin(bb: BbPluginApi) {
     bb.rpc.experimental_invalidate([threadTag(thread.id), ...(thread.parentThreadId ? [threadTag(thread.parentThreadId)] : [])]);
   });
   bb.events.on('thread.idle', async ({ thread, lastAssistantText }) => {
+    try { await saveCompletedPlan(thread.id); }
+    catch { bb.log.warn('Could not save the completed plan; its response remains intact and the document view can retry.'); }
     const updating = await bb.storage.kv.get<{ key: string }>(`updating-versions:${thread.id}`);
     if (updating) {
       db.prepare('DELETE FROM local_versions WHERE key = ?').run(updating.key);
@@ -823,7 +1085,7 @@ export default async function plugin(bb: BbPluginApi) {
       bb.rpc.experimental_invalidate([threadTag(thread.id)]);
     }
     const reply = analyzeReply(lastAssistantText ?? '');
-    if (!enabled || !reply.gate || reply.error) return;
+    if (!enabled || !reply.gate || reply.error || reply.warning) return;
     // Only a live completion can establish a comparison baseline. Loading an
     // old report must never silently bind it to today's files.
     try {
@@ -854,8 +1116,13 @@ export default async function plugin(bb: BbPluginApi) {
   });
   bb.events.on('thread.deleted', async ({ thread }) => {
     historyEpochs.delete(thread.id);
+    threadEnvironments.delete(thread.id);
     for (const listeners of watchers.values()) listeners.delete(thread.id);
     await bb.storage.kv.delete(`selection:${thread.id}`); await bb.storage.kv.delete(`deliveries:${thread.id}`);
+    await bb.storage.kv.delete(`inline-card:${thread.id}`);
+    await bb.storage.kv.delete(`plan-document:${thread.id}`);
+    await bb.storage.kv.delete(`chat-plan:${thread.id}`);
+    await bb.storage.kv.delete(`session-brief:${thread.id}`);
     await bb.storage.kv.delete(`suggestions-dismissed:${thread.id}`);
     await bb.storage.kv.delete(`updating-versions:${thread.id}`); versionScopes.delete(thread.id);
   });

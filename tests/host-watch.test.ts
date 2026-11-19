@@ -127,3 +127,46 @@ test('an existing .ai-factory/ gets its own subscription so git-ignored plans st
   await harness.experimental_call('unwatch', { root });
   assert.deepEqual(calls.map(c => c.disposed), [1, 1], 'unwatch closes both subscriptions');
 });
+
+test('an existing .bb/aif-helper/ gets its own subscription so saved plans still signal', async t => {
+  const { mkdtemp, mkdir, rm } = await import('node:fs/promises');
+  const { tmpdir } = await import('node:os');
+  const path = await import('node:path');
+  const root = await mkdtemp(path.join(tmpdir(), 'aif-watch-bb-'));
+  await mkdir(path.join(root, '.bb', 'aif-helper'), { recursive: true });
+  const { harness, calls } = setup();
+  t.after(async () => { await harness.experimental_dispose(); await rm(root, { recursive: true, force: true }); });
+  await harness.experimental_call('watch', { root });
+  assert.equal(calls.length, 2);
+  assert.equal(calls[1]!.options.rootPath, path.join(root, '.bb', 'aif-helper'));
+  await calls[1]!.listener({ kind: 'changed', changes: [{ path: path.join(root, '.bb', 'aif-helper', 'plans', 'p.md'), type: 'update' }] });
+  assert.deepEqual(harness.experimental_getSignals(), [{ signal: 'filesChanged', payload: { root } }]);
+  await harness.experimental_call('unwatch', { root });
+  assert.deepEqual(calls.map(c => c.disposed), [1, 1], 'unwatch closes both subscriptions');
+});
+
+test('savePlan subscribes .bb/aif-helper once when it appears after watch', async t => {
+  const { mkdtemp, rm } = await import('node:fs/promises');
+  const { tmpdir } = await import('node:os');
+  const path = await import('node:path');
+  const { createHash } = await import('node:crypto');
+  const root = await mkdtemp(path.join(tmpdir(), 'aif-watch-late-'));
+  const { harness, calls } = setup();
+  t.after(async () => { await harness.experimental_dispose(); await rm(root, { recursive: true, force: true }); });
+  await harness.experimental_call('watch', { root });
+  assert.equal(calls.length, 1, 'no .bb/aif-helper subscription before the directory exists');
+  const save = async (seq: number) => {
+    const text = `# Plan ${seq}\n\n- [x] done\n`;
+    return harness.experimental_call('savePlan', { root, threadId: 'thr_test', seq,
+      hash: createHash('sha256').update(text).digest('hex'), text });
+  };
+  await save(0);
+  assert.equal(calls.length, 2, 'first savePlan adds the .bb/aif-helper subscription');
+  assert.equal(calls[1]!.options.rootPath, path.join(root, '.bb', 'aif-helper'));
+  await calls[1]!.listener({ kind: 'changed', changes: [{ path: path.join(root, '.bb', 'aif-helper', 'plans', 'plan-thr_test-0.md'), type: 'update' }] });
+  assert.deepEqual(harness.experimental_getSignals(), [{ signal: 'filesChanged', payload: { root } }]);
+  await save(1);
+  assert.equal(calls.length, 2, 'a repeated savePlan adds no second subscription');
+  await harness.experimental_call('unwatch', { root });
+  assert.deepEqual(calls.map(c => c.disposed), [1, 1], 'unwatch closes both subscriptions');
+});

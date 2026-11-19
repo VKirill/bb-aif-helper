@@ -14,11 +14,17 @@ test('upstream explore offers plan and direct bug fix; AIFHub does not offer fix
   assert(workflowActions(base).some(a => a.id === 'fix-new'));
   assert(!workflowActions({ ...base, profile: 'aifhub-openspec' }).some(a => /fix/.test(a.id)));
 });
-test('AIFHub plan routes through improve; upstream permits immediate implementation', () => {
-  assert(workflowActions(snapshot()).some(a => a.id === 'implement'));
-  const actions = workflowActions(snapshot({ profile: 'aifhub-classic' }));
-  assert.equal(actions[0].id, 'improve');
-  assert(!actions.some(a => a.id === 'implement'));
+test('unfinished plans always expose execution and repeatable improvement regardless of stale planning phase', () => {
+  for (const profile of ['upstream', 'aifhub-classic', 'aifhub-openspec', 'aifhub-ultra'] as const) {
+    for (const phase of ['unknown', 'explore', 'plan', 'improve', 'implement'] as const) {
+      const s = snapshot({ profile, phase });
+      const actions = workflowActions(s);
+      assert.equal(actions[0].id, 'implement');
+      assert.equal(actions.filter(a => a.id === 'improve').length, 1);
+      assert.equal(actions.find(a => a.id === 'improve')?.available, true);
+      assert.match(actionPrompt(s, actions[0]), /не подтверждает прохождение improve/);
+    }
+  }
 });
 
 test('uncommitted project files offer one scoped commit first even after archive or with ambiguous plans', () => {
@@ -56,7 +62,7 @@ test('partial progress resumes an unknown-stage plan without declaring an active
     assert(!contextSetupInDetails(s, 'update-factory'));
     assert(!contextSetupInDetails(s, 'update-extensions'));
     s.phase = 'plan';
-    assert.equal(workflowActions(s)[0].id, 'improve'); // explicit replanning owns the next step
+    assert.equal(workflowActions(s)[0].id, 'implement'); // planning phase must not hide the execution owner
     s.phase = 'fix';
     assert.equal(workflowActions(s)[0].id, 'verify');
   }
@@ -135,7 +141,7 @@ test('optional OpenSpec doctor is scoped, read-only and never offered for upstre
 test('prompts bind target and scope; Codex and slash runtimes use distinct prefixes', () => {
   const s = snapshot();
   assert.match(actionPrompt(s, workflowActions(s)[0]), /expectedFingerprint/);
-  assert.match(workflowActions({ ...s, runtime: 'claude' })[0].command, /^\/aif-improve/);
+  assert.match(workflowActions({ ...s, runtime: 'claude' })[0].command, /^\/aif-implement/);
 });
 test('update and setup are available without a selected plan and with ambiguous plans', () => {
   const s = snapshot({ target: null, candidates: [] });

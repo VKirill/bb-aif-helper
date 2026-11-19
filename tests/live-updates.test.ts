@@ -22,9 +22,10 @@ test('status tags are per-thread', () => {
 
 test('relevantChange matches paths the snapshot can read', () => {
   for (const p of ['.ai-factory/plans/x.md', '.ai-factory.json', '.github/workflows/ci.yml', 'docs/a.md', 'README.md', 'openspec/x/y.md',
+    '.bb/aif-helper/plans/a.md', '.bb-aif-helper/plans/a.md',
     'Makefile', 'Taskfile.yml', 'docs\\a.md', './docs/b.md'])
     assert.equal(relevantChange(p), true, p);
-  for (const p of ['src/x.ts', 'app.tsx', 'node_modules/x/README.md', '.git/HEAD', '.bb/state.json', 'dist/a.json', 'components/ui/b.tsx', 'README'])
+  for (const p of ['src/x.ts', 'app.tsx', 'node_modules/x/README.md', '.git/HEAD', '.bb/state.json', '.bb/chats/x.md', 'dist/a.json', 'components/ui/b.tsx', 'README'])
     assert.equal(relevantChange(p), false, p);
 });
 

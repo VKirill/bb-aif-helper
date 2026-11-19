@@ -9,14 +9,15 @@ export const CHIP_SCORING_TAG = 'chip-scoring';
 export const WATCH_IGNORED = ['node_modules', '.git', 'dist', 'build', '.next', 'coverage', '.bb'];
 
 // A change is relevant when it can alter what the snapshot reads: dot entries
-// at the root (.ai-factory/, .github/, .ai-factory.json), root docs with a
-// doc/config extension or a build-file name, and everything under docs/ and
-// openspec/. Source files are not relevant.
+// at the root (.ai-factory/, .github/, .ai-factory.json), basic plans under
+// .bb/aif-helper/, root docs with a doc/config extension or a build-file name,
+// and everything under docs/ and openspec/. Source files are not relevant.
 export function relevantChange(input: string): boolean {
   const p = input.replace(/\\/g, '/').replace(/^(\.\/)+/, '');
   if (!p || p === '..' || p.startsWith('../')) return false;
   const first = p.split('/')[0]!;
   if (p.startsWith('docs/') || p.startsWith('openspec/')) return true;
+  if (p.startsWith('.bb/aif-helper/')) return true;
   if (first.startsWith('.') && !WATCH_IGNORED.includes(first)) return true;
   if (p.includes('/')) return false;
   const name = p.toLowerCase();

@@ -2,7 +2,7 @@
 
 - Open the persistent AI Factory panel from the thread header to choose a plan, see completed tasks and launch the next step.
 - Follow AI Factory or AIFHub classic, OpenSpec and legacy ultra workflows with separate task progress and check results.
-- Without a project installation, use the bundled research → Markdown plan → implementation → verification → commit flow. Install AI Factory through a separate button when you want its full workflow.
+- Without a project installation, use the bundled research → native BB Plan → implementation → verification → commit flow. Install AI Factory through a separate button when you want its full workflow.
 - Run rules, security, review, QA, quality and CI actions beside their check rows. Optional navigation preserves project-required gates.
 - Launch commands suggested in the last agent reply. Both `$aif…` and `/aif…` are recognized, the fixed `aif-mode sync` subcommand is retained, and each suggestion can be dismissed independently.
 - Inspect CLI, project, Git and extension versions. Matching versions move update buttons into the version details; version probes use a daily cache.
@@ -13,7 +13,7 @@ Opening a panel reads status. Each action sends one scoped request to the agent 
 
 Gate results show PASS, WARN or FAIL, blockers and the suggested next action. Historical results and report files remain distinct from current verification. The helper does not manufacture evidence, mark tasks complete or run the next stage automatically.
 
-Basic plans live in `.bb-aif-helper/plans/`. Installation reuses an existing CLI where available and preserves these files; it does not automatically migrate plans or add extensions.
+Without AI Factory, planning uses native BB Plan mode. Completed plans render as styled Markdown documents and are saved under `.bb/aif-helper/plans/`; their workflow form appears after the document and successful saving. Interrupted drafts do not save, and retries preserve task edits. Legacy `.bb-aif-helper/plans/` remains readable. Installation reuses an existing CLI where available and preserves these files; it does not automatically migrate plans or add extensions.
 
 ## Requirements
 

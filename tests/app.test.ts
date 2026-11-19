@@ -5,17 +5,94 @@ import { JSDOM } from 'jsdom';
 import { snapshot } from './fixtures.ts';
 import { workflowActions } from '../workflow.ts';
 import { lockUnchangedChecks } from '../check-actions.ts';
+import { parseReplyGate } from '../gate.ts';
+import { rpcContract } from '../contract.ts';
 
 const dom = new JSDOM('<!doctype html><html><body></body></html>', { url: 'http://localhost/' });
 for (const key of ['window', 'document', 'navigator', 'HTMLElement', 'Element', 'Node', 'MutationObserver', 'getComputedStyle']) Object.defineProperty(globalThis, key, { configurable: true, value: (dom.window as any)[key] });
 (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
 registerHooks({ load(url, context, next) { return url.endsWith('.css') ? { format: 'module', source: '', shortCircuit: true } : next(url, context); } });
-const { loadPluginApp, renderSlot } = await import('@get-bb/plugin-sdk/testing/app');
+const { loadPluginApp, renderSlot: baseRenderSlot } = await import('@get-bb/plugin-sdk/testing/app');
+const renderSlot: typeof baseRenderSlot = (registration, props, options) => baseRenderSlot(registration, props, {
+  ...options, experimental_rpcContract: rpcContract, rpc: { cardVisibility: () => ({ state: 'current' }), ...options?.rpc },
+});
 const { experimental_makePanelController } = await import('@get-bb/plugin-sdk/testing');
-const { fireEvent, waitFor, within } = await import('@testing-library/react');
+const { fireEvent, waitFor, act, within } = await import('@testing-library/react');
+const { createElement, useState } = await import('react');
 const app = await loadPluginApp(() => import('../app.tsx'));
-const props = { attributes: { phase: 'plan' }, source: '::aif-chat{phase="plan"}', message: { id: 'msg_1', threadId: 'thr_test', turnId: 'turn_1', projectId: 'proj_test' }, openWorkspaceFile: null };
+const cardId = '11111111-1111-4111-8111-111111111111';
+const props = { attributes: { phase: 'plan', card: cardId }, source: `::aif-chat{phase="plan" card="${cardId}"}`, message: { id: 'msg_1', threadId: 'thr_test', turnId: 'turn_1', projectId: 'proj_test' }, openWorkspaceFile: null };
 function data() { const s = snapshot(); s.actions = workflowActions(s); return s; }
+
+test('2.22 plan controls, skipped tasks and version-gated diagnostics remain explicit in the panel', { skip: 'Task 10' }, async () => {
+  const s = snapshot({ fixDefaults: { mode: 'plan', patch: false } });
+  s.versions.installed = '2.22.0'; s.versions.globalCli = '2.21.0';
+  s.target!.settings = { commitStrategy: 'incremental-at-end', methodology: 'tdd', tddGranularity: 'feature-based' };
+  s.target!.tasks = [{ id: '1', title: 'Docs', done: true, outcome: 'skipped' }];
+  s.checks = [{ id: 'worktree', label: 'Ресурсы worktree', state: 'unknown', detail: 'Статическая диагностика', path: null, required: false }];
+  s.actions = workflowActions(s);
+  const slot = renderSlot(app.threadContextCardSections[0], { threadId: 'thr_test' } as any, { rpc: { status: () => s } });
+  try {
+    assert.match((await slot.findByLabelText('Настройки плана')).textContent!, /incremental-at-end.*tdd.*feature-based/);
+    assert(slot.getByLabelText('Пропущена по плану'));
+    assert.equal((slot.getByRole('button', { name: 'Проверить ресурсы worktree · нужен CLI 2.22+', hidden: true }) as HTMLButtonElement).disabled, true);
+    assert.match(slot.getByText(/learning patch/).textContent!, /выключен/);
+  } finally { slot.lifecycle.unmount(); }
+});
+
+test('only the latest inline card stays mounted; superseded cards stop reading workflow status', { skip: 'Task 8' }, async () => {
+  const nextId = '22222222-2222-4222-8222-222222222222';
+  let latest = cardId; let oldReads = 0;
+  let reveal!: () => void;
+  const Directive = app.messageDirectives[0].component;
+  function History() {
+    const [fresh, setFresh] = useState(false); reveal = () => setFresh(true);
+    return createElement('div', null,
+      createElement('div', { 'data-testid': 'old' }, createElement(Directive, props)),
+      fresh && createElement('div', { 'data-testid': 'fresh' }, createElement(Directive, { ...props,
+        attributes: { ...props.attributes, card: nextId, phase: 'explore' }, message: { ...props.message, id: 'msg_2' } })));
+  }
+  const slot = renderSlot({ ...app.messageDirectives[0], component: History }, props, { rpc: {
+    cardVisibility: (input: any) => ({ state: input.cardId === latest ? 'current' : 'superseded' }),
+    status: (input: any) => { if (input.phase === 'plan') oldReads++; return data(); },
+  } });
+  try {
+    const old = within(slot.getByTestId('old'));
+    await old.findByRole('button', { name: 'Улучшить план' });
+    await act(async () => { latest = nextId; reveal(); });
+    const fresh = within(slot.getByTestId('fresh'));
+    await fresh.findByRole('button', { name: 'Улучшить план' });
+    await slot.behavior.experimental_invalidateRpc(['thread:thr_test']);
+    await waitFor(() => assert.equal(old.queryByLabelText('AI Factory workflow'), null));
+    const readsAfterHide = oldReads;
+    await slot.behavior.experimental_invalidateRpc(['thread:thr_test']);
+    assert.equal(oldReads, readsAfterHide);
+    assert(fresh.getByRole('button', { name: 'Улучшить план' }));
+  } finally { slot.lifecycle.unmount(); }
+});
+
+test('legacy cards without an identity render nothing and perform no workflow reads', { skip: 'Task 8' }, async () => {
+  let reads = 0;
+  const legacy = renderSlot(app.messageDirectives[0], { ...props, attributes: { phase: 'plan' } }, { rpc: {
+    status: () => { reads++; return data(); }, cardVisibility: () => { reads++; return { state: 'current' }; },
+  } });
+  try { assert.equal(legacy.queryByLabelText('AI Factory workflow'), null); assert.equal(reads, 0); }
+  finally { legacy.lifecycle.unmount(); }
+});
+
+test('unavailable visibility never exposes an old card and recovers on a later update', { skip: 'Task 8' }, async () => {
+  let failed = true; let reads = 0;
+  const slot = renderSlot(app.messageDirectives[0], props, { rpc: {
+    cardVisibility: () => { if (failed) throw new Error('unavailable'); return { state: 'current' }; },
+    status: () => { reads++; return data(); },
+  } });
+  try {
+    await waitFor(() => assert(slot.inspection.rpcCalls.some(c => c.method === 'cardVisibility')));
+    assert.equal(slot.queryByLabelText('AI Factory workflow'), null); assert.equal(reads, 0);
+    failed = false; await slot.behavior.experimental_invalidateRpc(['thread:thr_test']);
+    await slot.findByRole('button', { name: 'Улучшить план' });
+  } finally { slot.lifecycle.unmount(); }
+});
 
 test('matching updater buttons are inside version details, with extension versions in the short line', async () => {
   const s = snapshot({ skills: ['aif', 'aif-analyze'], extensions: [{ name: 'aifhub-extension', recordedVersion: '1.8.1', installedVersion: '1.8.1', source: 'local', state: 'present', contributions: [] }] });
@@ -45,20 +122,217 @@ test('configuration errors do not hide the installation update button', async ()
   } finally { slot.lifecycle.unmount(); }
 });
 
-test('without AI Factory the card shows a separate installer and usable bundled flow without automatic dispatch', async () => {
+test('without AI Factory the card shows a separate installer and usable bundled flow without automatic dispatch', { skip: 'Task 9' }, async () => {
   const s = snapshot({ configured: false, profile: 'none', target: null, candidates: [], skills: [], phase: 'unknown' });
   s.actions = workflowActions(s); let runs = 0;
   const slot = renderSlot(app.messageDirectives[0], props, { rpc: { status: () => s, run: (input: any) => {
-    assert.equal(input.actionId, 'basic-explore'); runs++; return { sent: true, message: 'Отправлено' };
+    assert.equal(input.actionId, 'basic-explore'); assert.equal(input.researchTask, 'Почему форма не принимает завтрашнюю дату?'); runs++; return { sent: true, message: 'Отправлено' };
   } } });
   try {
     const install = await slot.findByRole('button', { name: 'Установить AI Factory' }) as HTMLButtonElement;
     assert.equal(install.disabled, false); assert(install.closest('.aif-maintenance'));
-    assert.match(slot.getByLabelText('Базовый workflow').textContent!, /исследование → план → выполнение → проверка → коммит/);
+    assert.match(slot.getByLabelText('Базовый workflow').textContent!, /исследование → Plan BB → выполнение → проверка → коммит/);
     const explore = slot.getByRole('button', { name: 'Исследовать задачу' }) as HTMLButtonElement;
     assert.equal(explore.disabled, false); assert.equal(runs, 0);
     assert.equal(slot.queryByRole('button', { name: /Запустить aif/ }), null);
-    fireEvent.click(explore); await waitFor(() => assert.equal(runs, 1));
+    fireEvent.click(explore);
+    const field = await slot.findByRole('textbox', { name: 'Что исследовать?' });
+    assert.equal(runs, 0);
+    const start = slot.getByRole('button', { name: 'Начать исследование' }) as HTMLButtonElement;
+    assert.equal(start.disabled, true);
+    fireEvent.change(field, { target: { value: '  Почему форма не принимает завтрашнюю дату?  ' } });
+    fireEvent.click(start); fireEvent.click(start); await waitFor(() => assert.equal(runs, 1));
+    await waitFor(() => assert.equal(slot.queryByRole('form', { name: 'Описание исследования' }), null));
+  } finally { slot.lifecycle.unmount(); }
+});
+
+test('the document renders before its form and only a completed saved plan exposes workflow actions', { skip: 'Task 9' }, async () => {
+  const renderer = app.codeFenceRenderers.find(r => r.id === 'plan-document')!;
+  const code = '# Ready\n\n## Tasks\n- [ ] 1. Work';
+  const s = snapshot({ configured: false, profile: 'none', skills: [], target: {
+    path: '.bb/aif-helper/plans/saved.md', id: 'saved', title: 'Ready', kind: 'basic', tasks: [{ id: '1', title: 'Work', done: false }],
+  } }); s.actions = workflowActions(s);
+  let saves = 0;
+  const base = { code, language: 'aif-plan', status: 'streaming' as const, index: 0, message: props.message, Original: () => code };
+  const slot = renderSlot(renderer, base, { rpc: {
+    planDocument: () => { saves++; return { path: s.target!.path, seq: 20, hash: 'a'.repeat(64), environmentId: 'env_test' }; },
+    status: () => s,
+  } });
+  try {
+    assert(slot.getByLabelText('Документ плана'));
+    assert.equal(slot.queryByLabelText('Действия после плана'), null); assert.equal(saves, 0);
+    slot.rerender(createElement(renderer.component, { ...base, status: 'closed' }));
+    const controls = await slot.findByLabelText('Действия после плана');
+    const document = slot.getByLabelText('Документ плана');
+    assert(document.contains(controls)); assert.equal(saves, 1);
+    assert(slot.getByText('Открыть файл плана'));
+    await slot.findByRole('button', { name: 'Выполнить план' });
+  } finally { slot.lifecycle.unmount(); }
+  const interrupted = renderSlot(renderer, { ...base, status: 'unclosed' }, { rpc: { planDocument: () => { throw Error('must not save'); } } });
+  try { assert.equal(interrupted.queryByLabelText('Действия после плана'), null); assert(interrupted.getByText(/Неполный план/)); }
+  finally { interrupted.lifecycle.unmount(); }
+});
+
+test('a stale plan reference is released and research/planning buttons remain usable without AI Factory', { skip: 'Task 9' }, async () => {
+  const base = snapshot({ configured: false, profile: 'none', target: null, candidates: [], skills: [], phase: 'explore' });
+  base.actions = workflowActions(base);
+  const requests: any[] = [];
+  const deleted = '.bb/aif-helper/plans/deleted.md';
+  const slot = renderSlot(app.messageDirectives[0], { ...props, attributes: { ...props.attributes, target: deleted, phase: 'explore' } }, { rpc: {
+    status: (input: any) => { requests.push(input); return input.target ? { ...base, selectionReset: true } : base; },
+  } });
+  try {
+    await slot.findByRole('button', { name: 'Составить план' });
+    const research = slot.getByRole('button', { name: 'Исследовать задачу' }) as HTMLButtonElement;
+    assert.equal(research.disabled, false);
+    await waitFor(() => assert(requests.some(input => input.target === '' && input.newTask === true)));
+    fireEvent.click(research); await slot.findByRole('textbox', { name: 'Что исследовать?' });
+  } finally { slot.lifecycle.unmount(); }
+});
+
+test('the selector hides completed plans without requiring verification and restores them with a view-only toggle', { skip: 'Task 9' }, async () => {
+  const s = snapshot({ configured: false, profile: 'none', skills: [], candidates: [
+    { path: '.bb/aif-helper/plans/active.md', title: 'Active task', kind: 'basic', progress: { completed: 1, total: 3, verified: false } },
+    { path: '.bb/aif-helper/plans/done.md', title: 'Finished task', kind: 'basic', progress: { completed: 2, total: 2, verified: false } },
+  ], target: null }); s.actions = workflowActions(s); let sends = 0;
+  const slot = renderSlot(app.messageDirectives[0], props, { rpc: { status: () => s, run: () => { sends++; throw Error('must not dispatch'); } } });
+  try {
+    const select = await slot.findByRole('combobox', { name: 'Выбранный план или change' });
+    assert.match(select.textContent!, /Active task · выполнено 1 из 3/); assert(!select.textContent!.includes('Finished task'));
+    const toggle = slot.getByRole('checkbox', { name: 'Показать завершённые (1)' });
+    fireEvent.click(toggle);
+    assert.match(select.textContent!, /Finished task · выполнено 2 из 2/);
+    fireEvent.click(toggle); assert(!select.textContent!.includes('Finished task'));
+    assert.equal(sends, 0);
+  } finally { slot.lifecycle.unmount(); }
+});
+
+test('closed classic plans are hidden, restorable and distinct from checkbox-complete active plans', { skip: 'Task 9' }, async () => {
+  const s = snapshot({ profile: 'aifhub-classic', target: null, candidates: [
+    { path: '.ai-factory/plans/closed.md', title: 'Closed classic', kind: 'classic', closed: true, progress: { completed: 12, total: 12, verified: false } },
+    { path: '.ai-factory/plans/open.md', title: 'Still open classic', kind: 'classic', progress: { completed: 12, total: 12, verified: false } },
+  ] }); s.actions = workflowActions(s); let sends = 0;
+  const slot = renderSlot(app.messageDirectives[0], props, { rpc: { status: () => s, run: () => { sends++; throw Error('must not dispatch'); } } });
+  try {
+    const select = await slot.findByRole('combobox', { name: 'Выбранный план или change' });
+    assert(select.textContent!.includes('Still open classic')); assert(!select.textContent!.includes('Closed classic'));
+    const toggle = slot.getByRole('checkbox', { name: 'Показать завершённые (1)' });
+    fireEvent.click(toggle); assert.match(select.textContent!, /Closed classic · выполнено 12 из 12 · закрыт · classic/);
+    fireEvent.click(toggle); assert(!select.textContent!.includes('Closed classic')); assert.equal(sends, 0);
+  } finally { slot.lifecycle.unmount(); }
+});
+
+test('a proposed native plan shows an explicit execution button instead of asking to create another plan', { skip: 'Task 9' }, async () => {
+  const s = snapshot({ configured: false, profile: 'none', target: null, candidates: [], skills: [], phase: 'plan',
+    chatPlan: { seq: 20, hash: 'a'.repeat(64), title: 'Native proposal', accepted: false } });
+  s.actions = workflowActions(s); let runs = 0;
+  const slot = renderSlot(app.messageDirectives[0], props, { rpc: { status: () => s, run: (input: any) => {
+    assert.equal(input.actionId, 'basic-implement'); runs++; return { sent: true, message: 'Отправлено' };
+  } } });
+  try {
+    const execute = await slot.findByRole('button', { name: 'Выполнить предложенный план' });
+    assert(slot.getByLabelText('План из чата')); assert.equal(slot.queryByRole('progressbar'), null);
+    assert(slot.getByRole('button', { name: 'Уточнить план' })); assert.equal(slot.queryByRole('button', { name: 'Составить план' }), null);
+    assert.equal(runs, 0); fireEvent.click(execute); fireEvent.click(execute); await waitFor(() => assert.equal(runs, 1));
+  } finally { slot.lifecycle.unmount(); }
+});
+
+test('a completed plan keeps its actions and opens a separate new-task research form before resetting selection', { skip: 'Task 9' }, async () => {
+  const target = { path: '.bb/aif-helper/plans/finished.md', id: 'finished', title: 'Finished task', kind: 'basic' as const,
+    tasks: [{ id: '1', title: 'Done', done: true }] };
+  const s = snapshot({ configured: false, profile: 'none', target, candidates: [{ ...target }], skills: [], phase: 'done', worktree: { hasUncommitted: true } });
+  s.actions = workflowActions(s);
+  const next = snapshot({ ...s, target: null, phase: 'explore' }); next.actions = workflowActions(next);
+  let runs = 0;
+  const slot = renderSlot(app.messageDirectives[0], props, { rpc: { status: (input: any) => input.newTask ? next : s,
+    run: (input: any) => { assert.equal(input.actionId, 'basic-explore'); assert.equal(input.researchTask, 'Исследовать #16'); runs++;
+      return { sent: true, message: 'Отправлено', newTask: true }; } } });
+  try {
+    await slot.findByRole('button', { name: 'Исследовать новую задачу' });
+    assert(slot.getByRole('button', { name: 'Подготовить коммит' })); assert(slot.getByRole('button', { name: 'Проверить реализацию' }));
+    fireEvent.click(slot.getByRole('button', { name: 'Исследовать новую задачу' }));
+    await slot.findByRole('textbox', { name: 'Что исследовать?' }); assert.equal(runs, 0);
+    fireEvent.click(slot.getByRole('button', { name: 'Отмена' })); assert(slot.getByText('Finished task')); assert.equal(runs, 0);
+    fireEvent.click(slot.getByRole('button', { name: 'Исследовать новую задачу' }));
+    fireEvent.change(await slot.findByRole('textbox', { name: 'Что исследовать?' }), { target: { value: 'Исследовать #16' } });
+    fireEvent.click(slot.getByRole('button', { name: 'Начать исследование' }));
+    await waitFor(() => assert.equal(runs, 1));
+    await slot.findByRole('button', { name: 'Составить план' });
+    assert.equal(slot.queryByRole('progressbar'), null); assert.equal(slot.queryByRole('form', { name: 'Описание исследования' }), null);
+    assert.equal((slot.getByRole('combobox', { name: 'Выбранный план или change' }) as HTMLSelectElement).value, '');
+  } finally { slot.lifecycle.unmount(); }
+});
+
+test('research description can be cancelled and survives refresh and failed dispatch without sending an empty task', { skip: 'Task 9' }, async () => {
+  const s = snapshot({ configured: false, profile: 'none', target: null, candidates: [], skills: [] });
+  s.actions = workflowActions(s); let attempts = 0;
+  const slot = renderSlot(app.messageDirectives[0], props, { rpc: { status: () => s, run: () => { attempts++; throw new Error('Контекст изменился'); } } });
+  try {
+    fireEvent.click(await slot.findByRole('button', { name: 'Исследовать задачу' }));
+    const field = await slot.findByRole('textbox', { name: 'Что исследовать?' }) as HTMLTextAreaElement;
+    fireEvent.change(field, { target: { value: '   \n  ' } });
+    assert.equal((slot.getByRole('button', { name: 'Начать исследование' }) as HTMLButtonElement).disabled, true);
+    fireEvent.click(slot.getByRole('button', { name: 'Отмена' }));
+    assert.equal(slot.queryByRole('textbox'), null); assert.equal(attempts, 0);
+    fireEvent.click(slot.getByRole('button', { name: 'Исследовать задачу' }));
+    const draft = 'Исследовать #213\nПроверить ограничения дат.';
+    fireEvent.change(slot.getByRole('textbox'), { target: { value: draft } });
+    await slot.behavior.experimental_invalidateRpc(['thread:thr_test']);
+    assert.equal((slot.getByRole('textbox') as HTMLTextAreaElement).value, draft);
+    s.threadState = 'active'; await slot.behavior.experimental_invalidateRpc(['thread:thr_test']);
+    assert.equal((slot.getByRole('button', { name: 'Начать исследование' }) as HTMLButtonElement).disabled, true);
+    s.threadState = 'idle'; await slot.behavior.experimental_invalidateRpc(['thread:thr_test']);
+    fireEvent.click(slot.getByRole('button', { name: 'Начать исследование' }));
+    await waitFor(() => assert.equal(attempts, 1));
+    await slot.findByRole('alert');
+    await slot.behavior.experimental_invalidateRpc(['thread:thr_test']);
+    assert.match(slot.getByRole('alert').textContent!, /Контекст изменился/);
+    await waitFor(() => assert.equal((slot.getByRole('textbox') as HTMLTextAreaElement).value, draft));
+  } finally { slot.lifecycle.unmount(); }
+});
+
+test('a stale SessionBrief displays recovery next to a disabled execution button without dispatch on render', { skip: 'Task 10' }, async () => {
+  const s = snapshot({ profile: 'aifhub-openspec', phase: 'implement' }); s.target!.kind = 'openspec';
+  s.extensions = [{ name: 'aifhub-extension', installedVersion: '1.8.1', recordedVersion: '1.8.1', source: 'local', state: 'present', contributions: [], commands: ['aifhub-session-brief'] }];
+  s.sessionBrief = { target: s.target!.path, seq: 2, status: 'stale' }; s.actions = workflowActions(s);
+  let sends = 0;
+  const slot = renderSlot(app.messageDirectives[0], props, { rpc: { status: () => s, run: () => { sends++; return { sent: true, message: 'Отправлено' }; } } });
+  try {
+    assert.match((await slot.findByLabelText('Блокировка SessionBrief')).textContent!, /STALE.*из чата/);
+    assert.equal((slot.getByRole('button', { name: 'Продолжить выполнение · контекст неактуален' }) as HTMLButtonElement).disabled, true);
+    assert.equal((slot.getByRole('button', { name: 'Синхронизировать change' }) as HTMLButtonElement).disabled, false);
+    assert.equal((slot.getByRole('button', { name: 'Пересобрать SessionBrief' }) as HTMLButtonElement).disabled, false);
+    assert.equal(sends, 0);
+    s.sessionBrief = { ...s.sessionBrief!, seq: 4, status: 'valid' }; s.actions = workflowActions(s);
+    await slot.behavior.experimental_invalidateRpc(['thread:thr_test']);
+    await waitFor(() => assert.equal(slot.queryByLabelText('Блокировка SessionBrief'), null));
+    assert.equal((slot.getByRole('button', { name: 'Продолжить выполнение' }) as HTMLButtonElement).disabled, false);
+    assert.equal(slot.queryByRole('button', { name: 'Пересобрать SessionBrief' }), null);
+    assert.equal(sends, 0);
+  } finally { slot.lifecycle.unmount(); }
+});
+
+test('an OpenSpec plan with no checked tasks keeps execution and repeatable improvement side by side', async () => {
+  const s = snapshot({ profile: 'aifhub-openspec', phase: 'unknown', worktree: { hasUncommitted: true } });
+  s.target!.kind = 'openspec'; s.target!.id = '213-future-work-log-dates';
+  s.actions = workflowActions(s);
+  const requests: any[] = [];
+  const slot = renderSlot(app.messageDirectives[0], props, { rpc: { status: () => s,
+    run: input => { requests.push(input); return { sent: true, message: 'Отправлено' }; } } });
+  try {
+    const execute = await slot.findByRole('button', { name: 'Выполнить план' });
+    assert.equal((execute as HTMLButtonElement).disabled, false);
+    assert.equal(execute.parentElement!.parentElement, slot.getByRole('button', { name: 'Улучшить план' }).parentElement!.parentElement);
+    assert.equal(requests.length, 0);
+    fireEvent.click(slot.getByRole('button', { name: 'Улучшить план' }));
+    await waitFor(() => assert.equal(requests.length, 1));
+    s.phase = 'improve'; s.actions = workflowActions(s);
+    await slot.behavior.experimental_invalidateRpc(['thread:thr_test']);
+    await waitFor(() => assert.equal((slot.getByRole('button', { name: 'Улучшить план' }) as HTMLButtonElement).disabled, false));
+    fireEvent.click(slot.getByRole('button', { name: 'Выполнить план' }));
+    await waitFor(() => assert.equal(requests.length, 2));
+    assert.deepEqual(requests.map(r => r.actionId), ['improve', 'implement']);
+    assert(requests.every(r => r.target === s.target!.path));
   } finally { slot.lifecycle.unmount(); }
 });
 
@@ -75,7 +349,9 @@ test('a started plan shows resume while context setup is available only under it
     const details = setup.closest('details')!;
     assert(details.classList.contains('aif-context-setup')); assert.equal(details.open, false);
     assert(!setup.closest('.aif-maintenance'));
-    assert.match(slot.getByText(/Контекст задачи/).textContent!, /агент свободен/);
+    const stage = within(slot.getByRole('region', { name: 'Текущий этап' }));
+    assert(stage.getByText('Контекст задачи'));
+    assert.match(stage.getByText(/Контекст задачи/).textContent!, /агент свободен/);
     assert.equal(runs, 0);
     fireEvent.click(slot.getByText('Настройка контекста проекта'));
     assert.equal(details.open, true);
@@ -248,7 +524,7 @@ test('panel uses the BB provider/model picker and saves exactly its selection', 
   const saved: unknown[] = [];
   const view = (choice: unknown, research: unknown = { mode: 'self' }) => ({ choice, research, research2: { mode: 'self' }, research3: { mode: 'self' }, configured: true, foreign: null, error: null, providers: [{ id: 'codex', name: 'Codex' }],
     defaults: null, appliedDefaults: null,
-    children: [{ id: 'thr_child', title: 'Задача 1', status: 'active', providerId: 'codex', updatedAt: '2026-11-17T00:00:00Z', execution: null, fallback: null, mismatch: null }] });
+    children: [{ id: 'thr_child', title: 'Задача 1', status: 'active', providerId: 'codex', updatedAt: '2026-11-17T00:00:00Z', worktree: false, execution: null, fallback: null, mismatch: null }] });
   const slot = renderSlot(tab as any, { threadId: 'thr_panel', environment: { id: 'env_panel' } }, { rpc: {
     status: () => data(),
     delegation: () => view({ mode: 'self' }),
@@ -329,12 +605,38 @@ test('dirty files show commit without an active plan and busy state disables it 
     } finally { slot.lifecycle.unmount(); }
   }
 });
-test('busy thread shows waiting state and disables action buttons', async () => {
+test('persistent panel keeps native questions visible and disables action buttons', { skip: 'Task 8' }, async () => {
   const s = data(); s.threadState = 'awaiting_input'; s.pendingQuestions = 2;
-  const slot = renderSlot(app.messageDirectives[0], props, { rpc: { status: () => s } });
+  const slot = renderSlot(app.threadContextCardSections[0], { threadId: 'thr_test' } as any, { rpc: { status: () => s } });
   try {
     await slot.findByText(/ожидаю ответы: 2/);
     assert.equal((slot.getByRole('button', { name: 'Улучшить план' }) as HTMLButtonElement).disabled, true);
+  } finally { slot.lifecycle.unmount(); }
+});
+
+test('transcript cards hide while confirmation or native answers are pending and return after a reply', { skip: 'Task 8' }, async () => {
+  let s = data();
+  const slot = renderSlot(app.messageDirectives[0], props, { rpc: { status: () => s } });
+  try {
+    await slot.findByRole('button', { name: 'Улучшить план' });
+    s.pendingConfirmation = true; await slot.behavior.experimental_invalidateRpc(['thread:thr_test']);
+    await waitFor(() => assert.equal(slot.queryByLabelText('AI Factory workflow'), null));
+    s = data(); await slot.behavior.experimental_invalidateRpc(['thread:thr_test']);
+    await slot.findByRole('button', { name: 'Улучшить план' });
+    s.pendingQuestions = 1; await slot.behavior.experimental_invalidateRpc(['thread:thr_test']);
+    await waitFor(() => assert.equal(slot.queryByLabelText('AI Factory workflow'), null));
+    assert.equal(slot.inspection.rpcCalls.filter(c => c.method === 'run').length, 0);
+  } finally { slot.lifecycle.unmount(); }
+});
+
+test('persistent panel names a prose confirmation and prevents navigation without hiding progress', { skip: 'Task 8' }, async () => {
+  const s = data(); s.pendingConfirmation = true;
+  const slot = renderSlot(app.threadContextCardSections[0], { threadId: 'thr_test' } as any, { rpc: { status: () => s } });
+  try {
+    await slot.findByText(/ожидается подтверждение пользователя/);
+    await slot.findByText('0/1 задач');
+    assert.equal((slot.getByRole('button', { name: 'Улучшить план' }) as HTMLButtonElement).disabled, true);
+    assert(slot.getByText(/действия доступны после ответа пользователя/));
   } finally { slot.lifecycle.unmount(); }
 });
 test('metadata failure removes stale actions instead of keeping executable old snapshot', async () => {
@@ -366,6 +668,24 @@ test('AIFHub context button is analyze and obeys busy-state disabling', async ()
 
 function suggestedData() { return { sourceKey: 'c'.repeat(64), fingerprint: 'a'.repeat(64), threadState: 'idle', items: ['aif-architecture', 'aif-roadmap'].map(id => ({ id, command: `$${id}`, available: true, reason: 'Из последнего ответа' })) }; }
 const banner = app.composerCustomizations.find(c => c.id === 'suggested-commands')!.banners![0];
+
+test('apply-all can answer an improve confirmation while ordinary navigation stays disabled and draft remains intact', { skip: 'Task 11' }, async () => {
+  let dismissed = false; let sends = 0;
+  const proposal = { id: 'apply-improvements', label: 'Применить всё', kind: 'improve-approval', command: 'Применить предложенные улучшения плана demo.', available: true, reason: 'Только предложенный diff' };
+  const slot = renderSlot(banner, {}, { composer: { scope: { kind: 'thread', threadId: 'thr_test' }, text: 'Мой черновик' }, rpc: {
+    suggestions: () => ({ ...suggestedData(), threadState: 'awaiting_input', items: [...(dismissed ? [] : [proposal]), suggestedData().items[0]] }),
+    runSuggestion: (input: any) => { assert.equal(input.commandId, 'apply-improvements'); sends++; dismissed = true; return { sent: true, message: 'Подтверждение отправлено' }; },
+  } });
+  try {
+    const apply = await slot.findByRole('button', { name: 'Применить всё' });
+    assert.equal((apply as HTMLButtonElement).disabled, false);
+    assert.equal((slot.getByRole('button', { name: '$aif-architecture' }) as HTMLButtonElement).disabled, true);
+    assert.equal(sends, 0); fireEvent.click(apply); fireEvent.click(apply);
+    await waitFor(() => assert.equal(sends, 1));
+    await waitFor(() => assert.equal(slot.queryByRole('button', { name: 'Применить всё' }), null));
+    assert.equal(slot.inspection.composer.text, 'Мой черновик');
+  } finally { slot.lifecycle.unmount(); }
+});
 
 test('PASS with a null command renders without an error and labels its reason as explanation', async () => {
   const gate = { schema_version: 1, gate: 'rules', status: 'pass', blocking: false, blockers: [], affected_files: [],
@@ -496,6 +816,74 @@ test('suggestion banner follows composer scope and rejects an old thread respons
     await slot.behavior.setComposerScope({ kind: 'new-thread', projectId: 'proj_test' });
     assert.equal(slot.queryByRole('button', { name: '$aif-plan' }), null);
   } finally { slot.lifecycle.unmount(); }
+});
+
+test('string blocker gates render valid collapsed JSON and show both blocking findings above the composer', async () => {
+  const code = JSON.stringify({ schema_version: 1, gate: 'review', status: 'fail', blocking: true,
+    blockers: ['R1: Worker drops read_only restrictions.', 'R2: Deleted review target is accepted.'],
+    affected_files: ['worker/src/api/OrkoraApiClient.ts'], suggested_next: { command: '$aif-fix', reason: 'Fix R1 and R2.' } });
+  const renderer = app.codeFenceRenderers.find(item => item.id === 'gate-data')!;
+  const document = renderSlot(renderer, { code, language: 'aif-gate-result', status: 'closed', index: 0, message: props.message, Original: () => code });
+  try {
+    assert(document.getByText('Данные gate · review · FAIL'));
+    assert.equal(document.queryByRole('alert'), null);
+  } finally { document.lifecycle.unmount(); }
+  const parsed = parseReplyGate('```aif-gate-result\n' + code + '\n```');
+  const slot = renderSlot(banner, {}, { composer: { scope: { kind: 'thread', threadId: 'thr_test' } }, rpc: {
+    suggestions: () => ({ ...suggestedData(), gate: parsed.gate, gateError: parsed.error,
+      items: [{ id: 'aif-fix', command: '$aif-fix', available: true, reason: 'Fix R1 and R2.' }] }),
+  } });
+  try {
+    await slot.findByText('review · FAIL в ответе');
+    assert(slot.getByText('Worker drops read_only restrictions.')); assert(slot.getByText('Deleted review target is accepted.'));
+    assert(slot.getByText('Блокирующие проблемы · 2')); assert(slot.getByText('Блокирует следующий этап'));
+    assert.equal((slot.getByRole('button', { name: '$aif-fix' }) as HTMLButtonElement).disabled, false);
+    assert.equal(slot.queryByRole('alert'), null);
+  } finally { slot.lifecycle.unmount(); }
+});
+
+test('disabled suggestions show the missing skill visibly on mobile while sync remains clickable', { skip: 'Task 11' }, async () => {
+  const reason = 'Команда aif-commit не установлена для codex. Добавьте этот skill в установку AI Factory проекта.';
+  let sends = 0;
+  const slot = renderSlot(banner, {}, { composer: { scope: { kind: 'thread', threadId: 'thr_test' } }, rpc: {
+    suggestions: () => ({ ...suggestedData(), items: [
+      { id: 'aif-mode', command: '$aif-mode sync', available: true, reason: 'Из ответа агента' },
+      { id: 'aif-commit', command: '$aif-commit', available: false, reason },
+    ] }),
+    runSuggestion: (input: any) => { assert.equal(input.commandId, 'aif-mode'); sends++; return { sent: true, message: 'Отправлено' }; },
+  } });
+  try {
+    const sync = await slot.findByRole('button', { name: '$aif-mode sync' });
+    assert.equal((sync as HTMLButtonElement).disabled, false);
+    assert.equal((slot.getByRole('button', { name: '$aif-commit' }) as HTMLButtonElement).disabled, true);
+    assert.equal(slot.getByRole('note').textContent, reason); assert.equal(sends, 0);
+    fireEvent.click(sync); await waitFor(() => assert.equal(sends, 1));
+  } finally { slot.lifecycle.unmount(); }
+});
+
+test('a valid FAIL with trailing summary shows a format note, both blockers and fix without an invalid-gate alert', { skip: 'Task 11' }, async () => {
+  const gate = { schema_version: 1, gate: 'review', status: 'fail', blocking: true,
+    blockers: [{ id: 'windows-project-path-prefix', severity: 'error', summary: 'Windows paths do not match.' },
+      { id: 'worker-failure-aborts-run-burns-attempts', severity: 'error', summary: 'Sibling attempts are consumed.' }],
+    affected_files: ['src/core/swarm/runtime.ts'], suggested_next: { command: '$aif-fix', reason: 'Fix findings.' } };
+  const parsed = parseReplyGate('```aif-gate-result\n' + JSON.stringify(gate) + '\n```\nИтог: обе находки блокирующие.');
+  const slot = renderSlot(banner, {}, { composer: { scope: { kind: 'thread', threadId: 'thr_test' } }, rpc: {
+    suggestions: () => ({ ...suggestedData(), gate: parsed.gate, gateError: parsed.error, gateWarning: parsed.warning,
+      items: [{ id: 'aif-fix', command: '$aif-fix', available: true, reason: 'Fix findings.' }] }),
+  } });
+  try {
+    await slot.findByText('review · FAIL в ответе');
+    assert(slot.getByText('Windows paths do not match.')); assert(slot.getByText('Sibling attempts are consumed.'));
+    assert.match(slot.getByRole('note').textContent!, /^Формат ответа: После gate/);
+    assert.equal(slot.queryByRole('alert'), null);
+    assert.equal((slot.getByRole('button', { name: '$aif-fix' }) as HTMLButtonElement).disabled, false);
+  } finally { slot.lifecycle.unmount(); }
+  const pass = renderSlot(banner, {}, { composer: { scope: { kind: 'thread', threadId: 'thr_test' } }, rpc: {
+    suggestions: () => ({ ...suggestedData(), gate: { ...gate, status: 'pass', blocking: false, blockers: [], suggested_next: null },
+      gateError: null, gateWarning: parsed.warning, items: [] }),
+  } });
+  try { await pass.findByText('Переход не подтверждён'); assert.equal(pass.queryByText('Не блокирует'), null); }
+  finally { pass.lifecycle.unmount(); }
 });
 
 test('gate problems remain visible even with no suggested command', async () => {
@@ -657,7 +1045,7 @@ test('a message card has no navigation/settings switcher', async () => {
 test('«В работе» lists child threads on navigation and hides when there are none', async () => {
   const tab = app.tabs.find(t => t.id === 'workflow')!;
   const s = data();
-  const child = { id: 'thr_child', title: 'Задача 1', status: 'active', providerId: 'codex', updatedAt: '2026-11-17T00:00:00Z', execution: null, fallback: null, mismatch: null };
+  const child = { id: 'thr_child', title: 'Задача 1', status: 'active', providerId: 'codex', updatedAt: '2026-11-17T00:00:00Z', worktree: false, execution: null, fallback: null, mismatch: null };
   const busy = renderSlot(tab as any, { threadId: 'thr_working', environment: { id: 'env_working' } }, { rpc: { status: () => s, delegation: () => delegView({ children: [child] }) } });
   try {
     await busy.findByText('Задача 1');

@@ -7,7 +7,9 @@ import { parseDocument } from 'yaml';
 import { snapshotSchema, type HostInput, type Snapshot } from './model.ts';
 import { workflowActions } from './workflow.ts';
 import { BUILD_FILES, DOCKER_FILES, readinessSteps, type ReadinessFacts } from './readiness.ts';
-import { BASIC_PLAN_ROOT, usesBasicWorkflow } from './basic-workflow.ts';
+import { BASIC_PLAN_ROOTS, usesBasicWorkflow, isCompletedPlan } from './basic-workflow.ts';
+import { planVerification } from './plan-verification.ts';
+import { planSettings, supportsAif222 } from './aif222.ts';
 
 const exec = promisify(execFile);
 const MAX_FILE = 1024 * 1024;
@@ -30,28 +32,48 @@ export function parseYaml(text: string): Record<string, any> {
   return obj(value);
 }
 export function taskList(text: string): NonNullable<Snapshot['target']>['tasks'] {
-  let fenced = false;
+  let fence = '';
   let comment = false;
   const tasks: NonNullable<Snapshot['target']>['tasks'] = [];
   let index = 0;
+  let commitNext = false;
   // Frontmatter, comments, code samples and deeply-indented examples are not progress.
   const lines = text.replace(/^---\r?\n[\s\S]*?\r?\n---(?:\r?\n|$)/, '').split(/\r?\n/);
   const section = lines.findIndex(v => /^#{1,6}\s+(?:Tasks|Task List|Implementation Tasks|Задачи|План выполнения)\s*$/i.test(v));
   const sectionLevel = section >= 0 ? lines[section].match(/^#+/)![0].length : 0;
   let listActive = false;
   for (let line = section >= 0 ? section + 1 : 0; line < lines.length; line++) {
-    const raw = lines[line];
-    if (raw.includes('<!--')) comment = true;
-    if (comment) { if (raw.includes('-->')) comment = false; continue; }
-    if (/^\s{0,3}(```|~~~)/.test(raw)) { fenced = !fenced; continue; }
-    if (fenced) continue;
+    const original = lines[line];
+    const marker = !comment ? original.match(/^ {0,3}(`{3,}|~{3,})/) : null;
+    if (marker) {
+      if (!fence) fence = marker[1];
+      else if (marker[1][0] === fence[0] && marker[1].length >= fence.length && !original.slice(marker[0].length).trim()) fence = '';
+      commitNext = false; continue;
+    }
+    if (fence) continue;
+    if (!comment && /^<!-- aif:task-kind:commit -->\s*$/.test(original)) { commitNext = true; continue; }
+    const isCommit = commitNext; commitNext = false;
+    let rest = original; let raw = '';
+    while (rest) {
+      if (comment) {
+        const end = rest.indexOf('-->');
+        if (end < 0) break;
+        comment = false; rest = rest.slice(end + 3);
+      } else {
+        const start = rest.indexOf('<!--');
+        if (start < 0) { raw += rest; break; }
+        raw += rest.slice(0, start); rest = rest.slice(start + 4); comment = true;
+      }
+    }
     if (sectionLevel && new RegExp(`^#{1,${sectionLevel}}\\s`).test(raw)) break;
     const m = raw.match(/^( *)[-*+] \[([ xX])\]\s+(.+)$/);
     if (m) {
       if (m[1].length >= 4 && !listActive) continue;
       listActive = true;
       const title = m[3].trim().slice(0, 500);
-      tasks.push({ id: title.match(/^(?:Task\s+)?(\d+(?:\.\d+)*)\b/i)?.[1] ?? `task-${++index}`, title, done: m[2].toLowerCase() === 'x' });
+      const skipped = m[2].toLowerCase() === 'x' && /<!-- aif:(?:task-outcome:skipped|commit-outcome:skipped-no-op)(?:\s|-->)/.test(original);
+      tasks.push({ id: title.match(/^(?:Task\s+)?(\d+(?:\.\d+)*)\b/i)?.[1] ?? `task-${++index}`, title, done: m[2].toLowerCase() === 'x',
+        ...(isCommit ? { kind: 'commit' as const } : {}), ...(skipped ? { outcome: 'skipped' as const } : {}) });
     } else if (/^\S/.test(raw)) listActive = false;
   }
   if (tasks.length > 300) throw new Error('Более 300 задач: выберите меньший scope.');
@@ -96,6 +118,33 @@ class Reader {
   async json(rel: string): Promise<Record<string, any> | null> {
     const text = await this.read(rel);
     return text === null ? null : obj(JSON.parse(text));
+  }
+  async artifact(rel: string): Promise<boolean | null> {
+    const directory = rel.endsWith('/');
+    try {
+      if (directory) return (await this.list(rel.slice(0, -1))).some(entry => !entry.name.startsWith('.'));
+      const stat = await fs.stat(await this.resolve(rel));
+      return stat.isFile() && stat.size > 0;
+    } catch (error) {
+      return (error as NodeJS.ErrnoException).code === 'ENOENT' ? false : null;
+    }
+  }
+  async skill(rel: string, meta: Record<string, any>): Promise<string | null> {
+    const directory = path.posix.dirname(safeRelative(rel));
+    const parent = await this.resolve(path.posix.dirname(directory));
+    const link = path.join(parent, path.posix.basename(directory));
+    let stat;
+    try { stat = await fs.lstat(link); } catch (e: any) { if (e.code !== 'ENOENT') throw e; }
+    if (!stat?.isSymbolicLink()) return this.read(rel);
+    const destination = `.agents/skills/${path.posix.basename(directory)}`;
+    if (meta.useSymlinks !== true || obj(obj(meta.skillSymlinks).links)[directory] !== destination
+      || !/^[a-f0-9]{64}$/i.test(obj(obj(meta.skillSymlinks).shared)[destination] ?? '')) throw new Error('Незарегистрированная ссылка skill.');
+    const canonical = await this.resolve(destination);
+    if (await fs.realpath(link) !== canonical) throw new Error('Ссылка skill не совпадает с общей установкой.');
+    // Read the validated physical destination, never traverse an arbitrary link.
+    const text = await this.read(`${destination}/SKILL.md`);
+    this.seen.set(rel, hash(JSON.stringify([await fs.readlink(link), destination])));
+    return text;
   }
   async list(rel: string): Promise<{ name: string; directory: boolean }[]> {
     try {
@@ -191,7 +240,7 @@ export async function collectSnapshot(input: HostInput, signal?: AbortSignal): P
     schemaVersion: 'aif-chat/v1', collectedAt: new Date().toISOString(), fingerprint: '', inputsFingerprint: null, root, runtime: input.runtime, configured: false,
     profile: 'none', phase: input.phase, phaseSource: input.phase === 'unknown' ? 'Этап не указан; состояние файлов не доказывает активный вызов' : 'Этап указан агентом в карточке; выполнение проверяется BB',
     threadState: 'unknown', worktree: { hasUncommitted: null },
-    pendingQuestions: null,
+    pendingQuestions: null, pendingConfirmation: null,
     versions: { globalCli: null, globalSource: null, installed: null, sourceVersion: null, sourceWorktreeVersion: null, sourceSha: null, sourceDirty: null },
     upstream: { version: null, sha: null, ref: null, checkedAt: null, error: null },
     extensions: [], skills: [], candidates: [], target: null, checks: [], actions: [], readiness: [], diagnostics: [],
@@ -219,6 +268,14 @@ export async function collectSnapshot(input: HostInput, signal?: AbortSignal): P
     if (!s.configured) s.diagnostics.push('В рабочей папке нет проектной установки .ai-factory.json.');
   } catch { s.profile = 'invalid'; s.diagnostics.push('Не удалось разобрать конфигурацию проекта. Действия отключены.'); }
   const installs = Array.isArray(meta.agents) ? meta.agents : meta.agent ? [{ id: meta.agent, skillsDir: meta.skillsDir, installedSkills: meta.installedSkills }] : [];
+  if (supportsAif222(s.versions.installed)) {
+    const workflow = obj(config.workflow);
+    const mode = ['ask', 'now', 'plan'].includes(workflow.fix_mode) ? workflow.fix_mode : 'ask';
+    const patch = typeof workflow.fix_patch === 'boolean' ? workflow.fix_patch : true;
+    s.fixDefaults = { mode, patch };
+    if ('fix_mode' in workflow && mode !== workflow.fix_mode) s.diagnostics.push('workflow.fix_mode некорректен; AI Factory использует ask.');
+    if ('fix_patch' in workflow && typeof workflow.fix_patch !== 'boolean') s.diagnostics.push('workflow.fix_patch должен быть boolean; AI Factory использует true.');
+  }
   let agent = installs.find((v: any) => v.id === input.runtime);
   // AI Factory can register the shared .agents/skills target as codex or universal,
   // while BB exposes the same Codex installation as codex-app. Prefer exact IDs;
@@ -237,7 +294,7 @@ export async function collectSnapshot(input: HostInput, signal?: AbortSignal): P
   if (agent && str(agent.skillsDir)) {
     for (const skill of requestedSkills.slice(0, 80)) {
       if (!/^[a-z0-9-]+$/.test(skill)) continue;
-      try { if (await read.read(`${safeRelative(agent.skillsDir)}/${skill}/SKILL.md`)) s.skills.push(skill); }
+      try { if (await read.skill(`${safeRelative(agent.skillsDir)}/${skill}/SKILL.md`, meta)) s.skills.push(skill); }
       catch { s.diagnostics.push(`Skill ${skill}: путь недоступен, ссылка или файл слишком велик.`); }
     }
   }
@@ -254,7 +311,16 @@ export async function collectSnapshot(input: HostInput, signal?: AbortSignal): P
       else if (installed.version !== entry.version) state = 'version_mismatch';
     } catch { state = 'invalid'; }
     const contributions: string[] = Array.isArray(installed?.injections) ? installed.injections.map((v: any) => str(v.target)).filter((v: string | null): v is string => v !== null) : [];
-    s.extensions.push({ name, recordedVersion: str(entry.version), installedVersion: str(installed?.version), source: sourceLabel(entry.source), state, contributions });
+    const commands: string[] = [];
+    for (const declaration of (Array.isArray(installed?.commands) ? installed.commands.slice(0, 80) : [])) {
+      const command = obj(declaration);
+      if (!str(command.name) || command.name.length > 100 || !/^[a-z0-9-]+$/.test(command.name) || !str(command.module)) continue;
+      try {
+        if (await read.read(`.ai-factory/extensions/${name}/${safeRelative(command.module.replace(/^\.\//, ''))}`)) commands.push(command.name);
+        else s.diagnostics.push(`Расширение ${name}: файл команды ${command.name} не найден.`);
+      } catch { s.diagnostics.push(`Расширение ${name}: файл команды ${command.name} недоступен.`); }
+    }
+    s.extensions.push({ name, recordedVersion: str(entry.version), installedVersion: str(installed?.version), source: sourceLabel(entry.source), state, contributions, commands });
     if (name === 'aifhub-extension' && state === 'present') hub = true;
     // Custom extension skills are installed independently of the base installedSkills list.
     if (state === 'present' && agent && str(agent.skillsDir) && Array.isArray(installed?.skills)) {
@@ -263,7 +329,7 @@ export async function collectSnapshot(input: HostInput, signal?: AbortSignal): P
         try {
           const skill = path.posix.basename(safeRelative(declared));
           if (!/^[a-z0-9-]+$/.test(skill) || s.skills.includes(skill) || installed.replaces?.[declared]) continue;
-          if (await read.read(`${safeRelative(agent.skillsDir)}/${skill}/SKILL.md`)) s.skills.push(skill);
+          if (await read.skill(`${safeRelative(agent.skillsDir)}/${skill}/SKILL.md`, meta)) s.skills.push(skill);
         } catch { s.diagnostics.push(`Расширение ${name}: путь custom skill недоступен.`); }
       }
     }
@@ -280,8 +346,10 @@ export async function collectSnapshot(input: HostInput, signal?: AbortSignal): P
   const native = hub && (Object.keys(tools).length ? tools.openspec === true : aifhub.artifactProtocol === 'openspec-native');
   if (native && s.profile !== 'invalid') s.profile = 'aifhub-openspec';
   const paths = obj(config.paths);
-  // Directory paths in config.yaml usually end with `/`; strip it so joined paths match candidate paths.
-  const dir = (v: unknown, fallback: string) => (str(v) ?? fallback).replace(/(?<=[^/])\/+$/, '');
+  // Directory paths in config.yaml usually end with `/`; normalize separators and strip
+  // trailing slashes so joined paths match candidate paths. Reader still validates traversal and links.
+  const directory = (value: string) => value.replaceAll('\\', '/').replace(/\/+$/, '');
+  const dir = (v: unknown, fallback: string) => directory(str(v) ?? fallback);
   const planRoot = dir(paths.plans, '.ai-factory/plans');
   const qaRoot = dir(paths.qa, '.ai-factory/qa');
   const openRoot = dir(obj(aifhub.openspec).root, 'openspec');
@@ -292,9 +360,9 @@ export async function collectSnapshot(input: HostInput, signal?: AbortSignal): P
     catch { files[rel] = false; s.diagnostics.push(`Подготовка проекта: ${rel} недоступен.`); }
   };
   const probeDir = async (rel: string, keep?: (item: { name: string; directory: boolean }) => boolean) => {
-    const dir = rel.replace(/\/+$/, '');
-    try { for (const item of await read.list(dir)) if (!keep || keep(item)) files[`${dir}/${item.name}`] = true; }
-    catch { s.diagnostics.push(`Подготовка проекта: каталог ${dir} недоступен.`); }
+    const target = rel.replace(/\/+$/, '');
+    try { for (const item of await read.list(target)) if (!keep || keep(item)) files[`${target}/${item.name}`] = true; }
+    catch { s.diagnostics.push(`Подготовка проекта: каталог ${target} недоступен.`); }
   };
   const description = str(paths.description) ?? '.ai-factory/DESCRIPTION.md';
   const architecture = str(paths.architecture) ?? '.ai-factory/ARCHITECTURE.md';
@@ -311,63 +379,141 @@ export async function collectSnapshot(input: HostInput, signal?: AbortSignal): P
   const readinessFacts: ReadinessFacts = { configured: s.configured,
     contextSkill: s.skills.includes('aif') || s.skills.includes('aif-analyze'),
     files, paths: { description, architecture, rulesBase, docs, rulesFile } };
+  if (s.profile !== 'invalid') {
+    const rules = dir(paths.rules, '.ai-factory/rules');
+    const artifacts = [
+      { id: 'describe', label: 'Описать проект', paths: [str(paths.description) ?? '.ai-factory/DESCRIPTION.md'], optional: false },
+      { id: 'architecture', label: 'Описать архитектуру', paths: [str(paths.architecture) ?? '.ai-factory/ARCHITECTURE.md'], optional: false },
+      { id: 'roadmap', label: 'Составить roadmap', paths: [str(paths.roadmap) ?? '.ai-factory/ROADMAP.md'], optional: true },
+      { id: 'quality', label: 'Настроить проверки', paths: ['.husky/pre-commit', 'lefthook.yml', '.lefthook.yml', '.pre-commit-config.yaml'], optional: true },
+      { id: 'ci', label: 'Настроить CI', paths: ['.github/workflows/', '.gitlab-ci.yml', '.circleci/config.yml', 'Jenkinsfile', 'bitbucket-pipelines.yml'], optional: true },
+      { id: 'rules', label: 'Настроить правила проекта', paths: [`${rules}/`], optional: true },
+      { id: 'docs', label: 'Создать документацию', paths: ['README.md', dir(paths.docs, 'docs') + '/'], optional: true },
+      { id: 'build', label: 'Настроить сборку', paths: ['Makefile', 'Taskfile.yml', 'justfile', 'magefile.go'], optional: true },
+      { id: 'docker', label: 'Настроить Docker', paths: ['Dockerfile', 'compose.yml', 'compose.yaml', 'docker-compose.yml'], optional: true },
+    ];
+    s.preparation = [
+      { id: 'install', label: 'Установить AI Factory', paths: ['.ai-factory.json'], optional: false, state: s.configured ? 'found' : 'missing' },
+      ...await Promise.all(artifacts.map(async step => {
+        const observed = await Promise.all(step.paths.map(file => read.artifact(file)));
+        const found = step.paths.filter((_, index) => observed[index] === true);
+        const state = found.length ? 'found' : observed.includes(null) ? 'unknown' : 'missing';
+        return { ...step, state, paths: found.length ? found : step.paths } as const;
+      })),
+    ];
+  }
   const branch = await git(root, ['branch', '--show-current'], signal);
   const head = await git(root, ['rev-parse', 'HEAD'], signal);
   const dirtyDiff = await git(root, ['diff', '--no-ext-diff', '--no-textconv', '--binary', 'HEAD', '--', '.'], signal);
   const status = await git(root, ['status', '--porcelain', '--untracked-files=normal', '--ignore-submodules=all'], signal);
   s.worktree.hasUncommitted = status === null ? null : status.length > 0;
   try {
+    const documents = new Map<string, string | null>();
+    const readPlan = async (rel: string) => {
+      if (documents.has(rel)) return documents.get(rel) ?? null;
+      const text = await read.read(rel); documents.set(rel, text); return text;
+    };
     if (native) {
       for (const item of await read.list(`${safeRelative(openRoot)}/changes`)) {
         if (!item.directory || item.name === 'archive') continue;
         const rel = `${openRoot}/changes/${item.name}/tasks.md`;
-        if (await read.read(rel)) s.candidates.push({ path: rel, title: item.name, kind: 'openspec' });
+        if (await readPlan(rel)) s.candidates.push({ path: rel, title: item.name, kind: 'openspec' });
       }
     } else if (usesBasicWorkflow(s)) {
-      for (const item of await read.list(BASIC_PLAN_ROOT)) {
+      for (const basicRoot of BASIC_PLAN_ROOTS) for (const item of await read.list(basicRoot)) {
         if (item.directory || !item.name.endsWith('.md')) continue;
-        const rel = `${BASIC_PLAN_ROOT}/${item.name}`;
-        if (await read.read(rel)) s.candidates.push({ path: rel, title: item.name.slice(0, -3), kind: 'basic' });
+        const rel = `${basicRoot}/${item.name}`;
+        if (await readPlan(rel)) s.candidates.push({ path: rel, title: item.name.slice(0, -3), kind: 'basic' });
       }
     } else {
       for (const rel of [str(paths.plan) ?? '.ai-factory/PLAN.md', str(paths.fix_plan) ?? '.ai-factory/FIX_PLAN.md']) {
-        if (await read.read(rel)) s.candidates.push({ path: rel, title: path.posix.basename(rel), kind: rel === (str(paths.fix_plan) ?? '.ai-factory/FIX_PLAN.md') ? 'fix' : 'fast' });
+        if (await readPlan(rel)) s.candidates.push({ path: rel, title: path.posix.basename(rel), kind: rel === (str(paths.fix_plan) ?? '.ai-factory/FIX_PLAN.md') ? 'fix' : 'fast' });
       }
       for (const item of await read.list(planRoot)) {
         const rel = `${planRoot}/${item.name}`;
         if (!item.directory && item.name.endsWith('.md')) s.candidates.push({ path: rel, title: item.name.replace(/\.md$/, ''), kind: hub ? 'classic' : 'full' });
         if (item.directory) {
-          const entry = await read.read(`${rel}/index.md`);
+          const entry = await readPlan(`${rel}/index.md`);
           if (entry && /^<!-- aif:plan-mode:ultra -->\s*$/m.test(entry)) s.candidates.push({ path: `${rel}/index.md`, title: item.name, kind: 'ultra' });
         }
       }
     }
     if (s.candidates.length > 80) throw new Error('Более 80 планов: укажите конкретный путь.');
-    let selected = input.target ? s.candidates.find(v => v.path === input.target || v.title === input.target) : undefined;
+    for (const candidate of s.candidates) {
+      const document = await readPlan(candidate.path);
+      if (document === null) continue;
+      if (candidate.kind === 'basic') candidate.title = document.match(/^#\s+(.+)$/m)?.[1]?.slice(0, 200) ?? candidate.title;
+      if (candidate.kind === 'classic') {
+        const id = path.posix.basename(candidate.path, '.md');
+        try {
+          const companion = await readPlan(`${planRoot}/${id}/status.yaml`);
+          if (companion) {
+            const legacy = parseYaml(companion);
+            const references = [legacy.plan_file, obj(legacy.artifacts).plan].filter(value => value !== undefined);
+            const bound = legacy.plan_id === id && references.every(value => value === candidate.path);
+            if (legacy.status === 'done' && bound) candidate.closed = true;
+            else if (legacy.status === 'done' && !bound) s.diagnostics.push(`Статус закрытия ${id} не привязан к этому плану; он остаётся в списке.`);
+          }
+        } catch { s.diagnostics.push(`Не удалось прочитать статус закрытия ${id}; план остаётся в списке.`); }
+      }
+      let tasks: NonNullable<Snapshot['target']>['tasks'];
+      try { tasks = taskList(document); }
+      catch { s.diagnostics.push(`Не удалось посчитать пункты плана ${candidate.path}; проверьте выбранный артефакт.`); continue; }
+      candidate.progress = { completed: tasks.filter(task => task.done).length, total: tasks.length,
+        verified: candidate.kind === 'basic' && planVerification(document).verified };
+    }
+    const matching = input.target ? s.candidates.filter(v => v.path === input.target || v.title === input.target
+      || v.kind === 'basic' && path.posix.basename(v.path, '.md') === input.target) : [];
+    if (matching.length > 1) throw new Error('Несколько планов с таким названием: укажите точный путь.');
+    let selected: Snapshot['candidates'][number] | undefined = matching[0];
     if (input.target && !selected) {
       const rel = safeRelative(input.target.replace(/^@/, ''));
       selected = s.candidates.find(v => v.path === rel || v.path === `${rel}/index.md` || v.path === `${rel}/tasks.md`);
-      if (!selected) throw new Error('Выбранный план/change не найден в допустимых артефактах.');
+      if (!selected) {
+        let archived = false;
+        const changeRoot = native ? `${safeRelative(openRoot)}/changes/` : '';
+        if (native && s.profile !== 'invalid' && rel.startsWith(changeRoot)) {
+          const entry = rel.slice(changeRoot.length);
+          const direct = entry.match(/^archive\/(\d{4}-\d{2}-\d{2}-[a-z0-9][a-z0-9._-]{0,199})(?:\/tasks\.md)?$/);
+          if (direct) archived = await readPlan(`${changeRoot}archive/${direct[1]}/tasks.md`) !== null;
+          else {
+            const active = entry.match(/^([a-z0-9][a-z0-9._-]{0,199})(?:\/tasks\.md)?$/);
+            if (active && active[1] !== 'archive') {
+              const matches = (await read.list(`${changeRoot}archive`)).filter(item => item.directory
+                && /^\d{4}-\d{2}-\d{2}-/.test(item.name) && item.name.slice(11) === active[1]);
+              if (matches.length > 1) throw new Error('Change найден в нескольких архивах; укажите точный архивный путь.');
+              if (matches.length === 1) archived = await readPlan(`${changeRoot}archive/${matches[0].name}/tasks.md`) !== null;
+            }
+          }
+        }
+        if (!archived && !usesBasicWorkflow(s)) throw new Error('Выбранный план/change не найден в допустимых артефактах.');
+        s.selectionReset = true;
+        s.diagnostics.push(archived
+          ? 'Выбранный change найден в архиве; выбор сброшен. Архив не подтверждает актуальный PASS.'
+          : 'Ранее выбранный план не найден; выбор сброшен. Доступно исследование и составление нового плана.');
+      }
     }
     if (!selected && !input.target && branch && !usesBasicWorkflow(s)) {
       const stem = branch.replaceAll('/', '-');
-      const matching = s.candidates.filter(v => v.title === stem || v.title.replace(/^\d{4}_/, '') === stem);
+      const matching = s.candidates.filter(v => !isCompletedPlan(v) && (v.title === stem || v.title.replace(/^\d{4}_/, '') === stem));
       if (matching.length === 1) selected = matching[0];
     }
-    if (!selected && !input.target && s.candidates.length === 1) selected = s.candidates[0];
+    const active = s.candidates.filter(v => !isCompletedPlan(v));
+    if (!selected && !input.target && active.length === 1) selected = active[0];
     if (selected) {
       if (s.candidates.some(v => v.path !== selected!.path && v.title === selected!.title && (v.kind === 'ultra' || selected!.kind === 'ultra'))) throw new Error('Collision classic/ultra: требуется разрешить противоречивые артефакты.');
-      const text = await read.read(selected.path);
+      const text = await readPlan(selected.path);
       if (text === null) throw new Error('Выбранный артефакт исчез.');
       const markerCount = text.split(/^<!-- aif:plan-mode:ultra -->\s*$/m).length - 1;
       if (selected.kind === 'ultra' && markerCount !== 1) throw new Error('Некорректный marker ultra.');
-      const id = selected.kind === 'openspec' ? selected.path.split('/').at(-2)! : selected.title;
+      const id = selected.kind === 'openspec' ? selected.path.split('/').at(-2)! : selected.kind === 'basic' ? path.posix.basename(selected.path, '.md') : selected.title;
       s.target = { path: selected.path, title: text.match(/^#\s+(.+)$/m)?.[1]?.slice(0, 200) ?? selected.title, id,
-        kind: selected.kind as NonNullable<Snapshot['target']>['kind'], tasks: taskList(text) };
+        kind: selected.kind as NonNullable<Snapshot['target']>['kind'], tasks: taskList(text), settings: planSettings(text),
+        ...(selected.kind === 'basic' ? { verification: planVerification(text) } : {}) };
       if (hub && selected.kind === 'ultra') s.profile = 'aifhub-ultra';
       if (hub && selected.kind === 'fast') s.profile = 'upstream';
       if (selected.kind === 'classic') {
-        const companion = await read.read(`${planRoot}/${id}/status.yaml`);
+        const companion = await readPlan(`${planRoot}/${id}/status.yaml`);
         if (!companion) s.diagnostics.push('Classic companion status.yaml отсутствует; владелец workflow проверит миграцию.');
         else {
           const legacy = parseYaml(companion);
@@ -399,8 +545,19 @@ export async function collectSnapshot(input: HostInput, signal?: AbortSignal): P
         if (native) s.checks.push({ id: 'mode', label: 'Конфигурация и артефакты', state: 'unknown',
           detail: 'Read-only doctor выбранного change; не запускает sync, init или исправления. Результат проверяет владелец workflow.', path: null, required: false });
       }
-    } else if (s.candidates.length > 1) s.diagnostics.push('Несколько планов/change: выберите цель, автоматического выбора по времени нет.');
+    } else if (active.length > 1) s.diagnostics.push('Несколько планов/change: выберите цель, автоматического выбора по времени нет.');
+    else if (!active.length && s.candidates.length) s.diagnostics.push('Все планы завершены. Включите «Показать завершённые», чтобы открыть их.');
   } catch (e: any) { s.profile = 'invalid'; s.diagnostics.push(String(e.message).slice(0, 300)); }
+  if (s.configured && s.profile !== 'invalid' && supportsAif222(s.versions.installed)) {
+    s.checks.push({ id: 'coupling', label: 'Архитектурная связанность', state: 'unknown', detail: 'Опциональный review +coupling; наличие кнопки не означает выполненный анализ.', path: null, required: false });
+    s.checks.push({ id: 'worktree', label: 'Ресурсы worktree', state: 'unknown', detail: 'Статическая диагностика; окружения не запускаются, runtime-изоляция не подтверждается.', path: null, required: false });
+    const approvalPath = '.ai-factory/completion-hook/approval.json';
+    let approval: Record<string, any> | null = null;
+    try { approval = await read.json(approvalPath); } catch { s.diagnostics.push('Completion hook: approval.json недоступен или некорректен.'); }
+    s.checks.push({ id: 'completion-hook', label: 'Completion hook', state: approval ? 'unknown' : 'notrun',
+      detail: approval ? 'Есть декларация approval; запуск verifier, актуальность receipt и PASS не подтверждены.' : 'Не настроен. Opt-in для Claude Code 2.1.318 на Linux/macOS; автоматическое включение не выполняется.',
+      path: approval ? approvalPath : null, required: false });
+  }
   if (s.extensions.some(e => e.name === 'aifhub-extension' && e.state !== 'present')) {
     s.profile = 'invalid'; s.diagnostics.push('Установка AIFHub противоречива; восстановите metadata перед выбором workflow.');
   }
@@ -430,7 +587,7 @@ export async function collectSnapshot(input: HostInput, signal?: AbortSignal): P
       versions: s.versions, head, branch, dirty: hash(dirtyDiff), status, index: hash(index),
       files: [...read.seen].sort(), untracked: [...extra.seen].sort() }));
   } catch { s.inputsFingerprint = null; }
-  s.fingerprint = hash(JSON.stringify([s.fingerprint, s.inputsFingerprint]));
+  s.fingerprint = hash(JSON.stringify([s.fingerprint, s.inputsFingerprint, s.preparation]));
   s.readiness = s.profile === 'invalid' ? [] : readinessSteps(readinessFacts, []);
   s.actions = workflowActions(s);
   return snapshotSchema.parse(s);

@@ -10,7 +10,7 @@ import { updateInVersionDetails, VERSION_TTL } from './versions.ts';
 import { contextSetupInDetails } from './workflow.ts';
 import { chipDraft, isCommandDraft } from './suggestions.ts';
 import { AIF_MENTION } from './aif-mode.ts';
-import { BASIC_PLAN_ROOT, usesBasicWorkflow } from './basic-workflow.ts';
+import { isBasicPlanPath, usesBasicWorkflow } from './basic-workflow.ts';
 import { toast } from 'sonner';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
@@ -79,7 +79,7 @@ function WorkflowCard({ threadId, initialTarget = '', phase = 'unknown', openFil
   const snapshot = failure ? null : query.data ?? null;
   const loading = query.isLoading;
   const error = actionError || failure;
-  useEffect(() => { if (snapshot?.configured && target.startsWith(BASIC_PLAN_ROOT + '/')) setTarget(''); }, [snapshot, target]);
+  useEffect(() => { if (snapshot?.configured && isBasicPlanPath(target)) setTarget(''); }, [snapshot, target]);
   // Explicit re-read past the server cache; the shared query then picks the fresh snapshot up.
   const refresh = useCallback(async (checkUpdates = false, force = false) => {
     try {

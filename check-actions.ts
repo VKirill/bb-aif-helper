@@ -4,6 +4,8 @@ export const rowActions: Record<string, string> = {
   verify: 'check-verify', rules: 'check-rules', security: 'check-security', review: 'check-review',
   'qa-plan': 'qa-prepare', qa: 'qa-run', quality: 'quality', ci: 'ci', readiness: 'done',
   mode: 'check-mode',
+  worktree: 'check-worktree',
+  coupling: 'check-coupling',
 };
 /** Plain-language explanation shown under the «?» button of each check row. */
 export const checkHelp: Record<string, string> = {
@@ -18,6 +20,9 @@ export const checkHelp: Record<string, string> = {
   quality: '/aif-quality-setup audit смотрит, какие линтеры, проверки типов, тесты и git-хуки есть в проекте и чего не хватает. Сами проверки не запускает.',
   ci: 'Смотрит результат CI (например, GitHub Actions) для текущего коммита. Сам pipeline не создаёт и не меняет.',
   mode: 'AIFHub OpenSpec: /aif-mode doctor читает конфигурацию и артефакты выбранного change и сообщает о проблемах. Ничего не исправляет.',
+  worktree: 'ai-factory worktree-check --json (AI Factory 2.22+) делает статическую диагностику текущего checkout: конфликты и пробелы coverage. Окружения не запускает и runtime-изоляцию не подтверждает.',
+  coupling: '/aif-review +coupling — необязательный анализ архитектурной связанности по фактическим evidence. Только сообщает о зависимостях, рефакторинг не выполняет.',
+  'completion-hook': 'Completion hook — opt-in для Claude Code: читает наличие .ai-factory/completion-hook/approval.json. Декларация не является PASS, verifier плагин не запускает.',
 };
 /** Optional project commands offered in the tab's «Другие команды» list, with their «?» text. */
 export const toolHelp: Record<string, string> = {
@@ -25,18 +30,19 @@ export const toolHelp: Record<string, string> = {
   'archive-plans': '/aif-archive переносит выполненные планы в архив и при желании убирает закрытые этапы из ROADMAP.md, чтобы в списке задач остались только актуальные.',
 };
 
-export const supplementaryChecks = new Set(['rules', 'security', 'review', 'qa-plan', 'qa', 'quality', 'ci', 'mode']);
+export const supplementaryChecks = new Set(['rules', 'security', 'review', 'qa-plan', 'qa', 'quality', 'ci', 'mode', 'worktree', 'completion-hook', 'coupling']);
 const commands: Record<string, string> = {
   'aif-verify': 'verify', 'aif-rules-check': 'rules', 'aif-security-checklist': 'security', 'aif-review': 'review',
 };
 export const unchangedReason = 'Файлы не изменились с момента фиксации результата этой проверки. Повторный запуск не требуется.';
-export function unchangedCheck(snapshot: Snapshot, skill: string) {
+export function unchangedCheck(snapshot: Snapshot, skill: string, command = skill) {
+  if (/(?:^|\s)\+coupling(?:$|\s)/.test(command)) return false; // A plain review is not proof of a coupling review.
   return snapshot.checks.some(check => check.id === commands[skill] && check.chat?.freshness === 'unchanged');
 }
 export function lockUnchangedChecks(snapshot: Snapshot) {
   for (const action of snapshot.actions) {
     const skill = action.command.match(/^[/$](aif(?:-[a-z0-9]+)*)\b/)?.[1];
-    if (skill && action.available && unchangedCheck(snapshot, skill)) {
+    if (skill && action.available && unchangedCheck(snapshot, skill, action.command)) {
       action.available = false; action.disabledReason = 'unchanged'; action.reason = unchangedReason;
     }
   }
