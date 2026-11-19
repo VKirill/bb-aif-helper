@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { extractAifCommands, extractAifInvocations, analyzeReply, chipDraft } from '../suggestions.ts';
+import { extractAifCommands, extractAifInvocations, analyzeReply, chipDraft, nextStepItems } from '../suggestions.ts';
 
 test('last-answer command names are extracted in order, without arguments or duplicates', () => {
   assert.deepEqual(extractAifCommands('Далее `$aif-architecture`, затем `$aif-roadmap`. Повтор: $aif-architecture; $aif-plan full #177; $aif.'), ['aif-architecture', 'aif-roadmap', 'aif-plan', 'aif']);
@@ -100,4 +100,14 @@ test('chipDraft keeps the AI Factory pill when the draft holds only it', () => {
   assert.equal(result.submit, false);
   assert.equal(result.text, '/aif-plan AI Factory ');
   assert.deepEqual(result.mentions, [{ ...pill, from: 10, to: 20 }]);
+});
+
+test('next-step chips: available next actions of installed skills, one per skill, at most three, runtime prefix', () => {
+  const a = (id: string, command: string, group: 'next' | 'check' = 'next', available = true) => ({ id, label: id, command, group, reason: '', available });
+  const actions = [a('commit', '/aif-commit'), a('verify', '/aif-verify', 'check'), a('plan', '/aif-plan', 'next', false),
+    a('impl', '/aif-implement @.ai-factory/plans/x.md'), a('impl2', '/aif-implement'), a('gone', '/aif-gone'), a('qa', '/aif-qa'), a('fix', '/aif-fix')];
+  const skills = ['aif-commit', 'aif-verify', 'aif-plan', 'aif-implement', 'aif-qa', 'aif-fix'];
+  assert.deepEqual(nextStepItems(actions as any, { skills, invalid: false, prefix: '$', hidden: ['aif-qa'] }).map(i => i.command),
+    ['$aif-commit', '$aif-implement @.ai-factory/plans/x.md', '$aif-fix']);
+  assert.deepEqual(nextStepItems(actions as any, { skills, invalid: true, prefix: '/', hidden: [] }), []);
 });

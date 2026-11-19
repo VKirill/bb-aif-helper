@@ -1,6 +1,7 @@
 // Suggest installed skill names with either runtime prefix. Only the fixed
 // "aif-mode sync" subcommand is retained; arbitrary arguments/prose are dropped.
 import { parseReplyGate } from './gate.ts';
+import type { Action, Suggestions } from './model.ts';
 
 export function extractAifInvocations(text: string): { id: string; command: string }[] {
   const result: { id: string; command: string }[] = [];
@@ -91,4 +92,20 @@ export function chipDraft<M extends { from: number; to: number; kind?: string; p
     mentions: draft.mentions.map(m => ({ ...m, from: m.from + shift, to: m.to + shift })),
     submit: true,
   };
+}
+
+/**
+ * Chips for a chat whose last reply names no AI Factory command (mode on): up to three available
+ * `next` actions whose skill is installed, one per skill, in the runtime's prefix.
+ */
+export function nextStepItems(actions: readonly Action[], o: { skills: readonly string[]; invalid: boolean; prefix: '/' | '$'; hidden: readonly string[] }): Suggestions['items'] {
+  if (o.invalid) return [];
+  const seen = new Set<string>();
+  return actions.filter(a => a.group === 'next' && a.available).flatMap(a => {
+    const body = a.command.replace(/^[/$]/, '');
+    const id = body.split(/\s/, 1)[0];
+    if (seen.has(id) || !(o.skills.includes(id) || id === 'aif-chat')) return [];
+    seen.add(id);
+    return [{ id, command: `${o.prefix}${body}`, available: true, reason: 'Следующий шаг' }];
+  }).filter(item => !o.hidden.includes(item.id)).slice(0, 3);
 }

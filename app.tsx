@@ -653,7 +653,7 @@ function AifModeAction() {
       if (threadId && !next.on) removeAifPill(composer);
     } catch (e) {
       const message = e instanceof Error ? e.message : String(e);
-      if (mounted.current) { setError(message); console.warn('aif-chat: aif-mode toggle failed', e); }
+      if (mounted.current) setError(message);
     } finally { if (mounted.current) setPending(false); }
   }
   const title = error
@@ -690,8 +690,8 @@ function AifPillController() {
     handled.current = true;
     try {
       if (!composer.draft.mentions.some(isAifPill)) composer.insert(AIF_MENTION, { at: 'end' });
-    } catch (e) { handled.current = false; console.warn('aif-chat: aif pill insert failed', e); return; }
-    void rpc.call('ackAifPill', { threadId }).catch(e => console.warn('aif-chat: ackAifPill failed', e));
+    } catch { handled.current = false; return; } // composer gone; the next 'changed' event retries
+    void rpc.call('ackAifPill', { threadId }).catch(() => undefined); // the flag stays; the pill is already in the draft
   }, [composer, rpc, threadId, pill]);
   return null;
 }

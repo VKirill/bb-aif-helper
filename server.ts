@@ -2,17 +2,18 @@ import type { BbPluginApi } from '@get-bb/plugin-sdk';
 import { createHash } from 'node:crypto';
 import { z } from 'zod';
 import { hostContract, rpcContract, type DelegationView } from './contract.ts';
-import { DELEGATION_ROLES, childModel, delegationDefaultsSchema, modelSpec } from './delegation.ts';
-import type { ChildModel, DelegationChoice, DelegationDefaults, DelegationRole, DelegationState } from './delegation.ts';
+import { DELEGATION_ROLES, delegationDefaultsSchema, modelSpec } from './delegation.ts';
+import { childModel, type ChildModel } from './child-model.ts';
+import type { DelegationChoice, DelegationDefaults, DelegationRole, DelegationState } from './delegation.ts';
 import { requestSchema, phaseSchema, snapshotSchema, type CardRequest, type Snapshot, type Phase, type Suggestions } from './model.ts';
 import { actionPrompt, workflowActions } from './workflow.ts';
 import { applyRan, applySkipped, RUN_CONFIRMED_STEPS } from './readiness.ts';
-import { analyzeReply } from './suggestions.ts';
+import { analyzeReply, nextStepItems } from './suggestions.ts';
 import { blockedByGate } from './gate.ts';
 import { attachChatChecks, readChatChecks, type ChatCheck } from './check-history.ts';
 import { lockUnchangedChecks, unchangedCheck, unchangedReason } from './check-actions.ts';
 import { SnapshotCache } from './snapshot-cache.ts';
-import { AIF_MENTION, aifModeInstructions, shouldContribute } from './aif-mode.ts';
+import { AIF_MENTION, aifMentionItems, aifModeInstructions, shouldContribute } from './aif-mode.ts';
 import { versionSampleFresh } from './versions.ts';
 import { BASIC_PLAN_ROOT } from './basic-workflow.ts';
 export { rpcContract } from './contract.ts';
@@ -262,15 +263,8 @@ export default async function plugin(bb: BbPluginApi) {
     const sourceKey = suggestionSource(snapshot.root, output);
     const dismissed = await bb.storage.kv.get<DismissedSuggestions>(`suggestions-dismissed:${threadId}`);
     const hidden = dismissed?.sourceKey === sourceKey ? dismissed.ids : [];
-    const prefix = ['codex', 'codex-app'].includes(snapshot.runtime) ? '$' : '/';
-    const seen = new Set<string>();
-    const items = snapshot.actions.filter(a => a.group === 'next' && a.available).flatMap(a => {
-      const body = a.command.replace(/^[/$]/, '');
-      const id = body.split(/\s/, 1)[0];
-      if (seen.has(id) || snapshot.profile === 'invalid' || !(snapshot.skills.includes(id) || id === 'aif-chat')) return [];
-      seen.add(id);
-      return [{ id, command: `${prefix}${body}`, available: true, reason: 'Следующий шаг' }];
-    }).filter(item => !hidden.includes(item.id)).slice(0, 3);
+    const items = nextStepItems(snapshot.actions, { skills: snapshot.skills, invalid: snapshot.profile === 'invalid',
+      prefix: ['codex', 'codex-app'].includes(snapshot.runtime) ? '$' : '/', hidden });
     bb.log.info(`aif-chat: fallback suggestions threadId=${threadId} count=${items.length}`);
     const view: Suggestions = { sourceKey, fingerprint: snapshot.fingerprint, threadState: snapshot.threadState, gate: null, gateError: null, items };
     return { view, ids: items.map(i => i.id), hidden, snapshot };
@@ -544,10 +538,7 @@ export default async function plugin(bb: BbPluginApi) {
     label: 'AI Factory',
     search: ({ query }) => {
       if (!enabled) return [];
-      const q = query.trim().toLowerCase();
-      return !q || ['ai factory', 'aif', 'factory', 'фабрика', 'режим'].some(term => term.startsWith(q))
-        ? [{ id: AIF_MENTION.id, title: 'AI Factory — режим работы', subtitle: 'Вести задачу через /aif-plan → /aif-implement → /aif-verify', icon: 'Workflow' }]
-        : [];
+      return aifMentionItems(query);
     },
     resolve: itemId => {
       if (itemId !== AIF_MENTION.id) throw new Error('Неизвестное упоминание AI Factory.');

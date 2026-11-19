@@ -4,7 +4,8 @@ import { createFakePluginHost, makeThreadResponse, makePluginAgentConfigurationC
 import plugin from '../server.ts';
 import { snapshot } from './fixtures.ts';
 import { workflowActions } from '../workflow.ts';
-import { childModel } from '../delegation.ts';
+import { childModel } from '../child-model.ts';
+import { aifMentionItems } from '../aif-mode.ts';
 
 async function setup() {
   const value = snapshot(); value.actions = workflowActions(value);
@@ -156,4 +157,9 @@ test('childModel reports the requested model, a later provider fallback and choi
   assert.equal(childModel([request(1, 'anything')], { title: 'AIF · demo · 1', providerId: 'codex' }, self).mismatch, null);
   assert.equal(childModel([request(1, 'anything')], { title: 'Обычный тред', providerId: 'codex' }, state).mismatch, null);
   assert.equal(childModel([], { title: 'AIF · demo · 1', providerId: 'codex' }, state).execution, null);
+});
+
+test('aif mention search matches term prefixes in both languages and nothing else', () => {
+  for (const q of ['', ' AIF ', 'fac', 'фаб', 'реж', 'ai f']) assert.equal(aifMentionItems(q).length, 1, q);
+  for (const q of ['xyz', 'aifx', 'plan']) assert.deepEqual(aifMentionItems(q), [], q);
 });

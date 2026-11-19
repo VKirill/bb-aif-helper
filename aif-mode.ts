@@ -15,3 +15,12 @@ export function aifModeInstructions(): string {
 export function shouldContribute(input: { enabled: boolean; modeOn: boolean; parentThreadId: string | null }): boolean {
   return input.enabled && input.modeOn && input.parentThreadId === null;
 }
+
+const MENTION_TERMS = ['ai factory', 'aif', 'factory', 'фабрика', 'режим'];
+/** Mention menu rows for a query: the mode pill when the query is empty or starts one of its terms. */
+export function aifMentionItems(query: string) {
+  const q = query.trim().toLowerCase();
+  return !q || MENTION_TERMS.some(term => term.startsWith(q))
+    ? [{ id: AIF_MENTION.id, title: 'AI Factory — режим работы', subtitle: 'Вести задачу через /aif-plan → /aif-implement → /aif-verify', icon: 'Workflow' }]
+    : [];
+}
