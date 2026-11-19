@@ -101,7 +101,21 @@ test('saved-data state is visible and the refresh button explicitly bypasses the
     await slot.findByText(/Сохранённые данные.*обновляются в фоне/);
     fireEvent.click(slot.getByRole('button', { name: 'Обновить статус AI Factory' }));
     await waitFor(() => assert(requests.some(input => input.force === true)));
-    assert.equal(requests[0].force, false);
+    assert.notEqual(requests[0].force, true, 'the shared read never forces');
+  } finally { slot.lifecycle.unmount(); }
+});
+
+test('the card reads status once and re-reads only when its thread tag is invalidated', async () => {
+  let reads = 0;
+  const slot = renderSlot(app.messageDirectives[0], props, { rpc: { status: () => { reads++; return data(); } } });
+  try {
+    await slot.findByRole('button', { name: 'Улучшить план' });
+    await new Promise(r => setTimeout(r, 50));
+    assert.equal(reads, 1, 'no polling');
+    await slot.behavior.experimental_invalidateRpc(['thread:other']);
+    assert.equal(reads, 1, 'another thread does not refresh this card');
+    await slot.behavior.experimental_invalidateRpc(['thread:thr_test']);
+    assert.equal(reads, 2);
   } finally { slot.lifecycle.unmount(); }
 });
 
@@ -376,7 +390,7 @@ test('composer suggestions have a separate dismiss control and never dispatch du
     fireEvent.click(slot.getByRole('button', { name: 'Удалить предложение $aif-architecture' }));
     await waitFor(() => assert(!slot.queryByRole('button', { name: '$aif-architecture + ваш текст из поля' })));
     assert(slot.getByRole('button', { name: '$aif-roadmap + ваш текст из поля' })); assert.equal(sends, 0);
-    await slot.behavior.emitRealtime('changed', { threadId: 'thr_test' });
+    await slot.behavior.experimental_invalidateRpc(['thread:thr_test']);
     assert.equal(slot.queryByRole('button', { name: '$aif-architecture + ваш текст из поля' }), null);
     assert.equal(slot.inspection.composer.text, 'Мой черновик');
   } finally { slot.lifecycle.unmount(); }
@@ -639,18 +653,19 @@ test('a message card has no navigation/settings switcher', async () => {
 test('«В работе» lists child threads on navigation and hides when there are none', async () => {
   const tab = app.tabs.find(t => t.id === 'workflow')!;
   const s = data();
-  let children: any[] = [{ id: 'thr_child', title: 'Задача 1', status: 'active', providerId: 'codex', updatedAt: '2026-11-17T00:00:00Z', execution: null, fallback: null, mismatch: null }];
-  const slot = renderSlot(tab as any, { threadId: 'thr_working', environment: { id: 'env_working' } }, { rpc: {
-    status: () => s, delegation: () => delegView({ children }),
-  } });
+  const child = { id: 'thr_child', title: 'Задача 1', status: 'active', providerId: 'codex', updatedAt: '2026-11-17T00:00:00Z', execution: null, fallback: null, mismatch: null };
+  const busy = renderSlot(tab as any, { threadId: 'thr_working', environment: { id: 'env_working' } }, { rpc: { status: () => s, delegation: () => delegView({ children: [child] }) } });
   try {
-    await slot.findByText('Задача 1');
-    slot.getByText('В работе');
-    children = [];
-    await slot.behavior.emitRealtime('changed', { threadId: 'thr_working' });
-    await waitFor(() => assert.equal(slot.queryByText('В работе'), null));
-    assert.equal(slot.queryByText('Задача 1'), null);
-  } finally { slot.lifecycle.unmount(); }
+    await busy.findByText('Задача 1');
+    busy.getByText('В работе');
+  } finally { busy.lifecycle.unmount(); }
+  const idle = renderSlot(tab as any, { threadId: 'thr_idle', environment: { id: 'env_idle' } }, { rpc: { status: () => s, delegation: () => delegView({ children: [] }) } });
+  try {
+    await idle.findByRole('tab', { name: /Навигация/ });
+    await waitFor(() => assert(idle.inspection.rpcCalls.some(c => c.method === 'delegation')));
+    assert.equal(idle.queryByText('В работе'), null);
+    assert.equal(idle.queryByText('Задача 1'), null);
+  } finally { idle.lifecycle.unmount(); }
 });
 
 test('defaults block disables apply without defaults and takes roles from this project', async () => {

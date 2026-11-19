@@ -1,6 +1,9 @@
 import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
-import { z } from 'zod';
+import { RESEARCH_ROLES } from './model.ts';
+import type { DelegationChoice, DelegationRole, DelegationState, ResearchRole } from './model.ts';
+export { DELEGATION_ROLES, RESEARCH_ROLES, delegationChoiceSchema, delegationDefaultsSchema, delegationRoleSchema, delegationStateSchema } from './model.ts';
+export type { DelegationChoice, DelegationDefaults, DelegationRole, DelegationState, ResearchRole } from './model.ts';
 
 // Code delegation: /aif-implement hands each plan task to a BB thread on the
 // model the owner picked in the panel. `.ai-factory.json` → phases.implement is
@@ -21,38 +24,9 @@ const PLAN_END = '<!-- bb-aif-helper:plan:end -->';
 export const RESEARCH_PATH = '.ai-factory/skill-context/global-skill-context.md';
 const RESEARCH_START = '<!-- bb-aif-helper:research:start -->';
 const RESEARCH_END = '<!-- bb-aif-helper:research:end -->';
-export const RESEARCH_ROLES = ['research', 'research2', 'research3'] as const;
-export type ResearchRole = typeof RESEARCH_ROLES[number];
 const RESEARCH_MARK: Record<ResearchRole, string> = { research: 'research-model', research2: 'research-model-2', research3: 'research-model-3' };
-export const delegationRoleSchema = z.enum(['implement', ...RESEARCH_ROLES]);
-export type DelegationRole = z.infer<typeof delegationRoleSchema>;
-export const DELEGATION_ROLES = ['implement', ...RESEARCH_ROLES] as const;
 const AGENT = 'bb';
 const TIMEOUT_MS = 4 * 60 * 60 * 1000;
-
-const id = z.string().regex(/^[\w.-]{1,100}$/);
-export const delegationChoiceSchema = z.discriminatedUnion('mode', [
-  z.object({ mode: z.literal('self') }).strict(),
-  z.object({ mode: z.literal('bb'), providerId: id, model: z.string().regex(/^[^\s?&#]{1,200}$/), reasoning: id.optional(), tier: id.optional(), parallel: z.number().int().min(2).max(4).optional() }).strict(),
-]);
-export type DelegationChoice = z.infer<typeof delegationChoiceSchema>;
-export const delegationDefaultsSchema = z.object({ implement: delegationChoiceSchema, research: delegationChoiceSchema, research2: delegationChoiceSchema, research3: delegationChoiceSchema }).strict();
-export type DelegationDefaults = z.infer<typeof delegationDefaultsSchema>;
-export const delegationStateSchema = z.object({
-  choice: delegationChoiceSchema,
-  /** Model for research worker 1 (Explore) of every AI Factory skill; self = the agent's own subagent. */
-  research: delegationChoiceSchema,
-  /** Research workers 2 and 3; self = same as worker 1. */
-  research2: delegationChoiceSchema,
-  research3: delegationChoiceSchema,
-  configured: z.boolean(),
-  // phases.implement points at an agent this plugin does not manage.
-  foreign: z.string().nullable(),
-  error: z.string().nullable(),
-  // Set only on the setDelegation response when legacy runner files were removed.
-  removedLegacy: z.boolean().optional(),
-});
-export type DelegationState = z.infer<typeof delegationStateSchema>;
 
 // AI Factory keeps only agent/model/timeoutMs of a phase, so the whole BB
 // selection lives in `model`: provider/model?reasoning=high&tier=fast.

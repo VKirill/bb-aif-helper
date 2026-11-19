@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
-import { definePluginApp, useRpc, useRealtime, useComposer, useBbNavigate, experimental_useAppPanel, experimental_ProviderModelPicker as ProviderModelPicker, type ExperimentalProviderModelPickerValue as PickerValue, type PluginMessageDirectiveProps, type ExperimentalThreadContextCardProps, type ExperimentalThreadTabProps, type ExperimentalCodeFenceRendererProps, type PluginComposerApi } from '@get-bb/plugin-sdk/app';
-import type { rpcContract, ChipScoringView, DelegationView } from './contract.ts';
+import { definePluginApp, useRpc, experimental_useRpcQuery, useComposer, useBbNavigate, experimental_useAppPanel, experimental_ProviderModelPicker as ProviderModelPicker, type ExperimentalProviderModelPickerValue as PickerValue, type PluginMessageDirectiveProps, type ExperimentalThreadContextCardProps, type ExperimentalThreadTabProps, type ExperimentalCodeFenceRendererProps, type PluginComposerApi } from '@get-bb/plugin-sdk/app';
+import { rpcContract, type ChipScoringView, type DelegationView } from './contract.ts';
 import type { DelegationChoice, DelegationRole } from './delegation.ts';
 import { phaseSchema, type Snapshot, type Phase, type Action, type ReadinessStep, type Suggestions } from './model.ts';
 import { readinessComplete, nextReadinessStep, readinessHelp, type SkippableStepId } from './readiness.ts';
@@ -53,10 +53,8 @@ function WorkflowCard({ threadId, initialTarget = '', phase = 'unknown', openFil
   const surface = useSurface();
   const rpc = useRpc<typeof rpcContract>();
   const [target, setTarget] = useState(initialTarget);
-  const [snapshot, setSnapshot] = useState<Snapshot | null>(null);
-  const [error, setError] = useState('');
+  const [actionError, setError] = useState('');
   const [notice, setNotice] = useState('');
-  const [loading, setLoading] = useState(true);
   const [sending, setSending] = useState(false);
   const [help, setHelp] = useState<string | null>(null);
   const [network, setNetwork] = useState(false);
@@ -68,29 +66,28 @@ function WorkflowCard({ threadId, initialTarget = '', phase = 'unknown', openFil
     setViewState(v);
     try { window.sessionStorage.setItem(`aif-view:${threadId}`, v); } catch {}
   };
-  const sequence = useRef(0);
   const mounted = useRef(true);
   const sendingRef = useRef(false);
-  useEffect(() => { mounted.current = true; return () => { mounted.current = false; sequence.current++; }; }, []);
-  useEffect(() => { setTarget(initialTarget); setSnapshot(null); }, [initialTarget, threadId]);
+  useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
+  useEffect(() => { setTarget(initialTarget); }, [initialTarget, threadId]);
+  // BB's shared query cache: cards with the same input share one read; tag invalidation refreshes it, nothing polls.
+  const query = experimental_useRpcQuery({ contract: rpcContract, method: 'status', input: { threadId, target, phase } });
+  // A failed read must not leave stale, still-clickable actions on screen.
+  const [readFailed, setReadFailed] = useState('');
+  useEffect(() => { setReadFailed(''); }, [query.data]);
+  const failure = readFailed || (query.error ? query.error.message : '');
+  const snapshot = failure ? null : query.data ?? null;
+  const loading = query.isLoading;
+  const error = actionError || failure;
+  useEffect(() => { if (snapshot?.configured && target.startsWith(BASIC_PLAN_ROOT + '/')) setTarget(''); }, [snapshot, target]);
+  // Explicit re-read past the server cache; the shared query then picks the fresh snapshot up.
   const refresh = useCallback(async (checkUpdates = false, force = false) => {
-    const id = ++sequence.current;
     try {
-      const value = await rpc.call('status', { threadId, target, phase, checkUpdates, force });
-      if (mounted.current && id === sequence.current) {
-        setSnapshot(value); setError('');
-        if (value.configured && target.startsWith(BASIC_PLAN_ROOT + '/')) setTarget('');
-      }
-    } catch (e) {
-      if (mounted.current && id === sequence.current) { setError(e instanceof Error ? e.message : String(e)); setSnapshot(null); }
-    } finally { if (mounted.current && id === sequence.current) setLoading(false); }
-  }, [rpc, threadId, target, phase]);
-  useEffect(() => {
-    setLoading(true); void refresh();
-    const interval = window.setInterval(() => { if (document.visibilityState === 'visible') void refresh(); }, 15000);
-    return () => window.clearInterval(interval);
-  }, [refresh]);
-  useRealtime('changed', (payload: unknown) => { if ((payload as { threadId?: string })?.threadId === threadId) void refresh(); });
+      if (checkUpdates || force) await rpc.call('status', { threadId, target, phase, checkUpdates, force });
+      await query.refetch();
+      if (mounted.current) { setError(''); setReadFailed(''); }
+    } catch (e) { if (mounted.current) setReadFailed(e instanceof Error ? e.message : String(e)); }
+  }, [rpc, query, threadId, target, phase]);
   async function run(action: Action) {
     if (!snapshot || sendingRef.current) return;
     sendingRef.current = true; setSending(true); setError(''); setNotice('');
@@ -363,29 +360,23 @@ function ModelChoice({ role, saved, providerName, environmentId, busy, locked: l
 }
 
 function useDelegationView(threadId: string) {
-  const rpc = useRpc<typeof rpcContract>();
-  const [view, setView] = useState<DelegationView | null>(null);
-  const [error, setError] = useState('');
+  const query = experimental_useRpcQuery({ contract: rpcContract, method: 'delegation', input: { threadId } });
+  // A write answers with the new view at once; the tagged read replaces it when it lands.
+  const [written, setView] = useState<DelegationView | null>(null);
+  const [actionError, setError] = useState('');
   const [applied, setApplied] = useState<string | null>(null);
   const appliedRef = useRef<string | null>(null);
-  const mounted = useRef(true);
-  useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
-  const load = useCallback(async () => {
-    try {
-      const next = await rpc.call('delegation', { threadId });
-      if (mounted.current) {
-        setView(next); setError('');
-        if (next.appliedDefaults && appliedRef.current !== next.appliedDefaults) {
-          appliedRef.current = next.appliedDefaults;
-          setApplied(next.appliedDefaults);
-          toast.success(next.appliedDefaults);
-        }
-      }
-    } catch (e) { if (mounted.current) setError(e instanceof Error ? e.message : String(e)); }
-  }, [rpc, threadId]);
-  useEffect(() => { void load(); }, [load]);
-  useRealtime('changed', (payload: unknown) => { if ((payload as { threadId?: string })?.threadId === threadId) void load(); });
-  return { view, setView, error, setError, load, applied };
+  useEffect(() => { setView(null); }, [query.data]);
+  useEffect(() => {
+    const next = query.data?.appliedDefaults;
+    if (!next || appliedRef.current === next) return;
+    appliedRef.current = next;
+    setApplied(next);
+    toast.success(next);
+  }, [query.data?.appliedDefaults]);
+  const view = written ?? query.data ?? null;
+  const error = actionError || (query.error ? query.error.message : '');
+  return { view, setView, error, setError, load: query.refetch, applied };
 }
 
 function DelegationSection({ threadId, environmentId, busy }: { threadId: string; environmentId: string | null; busy: boolean }) {
@@ -457,19 +448,12 @@ function DefaultsSection({ view, busy, onChange }: { view: DelegationView; busy:
 }
 
 function useChipScoringView(threadId: string) {
-  const rpc = useRpc<typeof rpcContract>();
-  const [view, setView] = useState<ChipScoringView | null>(null);
-  const [error, setError] = useState('');
-  const mounted = useRef(true);
-  useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
-  const load = useCallback(async () => {
-    try {
-      const next = await rpc.call('chipScoring', {});
-      if (mounted.current) { setView(next); setError(''); }
-    } catch (e) { if (mounted.current) setError(e instanceof Error ? e.message : String(e)); }
-  }, [rpc]);
-  useEffect(() => { void load(); }, [load]);
-  useRealtime('changed', (payload: unknown) => { if ((payload as { threadId?: string })?.threadId === threadId) void load(); });
+  const query = experimental_useRpcQuery({ contract: rpcContract, method: 'chipScoring', input: {} });
+  const [written, setView] = useState<ChipScoringView | null>(null);
+  const [actionError, setError] = useState('');
+  useEffect(() => { setView(null); }, [query.data]);
+  const view = written ?? query.data ?? null;
+  const error = actionError || (query.error ? query.error.message : '');
   return { view, setView, error, setError };
 }
 
@@ -659,26 +643,14 @@ function SuggestedCommands() {
 }
 function SuggestionBar({ threadId, composer, composerBusy }: { threadId: string; composer: PluginComposerApi; composerBusy: boolean }) {
   const rpc = useRpc<typeof rpcContract>();
-  const [data, setData] = useState<Suggestions | null>(null);
+  const query = experimental_useRpcQuery({ contract: rpcContract, method: 'suggestions', input: { threadId } });
+  const data: Suggestions | null = query.data ?? null;
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
   const [working, setWorking] = useState(false);
   const mounted = useRef(true);
   const operation = useRef(false);
-  const sequence = useRef(0);
-  const refresh = useCallback(async () => {
-    const id = ++sequence.current;
-    try {
-      const next = await rpc.call('suggestions', { threadId });
-      if (mounted.current && sequence.current === id) setData(next);
-    } catch { if (mounted.current && sequence.current === id) setData(null); }
-  }, [rpc, threadId]);
-  useEffect(() => {
-    mounted.current = true; void refresh();
-    const timer = window.setInterval(() => { if (document.visibilityState === 'visible') void refresh(); }, 15000);
-    return () => { mounted.current = false; sequence.current++; window.clearInterval(timer); };
-  }, [refresh]);
-  useRealtime('changed', (payload: unknown) => { if ((payload as { threadId?: string })?.threadId === threadId) void refresh(); });
+  useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
   async function act(id: string, dismiss: boolean) {
     if (!data || operation.current) return;
     operation.current = true; setWorking(true); setError(''); setNotice('');
@@ -696,7 +668,7 @@ function SuggestionBar({ threadId, composer, composerBusy }: { threadId: string;
         if (mounted.current && !next.submit) setNotice(result.message);
       }
     } catch (e) { if (mounted.current) setError(e instanceof Error ? e.message : String(e)); }
-    finally { await refresh(); operation.current = false; if (mounted.current) setWorking(false); }
+    finally { await query.refetch(); operation.current = false; if (mounted.current) setWorking(false); }
   }
   const busy = composerBusy || !!data && !['idle', 'error'].includes(data.threadState);
   if (!data?.items.length && !data?.gate && !data?.gateError && !error && !notice) return null;
@@ -747,6 +719,8 @@ function removeAifPill(composer: PluginComposerApi) {
   });
 }
 
+const aifModeInput = (threadId: string | null, projectId: string | null) => threadId ? { threadId } : projectId ? { projectId } : {};
+
 /** Composer action: toggles the project-wide AI Factory mode; opens the tab when the project has no AI Factory. */
 function AifModeAction() {
   const composer = useComposer();
@@ -754,26 +728,15 @@ function AifModeAction() {
   const panel = experimental_useAppPanel();
   const threadId = composer.scope.kind === 'thread' ? composer.scope.threadId : null;
   const projectId = composer.scope.kind === 'new-thread' ? composer.scope.projectId : null;
-  const [view, setView] = useState<{ on: boolean; configured: boolean | null; projectId: string } | null>(null);
+  const query = experimental_useRpcQuery({ contract: rpcContract, method: 'aifMode', input: aifModeInput(threadId, projectId), enabled: !!threadId || !!projectId });
+  const [written, setView] = useState<{ on: boolean; configured: boolean | null; projectId: string } | null>(null);
   const [pending, setPending] = useState(false);
-  const [error, setError] = useState('');
+  const [actionError, setError] = useState('');
   const mounted = useRef(true);
   useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
-  const load = useCallback(async () => {
-    const input = threadId ? { threadId } : projectId ? { projectId } : null;
-    if (!input) { if (mounted.current) setView(null); return; }
-    try {
-      const next = await rpc.call('aifMode', input);
-      if (mounted.current) { setView(next); setError(''); }
-    } catch (e) { if (mounted.current) setError(e instanceof Error ? e.message : String(e)); }
-  }, [rpc, threadId, projectId]);
-  useEffect(() => { void load(); }, [load]);
-  useRealtime('changed', (payload: unknown) => {
-    const p = payload as { threadId?: string | null; projectId?: string };
-    const hit = threadId ? p.threadId === threadId || (!!view?.projectId && p.projectId === view.projectId)
-      : !!projectId && p.projectId === projectId;
-    if (hit) void load();
-  });
+  useEffect(() => { setView(null); }, [query.data]);
+  const view = threadId || projectId ? written ?? query.data ?? null : null;
+  const error = actionError || (query.error ? query.error.message : '');
   async function toggle() {
     if (pending || !view) return;
     if (threadId && view.configured === false) {
@@ -810,17 +773,10 @@ function AifPillController() {
   const composer = useComposer();
   const rpc = useRpc<typeof rpcContract>();
   const threadId = composer.scope.kind === 'thread' ? composer.scope.threadId : null;
-  const [pill, setPill] = useState(false);
+  // Shares the AifModeAction read of the same thread; a failed read keeps the pill off until the next invalidation.
+  const query = experimental_useRpcQuery({ contract: rpcContract, method: 'aifMode', input: aifModeInput(threadId, null), enabled: !!threadId });
+  const pill = !!threadId && !!query.data?.pill;
   const handled = useRef(false);
-  const mounted = useRef(true);
-  useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
-  const load = useCallback(async () => {
-    if (!threadId) return;
-    try { const next = await rpc.call('aifMode', { threadId }); if (mounted.current) setPill(next.pill); }
-    catch { /* transient; the next 'changed' event retries */ }
-  }, [rpc, threadId]);
-  useEffect(() => { void load(); }, [load]);
-  useRealtime('changed', (payload: unknown) => { if (threadId && (payload as { threadId?: string | null })?.threadId === threadId) void load(); });
   useEffect(() => { if (!pill) handled.current = false; }, [pill]);
   const commandDraft = isCommandDraft(composer.draft);
   // The pill's text would reach a `/aif-…` skill as arguments; commands read
@@ -833,7 +789,7 @@ function AifPillController() {
     handled.current = true;
     try {
       if (!composer.draft.mentions.some(isAifPill)) composer.insert(AIF_MENTION, { at: 'end' });
-    } catch { handled.current = false; return; } // composer gone; the next 'changed' event retries
+    } catch { handled.current = false; return; } // composer gone; the next invalidation of this thread retries
     void rpc.call('ackAifPill', { threadId }).catch(() => undefined); // the flag stays; the pill is already in the draft
   }, [composer, rpc, threadId, pill, commandDraft]);
   return null;

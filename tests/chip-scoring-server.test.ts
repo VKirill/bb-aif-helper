@@ -163,7 +163,8 @@ test('chip scoring enabled: async fetch fills probabilities once per sourceKey',
     assert.equal(call.init.headers['x-goog-api-key'], key);
     const body = JSON.parse(call.init.body);
     assert.deepEqual(Object.keys(body.questions.next.criteria).sort(), ['aif-explore', 'aif-plan']);
-    assert(h.harness.realtimeSignals.some(sig => sig.channel === 'changed' && (sig.payload as any)?.threadId === 'thr_test'));
+    const tags = h.harness.inspection.experimental_rpcInvalidations.flatMap(entry => entry ?? []);
+    assert.ok(tags.includes('thread:thr_test'));
     assert(h.harness.inspection.logEntries.some(e => e.level === 'info' && e.message.startsWith('aif-chat: chips scored threadId=thr_test options=2 top=aif-plan')));
     const state = await h.harness.behavior.callRpc('chipScoring', {}) as any;
     assert.equal(state.lastError, null);

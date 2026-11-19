@@ -1,7 +1,7 @@
 import type { BbPluginApi } from '@get-bb/plugin-sdk';
 import { createHash } from 'node:crypto';
 import { z } from 'zod';
-import { hostContract, rpcContract, type ChipScoringView, type DelegationView } from './contract.ts';
+import { hostContract, hostSignals, rpcContract, type ChipScoringView, type DelegationView } from './contract.ts';
 import { DELEGATION_ROLES, delegationDefaultsSchema, modelSpec } from './delegation.ts';
 import { childModel, type ChildModel } from './child-model.ts';
 import type { DelegationChoice, DelegationDefaults, DelegationRole, DelegationState } from './delegation.ts';
@@ -18,6 +18,7 @@ import { versionSampleFresh } from './versions.ts';
 import { BASIC_PLAN_ROOT } from './basic-workflow.ts';
 import { DECISIONS_URL, decisionsRequest, decisionsResponseSchema, probabilitiesFor, scoringKey } from './chip-scoring.ts';
 import { parallelGroups } from './parallel-plan.ts';
+import { CHIP_SCORING_TAG, projectTag, threadTag } from './live-updates.ts';
 export { rpcContract } from './contract.ts';
 type Selection = { environmentId: string; target: string; phase: Phase };
 type Delivery = { requestId: string; fingerprint: string; actionId: string; state: 'attempting' | 'sent' | 'uncertain'; at: number };
@@ -51,7 +52,7 @@ export default async function plugin(bb: BbPluginApi) {
     upstreamRef: { type: 'string', label: 'Upstream ref (пусто — последний стабильный release)', default: '', experimental_schema: z.string().max(200) },
     decisionsKey: { type: 'string', label: 'Ключ Gemini Decisions (ручной ввод)', secret: true, default: '' },
   });
-  const host = bb.hosts.experimental_client({ contract: hostContract });
+  const host = bb.hosts.experimental_client({ contract: hostContract, experimental_signals: hostSignals });
   let enabled = (await settings.get()).enabled;
   settings.onChange(next => { enabled = next.enabled; });
   const queues = new Map<string, Promise<unknown>>();
@@ -89,7 +90,7 @@ export default async function plugin(bb: BbPluginApi) {
       cacheWrite.run(key, entry.at, json);
       db.prepare('DELETE FROM status_cache WHERE key IN (SELECT key FROM status_cache ORDER BY at DESC LIMIT -1 OFFSET 100)').run();
     },
-    changed(key) { for (const threadId of watchers.get(key) ?? []) bb.realtime.publish('changed', { threadId }); },
+    changed(key) { const ids = watchers.get(key); if (ids?.size) bb.rpc.experimental_invalidate([...ids].map(threadTag)); },
   });
   const histories = new Map<string, { at: number; records: ChatCheck[]; error?: boolean }>();
   const historyLoads = new Map<string, Promise<void>>();
@@ -127,12 +128,12 @@ export default async function plugin(bb: BbPluginApi) {
         });
         if (histories.size > 100) histories.clear();
         histories.set(key, history);
-        bb.realtime.publish('changed', { threadId });
+        bb.rpc.experimental_invalidate([threadTag(threadId)]);
       } catch (error) {
         if (disposed) return;
         bb.log.warn(`Chat gate history: ${error instanceof Error ? error.message.slice(0, 500) : 'unavailable'}`);
         const history = histories.get(key); if (history) { history.at = Date.now() - 45000; history.error = true; }
-        bb.realtime.publish('changed', { threadId });
+        bb.rpc.experimental_invalidate([threadTag(threadId)]);
       }
     };
     if (fresh || Date.now() - histories.get(key)!.at > 60000) {
@@ -244,7 +245,7 @@ export default async function plugin(bb: BbPluginApi) {
     const { environment } = await context(input.threadId);
     const snapshot = await status(input, false, true);
     await bb.storage.kv.set(`selection:${input.threadId}`, { environmentId: environment.id, target: input.target, phase: input.phase } satisfies Selection);
-    bb.realtime.publish('changed', { threadId: input.threadId });
+    bb.rpc.experimental_invalidate([threadTag(input.threadId)]);
     return { snapshot, previewDirective: cardDirective({ target: snapshot.target?.path ?? input.target, phase: input.phase }) };
   }
   async function suggested(threadId: string, fresh = false) {
@@ -269,7 +270,7 @@ export default async function plugin(bb: BbPluginApi) {
       reason: reply.error ?? (blockedByGate(id, reply.gate) ? 'Gate содержит блокирующие проблемы.' : unchangedCheck(snapshot, id) ? unchangedReason : snapshot.profile === 'invalid' ? 'Проверьте конфигурацию проекта.' : !(snapshot.skills.includes(id) || id === 'aif-chat') ? `Skill не установлен для ${snapshot.runtime}` : reply.next === id ? reply.gate?.suggested_next?.reason ?? 'Следующий шаг из gate' : 'Команда из последнего ответа агента'),
       probability: null,
     }));
-    if (offered.length > items.length) bb.log.info(`aif-chat: suggestions threadId=${threadId} shown=${items.length} hiddenUnknown=${offered.length - items.length}`);
+    if (offered.length > items.length) bb.log.debug(`aif-chat: suggestions threadId=${threadId} shown=${items.length} hiddenUnknown=${offered.length - items.length}`);
     await chipScoringFor(threadId, sourceKey, reply.prose, items);
     const view: Suggestions = { sourceKey, fingerprint: snapshot.fingerprint, threadState: snapshot.threadState, gate: reply.gate, gateError: reply.error, items };
     return { view, ids, hidden, snapshot };
@@ -281,7 +282,7 @@ export default async function plugin(bb: BbPluginApi) {
     const hidden = dismissed?.sourceKey === sourceKey ? dismissed.ids : [];
     const items = nextStepItems(snapshot.actions, { skills: snapshot.skills, invalid: snapshot.profile === 'invalid',
       prefix: ['codex', 'codex-app'].includes(snapshot.runtime) ? '$' : '/', hidden });
-    bb.log.info(`aif-chat: fallback suggestions threadId=${threadId} count=${items.length}`);
+    bb.log.debug(`aif-chat: fallback suggestions threadId=${threadId} count=${items.length}`);
     await chipScoringFor(threadId, sourceKey, output ?? '', items);
     const view: Suggestions = { sourceKey, fingerprint: snapshot.fingerprint, threadState: snapshot.threadState, gate: null, gateError: null, items };
     return { view, ids: items.map(i => i.id), hidden, snapshot };
@@ -325,7 +326,7 @@ export default async function plugin(bb: BbPluginApi) {
     bb.log.info(`aif-chat: delegation saved threadId=${threadId} role=${role} mode=${choice.mode}`);
     if (state.removedLegacy) bb.log.info(`aif-chat: removed legacy runner root=${environment.path}`);
     cache.invalidate(key => !!watchers.get(key)?.has(threadId));
-    bb.realtime.publish('changed', { threadId });
+    bb.rpc.experimental_invalidate([threadTag(threadId)]);
     return delegationView(threadId);
   }
   async function setDelegationDefaults(threadId: string, action: 'from-project' | 'apply' | 'clear') {
@@ -348,7 +349,7 @@ export default async function plugin(bb: BbPluginApi) {
     if (action !== 'clear') await markApplied(environment);
     bb.log.info(`aif-chat: delegation defaults ${action} threadId=${threadId}`);
     cache.invalidate(key => !!watchers.get(key)?.has(threadId));
-    bb.realtime.publish('changed', { threadId });
+    bb.rpc.experimental_invalidate([threadTag(threadId)]);
     return delegationView(threadId);
   }
   async function applyDefaults(root: string, hostId: string, defaults: DelegationDefaults, foreign: string | null): Promise<DelegationRole[]> {
@@ -386,7 +387,7 @@ export default async function plugin(bb: BbPluginApi) {
       await markApplied(environment);
       bb.log.info(`aif-chat: delegation defaults auto-applied threadId=${threadId} roles=${roles.join(',')}`);
       cache.invalidate(key => !!watchers.get(key)?.has(threadId));
-      bb.realtime.publish('changed', { threadId });
+      bb.rpc.experimental_invalidate([threadTag(threadId)]);
       const parts = roles.flatMap(role => {
         const choice = parsed.data[role];
         return choice.mode === 'bb' ? [`${ROLE_NAMES[role]} — ${modelSpec(choice)}`] : [];
@@ -460,6 +461,7 @@ export default async function plugin(bb: BbPluginApi) {
         const state = await scoringState();
         await bb.storage.kv.set(CHIP_SCORING_KV, { ...state, lastError });
       });
+      bb.rpc.experimental_invalidate([CHIP_SCORING_TAG]);
     };
     const resolved = await resolveDecisionsKey();
     if ('error' in resolved) return fail(resolved.error, resolved.error);
@@ -479,7 +481,7 @@ export default async function plugin(bb: BbPluginApi) {
       return fail(lastError, name);
     }
     rememberChipScore(key, probabilities);
-    bb.realtime.publish('changed', { threadId });
+    bb.rpc.experimental_invalidate([threadTag(threadId), CHIP_SCORING_TAG]);
     const top = options.reduce((a, b) => (probabilities[b.id] ?? 0) > (probabilities[a.id] ?? 0) ? b : a).id;
     bb.log.info(`aif-chat: chips scored threadId=${threadId} options=${options.length} top=${top} ms=${Date.now() - started}`);
     await serial(CHIP_SCORING_KV, async () => {
@@ -515,7 +517,11 @@ export default async function plugin(bb: BbPluginApi) {
     setDelegation: input => serial(`delegation:${input.threadId}`, () => setDelegation(input.threadId, input.choice, input.role)),
     setDelegationDefaults: input => serial(`delegation:${input.threadId}`, () => setDelegationDefaults(input.threadId, input.action)),
     chipScoring: () => chipScoringView(),
-    setChipScoring: input => serial('chip-scoring', () => setChipScoring(input)),
+    setChipScoring: input => serial('chip-scoring', async () => {
+      const view = await setChipScoring(input);
+      bb.rpc.experimental_invalidateAll();
+      return view;
+    }),
     setReadinessSkip: async input => {
       const { environment } = await context(input.threadId);
       const key = `readiness-skip:${environment.hostId}:${environment.path!}`;
@@ -526,7 +532,7 @@ export default async function plugin(bb: BbPluginApi) {
         await bb.storage.kv.set(key, next);
         bb.log.info(`aif-chat: readiness skip threadId=${input.threadId} stepId=${input.stepId} skipped=${input.skipped}`);
         cache.invalidate(k => !!watchers.get(k)?.has(input.threadId));
-        bb.realtime.publish('changed', { threadId: input.threadId });
+        bb.rpc.experimental_invalidate([threadTag(input.threadId)]);
         return { ok: true as const };
       });
     },
@@ -534,7 +540,7 @@ export default async function plugin(bb: BbPluginApi) {
       const current = await suggested(input.threadId);
       if (current.view.sourceKey !== input.sourceKey || !current.ids.includes(input.commandId)) throw new Error('Предложения изменились. Обновите их.');
       await bb.storage.kv.set(`suggestions-dismissed:${input.threadId}`, { sourceKey: input.sourceKey, ids: [...new Set([...current.hidden, input.commandId])] } satisfies DismissedSuggestions);
-      bb.realtime.publish('changed', { threadId: input.threadId });
+      bb.rpc.experimental_invalidate([threadTag(input.threadId)]);
       return { dismissed: true as const };
     }),
     runSuggestion: input => serial(input.threadId, async () => {
@@ -610,7 +616,7 @@ export default async function plugin(bb: BbPluginApi) {
         await bb.storage.kv.set(`deliveries:${input.threadId}`, next);
         throw new Error('Исход отправки не подтверждён. Сначала проверьте чат; команда автоматически не повторяется.');
       }
-      cache.invalidate(key => !!watchers.get(key)?.has(input.threadId)); bb.realtime.publish('changed', { threadId: input.threadId });
+      cache.invalidate(key => !!watchers.get(key)?.has(input.threadId)); bb.rpc.experimental_invalidate([threadTag(input.threadId)]);
       return { sent: true, message: 'Команда отправлена в этот чат.' };
     }),
     aifMode: async input => {
@@ -627,13 +633,93 @@ export default async function plugin(bb: BbPluginApi) {
         } else await bb.storage.kv.delete(`aif-pill:${threadId}`);
       }
       bb.log.info(`aif-chat: aif-mode set projectId=${projectId} on=${input.on}`);
-      bb.realtime.publish('changed', { threadId: threadId ?? null, projectId });
+      bb.rpc.experimental_invalidate([projectTag(projectId), ...(threadId ? [threadTag(threadId)] : [])]);
       return aifModeView(threadId, projectId, input.on);
     }),
     ackAifPill: async input => {
       await bb.storage.kv.delete(`aif-pill:${input.threadId}`);
+      bb.rpc.experimental_invalidate([threadTag(input.threadId)]);
       return { ok: true as const };
     },
+  });
+  const liveRoots = new Map<string, { hostId: string; root: string; refs: number; retried: boolean }>();
+  const liveKey = (hostId: string, root: string) => `${hostId}:${root}`;
+  const errMessage = (error: unknown) => (error instanceof Error ? error.message : String(error)).slice(0, 500);
+  const invalidateRoot = (hostId: string, root: string) => {
+    const threadIds = new Set<string>();
+    cache.invalidate(key => {
+      let match = false;
+      try {
+        const parts: unknown = JSON.parse(key);
+        match = Array.isArray(parts) && parts[2] === root && parts[3] === hostId;
+      } catch { /* Keys that are not JSON arrays cannot belong to a project root. */ }
+      if (match) for (const id of watchers.get(key) ?? []) threadIds.add(id);
+      return match;
+    });
+    if (threadIds.size) bb.rpc.experimental_invalidate([...threadIds].map(threadTag));
+  };
+  const rewatch = (hostId: string, root: string) => {
+    host.call('watch', { root }, { hostId }).catch(error => bb.log.warn(`aif-chat: watch retry failed root=${root}: ${errMessage(error)}`));
+  };
+  const offFilesChanged = host.experimental_onSignal('filesChanged', ({ hostId, payload }) => invalidateRoot(hostId, payload.root));
+  const offWatchLost = host.experimental_onSignal('watchLost', ({ hostId, payload }) => {
+    bb.log.warn(`aif-chat: watch lost root=${payload.root} reason=${payload.reason}`);
+    invalidateRoot(hostId, payload.root);
+    const live = liveRoots.get(liveKey(hostId, payload.root));
+    if (!live) return;
+    if (live.retried) { bb.log.warn(`aif-chat: watch lost again root=${payload.root}; staying unwatched`); return; }
+    live.retried = true;
+    rewatch(hostId, payload.root);
+  });
+  const offWorkerExit = host.experimental_onWorkerExit(({ hostId }) => {
+    bb.log.warn(`aif-chat: host worker exited hostId=${hostId}`);
+    for (const live of liveRoots.values()) {
+      if (live.hostId !== hostId) continue;
+      invalidateRoot(hostId, live.root);
+      if (live.retried) continue;
+      live.retried = true;
+      rewatch(hostId, live.root);
+    }
+  });
+  bb.rpc.experimental_whileWatched('status', (read, signal) => {
+    if (!('input' in read)) return;
+    const input = read.input;
+    if (!input || typeof input !== 'object' || !('threadId' in input)) return;
+    const threadId = input.threadId;
+    if (typeof threadId !== 'string') return;
+    void (async () => {
+      const { environment } = await context(threadId);
+      if (signal.aborted) return;
+      const root = environment.path!;
+      const hostId = environment.hostId;
+      const key = liveKey(hostId, root);
+      let live = liveRoots.get(key);
+      if (!live) { live = { hostId, root, refs: 0, retried: false }; liveRoots.set(key, live); }
+      live.refs += 1;
+      if (live.refs === 1) {
+        try {
+          await host.call('watch', { root }, { hostId });
+          live.retried = false;
+          bb.log.debug(`aif-chat: watch on root=${root} refs=${live.refs}`);
+        } catch (error) {
+          bb.log.warn(`aif-chat: watch failed root=${root}: ${errMessage(error)}`);
+        }
+      }
+      let released = false;
+      const release = () => {
+        if (released) return;
+        released = true;
+        const entry = liveRoots.get(key);
+        if (!entry) return;
+        entry.refs -= 1;
+        bb.log.debug(`aif-chat: watch release root=${root} refs=${entry.refs}`);
+        if (entry.refs > 0) return;
+        liveRoots.delete(key);
+        host.call('unwatch', { root }, { hostId }).catch(error => { if (!disposed) bb.log.warn(`aif-chat: unwatch failed root=${root}: ${errMessage(error)}`); });
+      };
+      signal.addEventListener('abort', release, { once: true });
+      if (signal.aborted) release();
+    })().catch(error => bb.log.warn(`aif-chat: status watch failed threadId=${threadId}: ${errMessage(error)}`));
   });
   bb.agents.registerTool({
     name: 'aif_chat_status',
@@ -721,8 +807,7 @@ export default async function plugin(bb: BbPluginApi) {
       for (const key of histories.keys()) if (key.includes(thread.id)) histories.delete(key);
       cache.invalidate(key => !!watchers.get(key)?.has(thread.id) || !!thread.environmentId && key.includes(thread.environmentId));
     }
-    bb.realtime.publish('changed', { threadId: thread.id });
-    if (thread.parentThreadId) bb.realtime.publish('changed', { threadId: thread.parentThreadId });
+    bb.rpc.experimental_invalidate([threadTag(thread.id), ...(thread.parentThreadId ? [threadTag(thread.parentThreadId)] : [])]);
   });
   bb.events.on('thread.idle', async ({ thread, lastAssistantText }) => {
     const updating = await bb.storage.kv.get<{ key: string }>(`updating-versions:${thread.id}`);
@@ -730,7 +815,7 @@ export default async function plugin(bb: BbPluginApi) {
       db.prepare('DELETE FROM local_versions WHERE key = ?').run(updating.key);
       await bb.storage.kv.delete(`updating-versions:${thread.id}`);
       cache.invalidate(key => !!watchers.get(key)?.has(thread.id));
-      bb.realtime.publish('changed', { threadId: thread.id });
+      bb.rpc.experimental_invalidate([threadTag(thread.id)]);
     }
     const reply = analyzeReply(lastAssistantText ?? '');
     if (!enabled || !reply.gate || reply.error) return;
@@ -759,7 +844,7 @@ export default async function plugin(bb: BbPluginApi) {
         }
       });
       for (const key of histories.keys()) if (key.includes(thread.id)) histories.delete(key);
-      bb.realtime.publish('changed', { threadId: thread.id });
+      bb.rpc.experimental_invalidate([threadTag(thread.id)]);
     } catch { bb.log.warn('Could not bind completed gate to workspace inputs; repeat checks remain available.'); }
   });
   bb.events.on('thread.deleted', async ({ thread }) => {
@@ -781,7 +866,7 @@ export default async function plugin(bb: BbPluginApi) {
         await bb.storage.kv.set(cursorKey, sequence);
         if (rows.some(row => row.type === 'thread/compacted' && row.seq > cursor)) {
           await bb.storage.kv.set(`aif-pill:${thread.id}`, true);
-          bb.realtime.publish('changed', { threadId: thread.id });
+          bb.rpc.experimental_invalidate([threadTag(thread.id)]);
           bb.log.info(`aif-chat: compaction seen threadId=${thread.id}`);
         }
       });
@@ -789,5 +874,5 @@ export default async function plugin(bb: BbPluginApi) {
       bb.log.warn(`aif-chat: compaction watch failed threadId=${thread.id}: ${error instanceof Error ? error.message : String(error)}`);
     }
   });
-  bb.onDispose(() => { disposed = true; cache.dispose(); histories.clear(); historyLoads.clear(); historyEpochs.clear(); watchers.clear(); versionScopes.clear(); queues.clear(); });
+  bb.onDispose(() => { disposed = true; liveRoots.clear(); offFilesChanged(); offWatchLost(); offWorkerExit(); cache.dispose(); histories.clear(); historyLoads.clear(); historyEpochs.clear(); watchers.clear(); versionScopes.clear(); queues.clear(); });
 }

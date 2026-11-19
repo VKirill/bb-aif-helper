@@ -74,8 +74,8 @@ test('a pending pill flag inserts the mention once and acknowledges it once', as
     await waitFor(() => assert.equal(acks, 1));
     await waitFor(() => assert.equal(pillMentions(slot.inspection.composer.draft).length, 1));
     assert.equal(slot.inspection.composer.draft.text, '@AI Factory');
-    await slot.behavior.emitRealtime('changed', { threadId: 'thr_test' });
-    await waitFor(() => assert.equal(slot.inspection.rpcCalls.filter(c => c.method === 'aifMode').length, 2));
+    await slot.behavior.experimental_invalidateRpc(['thread:thr_test']);
+    assert.equal(slot.inspection.rpcCalls.filter(c => c.method === 'aifMode').length, 2);
     assert.equal(acks, 1);
     assert.equal(pillMentions(slot.inspection.composer.draft).length, 1);
   } finally { slot.lifecycle.unmount(); }

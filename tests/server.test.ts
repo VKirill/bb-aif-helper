@@ -19,18 +19,27 @@ async function setup() {
   let collectBlock: Promise<void> | null = null;
   let collectFailure = false;
   const hostInputs: any[] = [];
+  const hostCalls: { method: string; input: unknown; hostId: string }[] = [];
   let thread = makeThreadResponse({ id: 'thr_test', projectId: 'proj_test', environmentId: 'env_test', status: 'idle', runtime: { displayStatus: 'idle' } });
   const h = createFakePluginHost({ pluginId: 'aif-chat', agentSkillIds: ['aif-chat'], experimental_hostEntry: true,
     sdk: {
       threads: { get: async () => thread, events: { list: async (args: any) => { assert(Number(args.limit) <= 100); return events; } }, output: async () => ({ output }), send: async () => { sends++; if (failSend) throw new Error('lost connection'); return {} as any; }, interactions: { list: async () => Array.from({ length: pending }, () => ({})) as any } },
       environments: { get: async () => ({ id: 'env_test', projectId: 'proj_test', path: '/project', hostId: 'host_test', status: 'ready', lifecycle: { phase: 'active' } }) as any },
     },
-    experimental_callHostRpc: async ({ input }) => { collections++; hostInputs.push(structuredClone(input)); if (collectBlock) await collectBlock; if (collectFailure) throw new Error('host unavailable'); return structuredClone(value); },
+    experimental_callHostRpc: async call => {
+      hostCalls.push({ method: call.method, input: structuredClone(call.input), hostId: call.hostId });
+      if (call.method === 'watch' || call.method === 'unwatch') return { ok: true as const };
+      if (call.method !== 'collect') return structuredClone(value);
+      collections++; hostInputs.push(structuredClone(call.input));
+      if (collectBlock) await collectBlock;
+      if (collectFailure) throw new Error('host unavailable');
+      return structuredClone(value);
+    },
   });
   await plugin(h.bb);
   return { ...h, get value() { return value; }, set value(v) { value = v; }, get sends() { return sends; },
     get collections() { return collections; }, setCollectBlock(block: Promise<void> | null) { collectBlock = block; },
-    get hostInputs() { return hostInputs; }, setCollectFailure(fails: boolean) { collectFailure = fails; },
+    get hostInputs() { return hostInputs; }, get hostCalls() { return hostCalls; }, setCollectFailure(fails: boolean) { collectFailure = fails; },
     setEvents(rows: any[]) { events = rows; }, setOutput(text: string | null) { output = text; }, setQueued(count: number) { thread = { ...thread, queuedMessageCount: count }; },
     setFailure(v: boolean) { failSend = v; }, setPending(v: number) { pending = v; }, setActive(v: boolean) { thread = { ...thread, status: v ? 'active' : 'idle', runtime: { displayStatus: v ? 'active' : 'idle' } }; } };
 }
@@ -610,12 +619,12 @@ test('a blocking last-answer gate also stops advancing from a workflow card with
   } finally { await h.harness.lifecycle.dispose(); }
 });
 
-test('a child thread going idle publishes changed for its parent thread', async () => {
+test('a child thread going idle invalidates its own and its parent thread tags', async () => {
   const h = await setup(); try {
     await h.harness.behavior.emitThreadEvent('thread.idle', { thread: makeThreadResponse({ id: 'thr_child', parentThreadId: 'thr_test' }), lastAssistantText: null });
-    const targets = h.harness.realtimeSignals.filter(s => s.channel === 'changed').map(s => (s.payload as { threadId?: string }).threadId);
-    assert.ok(targets.includes('thr_child'));
-    assert.ok(targets.includes('thr_test'));
+    const tags = h.harness.inspection.experimental_rpcInvalidations.flatMap(entry => entry ?? []);
+    assert.ok(tags.includes('thread:thr_child'));
+    assert.ok(tags.includes('thread:thr_test'));
   } finally { await h.harness.lifecycle.dispose(); }
 });
 
@@ -645,5 +654,79 @@ test('documentation counts as done only after /aif-docs was launched from the re
     await h.harness.behavior.callRpc('run', { ...runInput(view.fingerprint), phase: 'unknown', target: '', actionId: 'docs-setup' });
     assert.deepEqual(await h.bb.storage.kv.get('readiness-ran:host_test:/project'), ['docs']);
     assert.equal(docs(await h.harness.behavior.callRpc('status', { threadId: 'thr_test', force: true })), 'done');
+  } finally { await h.harness.lifecycle.dispose(); }
+});
+
+test('ackAifPill invalidates the thread tag', async () => {
+  const h = await setup(); try {
+    await h.harness.behavior.callRpc('ackAifPill', { threadId: 'thr_test' });
+    const tags = h.harness.inspection.experimental_rpcInvalidations.flatMap(entry => entry ?? []);
+    assert.ok(tags.includes('thread:thr_test'));
+  } finally { await h.harness.lifecycle.dispose(); }
+});
+
+test('setAifMode invalidates the project tag and the thread tag when a thread is given', async () => {
+  const h = await setup(); try {
+    await h.harness.behavior.callRpc('setAifMode', { projectId: 'proj_test', on: true });
+    let tags = h.harness.inspection.experimental_rpcInvalidations.flatMap(entry => entry ?? []);
+    assert.ok(tags.includes('project:proj_test'));
+    await h.harness.behavior.callRpc('setAifMode', { threadId: 'thr_test', on: false });
+    tags = h.harness.inspection.experimental_rpcInvalidations.flatMap(entry => entry ?? []);
+    assert.ok(tags.includes('project:proj_test'));
+    assert.ok(tags.includes('thread:thr_test'));
+  } finally { await h.harness.lifecycle.dispose(); }
+});
+
+const tick = () => new Promise(resolve => setTimeout(resolve, 10));
+const hostCallsOf = <T extends { method: string }>(calls: T[], method: string) => calls.filter(call => call.method === method);
+
+test('watched status reads share one host watch per root and unwatch when the last read ends', async () => {
+  const h = await setup(); try {
+    const stopA = h.harness.behavior.experimental_watchRpc('status', { input: { threadId: 'thr_test' } });
+    const stopB = h.harness.behavior.experimental_watchRpc('status', { input: { threadId: 'thr_test', phase: 'verify' } });
+    await tick();
+    const watches = hostCallsOf(h.hostCalls, 'watch');
+    assert.equal(watches.length, 1);
+    assert.deepEqual(watches[0].input, { root: '/project' });
+    assert.equal(watches[0].hostId, 'host_test');
+    stopA();
+    await tick();
+    assert.equal(hostCallsOf(h.hostCalls, 'unwatch').length, 0);
+    stopB();
+    await tick();
+    const unwatches = hostCallsOf(h.hostCalls, 'unwatch');
+    assert.equal(unwatches.length, 1);
+    assert.deepEqual(unwatches[0].input, { root: '/project' });
+  } finally { await h.harness.lifecycle.dispose(); }
+});
+
+test('a filesChanged host signal invalidates watching threads and the next status re-collects', async () => {
+  const h = await setup(); try {
+    await h.harness.behavior.callRpc('status', { threadId: 'thr_test', phase: 'plan' });
+    await tick();
+    const collected = h.collections;
+    const invalidations = h.harness.inspection.experimental_rpcInvalidations.length;
+    await h.harness.behavior.experimental_emitHostSignal('host_test', 'filesChanged', { root: '/project' });
+    await tick();
+    assert.ok(h.harness.inspection.experimental_rpcInvalidations.slice(invalidations).some(entry => entry?.includes('thread:thr_test')));
+    await h.harness.behavior.callRpc('status', { threadId: 'thr_test', phase: 'plan' });
+    await tick();
+    assert(h.collections > collected);
+  } finally { await h.harness.lifecycle.dispose(); }
+});
+
+test('watchLost retries the host watch once, then warns and stays unwatched', async () => {
+  const h = await setup(); try {
+    const stop = h.harness.behavior.experimental_watchRpc('status', { input: { threadId: 'thr_test' } });
+    await tick();
+    assert.equal(hostCallsOf(h.hostCalls, 'watch').length, 1);
+    await h.harness.behavior.experimental_emitHostSignal('host_test', 'watchLost', { root: '/project', reason: 'fsnotify died' });
+    await tick();
+    assert.equal(hostCallsOf(h.hostCalls, 'watch').length, 2);
+    await h.harness.behavior.experimental_emitHostSignal('host_test', 'watchLost', { root: '/project', reason: 'still dead' });
+    await tick();
+    assert.equal(hostCallsOf(h.hostCalls, 'watch').length, 2);
+    assert.ok(h.harness.inspection.logEntries.some(entry => entry.level === 'warn' && entry.message.includes('watch lost')));
+    stop();
   } finally { await h.harness.lifecycle.dispose(); }
 });
