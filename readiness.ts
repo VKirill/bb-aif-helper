@@ -89,6 +89,11 @@ export function readinessComplete(steps: ReadinessStep[]): boolean {
   return steps.every(s => s.state !== 'todo');
 }
 
+/** Core steps (install, project context, architecture) cannot be skipped; AI Factory needs them to work at all. */
+export function readinessCoreComplete(steps: ReadinessStep[]): boolean {
+  return steps.filter(s => !s.skippable).every(s => s.state === 'done');
+}
+
 export function nextReadinessStep(steps: ReadinessStep[]): ReadinessStep | undefined {
   return steps.find(s => s.state === 'todo');
 }

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { applyRan, readinessSteps, readinessComplete, nextReadinessStep, type ReadinessFacts } from '../readiness.ts';
+import { applyRan, readinessSteps, readinessComplete, readinessCoreComplete, nextReadinessStep, type ReadinessFacts } from '../readiness.ts';
 
 const facts = (patch: Partial<ReadinessFacts> = {}): ReadinessFacts => ({ configured: true, contextSkill: true, files: {}, paths: {}, ...patch });
 const byId = (steps: ReturnType<typeof readinessSteps>) => Object.fromEntries(steps.map(s => [s.id, s]));
@@ -93,4 +93,14 @@ test('an existing docs/ folder alone does not complete documentation; a run from
   assert.equal(byId(applyRan(steps, ['docs'])).docs.state, 'done');
   const noFolder = readinessSteps(facts());
   assert.equal(byId(applyRan(noFolder, ['docs'])).docs.state, 'todo', 'a run that produced no docs/ stays todo');
+});
+
+test('core readiness needs install, context and architecture only; optional steps never block it', () => {
+  const facts = (files: Record<string, boolean>): ReadinessFacts => ({ configured: true, contextSkill: true, files, paths: {} });
+  const core = { '.ai-factory/DESCRIPTION.md': true, '.ai-factory/config.yaml': true, '.ai-factory/rules/base.md': true, 'AGENTS.md': true };
+  assert.equal(readinessCoreComplete(readinessSteps(facts({}))), false);
+  assert.equal(readinessCoreComplete(readinessSteps(facts(core))), false, 'architecture is still missing');
+  const steps = readinessSteps(facts({ ...core, '.ai-factory/ARCHITECTURE.md': true }));
+  assert.equal(readinessCoreComplete(steps), true);
+  assert.equal(readinessComplete(steps), false, 'optional steps remain open while core is ready');
 });

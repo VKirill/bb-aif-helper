@@ -11,18 +11,19 @@ const SurfaceContext = createContext<Surface>('card');
 export const SurfaceProvider = SurfaceContext.Provider;
 export const useSurface = () => useContext(SurfaceContext);
 
-export function Section({ title, aside, label, className, children }: { title?: ReactNode; aside?: ReactNode; label: string; className?: string; children: ReactNode }) {
+export function Section({ id, title, aside, label, className, highlight = false, children }: { id?: string; title?: ReactNode; aside?: ReactNode; label: string; className?: string; highlight?: boolean; children: ReactNode }) {
   const surface = useSurface();
   if (surface === 'panel') {
-    return <section aria-label={label} className={cn('flex min-w-0 flex-col gap-2', className)}>
+    return <section id={id} aria-label={label} className={cn('flex min-w-0 scroll-mt-4 flex-col gap-2', className)}>
       {(title || aside) && <div className="flex min-w-0 items-center justify-between gap-2 px-1">
-        {title && <h3 className="m-0 text-xs text-muted-foreground">{title}</h3>}
+        {title && <h3 className={cn('m-0 text-xs', highlight ? 'font-medium text-foreground' : 'text-muted-foreground')}>{title}</h3>}
         {aside}
       </div>}
-      <div className="flex min-w-0 flex-col gap-3 rounded-xl bg-card p-4">{children}</div>
+      {/* highlight: a section that needs action now gets the accent ring until it is done. */}
+      <div className={cn('flex min-w-0 flex-col gap-3 rounded-xl bg-card p-4', highlight && 'ring-2 ring-primary/50')}>{children}</div>
     </section>;
   }
-  return <section aria-label={label} className={cn('flex min-w-0 flex-col gap-3 rounded-lg border border-border bg-card p-4', className)}>
+  return <section id={id} aria-label={label} className={cn('flex min-w-0 flex-col gap-3 rounded-lg border bg-card p-4', highlight ? 'border-primary/50' : 'border-border', className)}>
     {(title || aside) && <div className="flex min-w-0 items-center justify-between gap-2">
       {title && <h3 className="m-0 text-xs font-medium text-muted-foreground">{title}</h3>}
       {aside}

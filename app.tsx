@@ -3,7 +3,7 @@ import { definePluginApp, useRpc, experimental_useRpcQuery, useComposer, useBbNa
 import { rpcContract, type ChipScoringView, type DelegationView } from './contract.ts';
 import type { DelegationChoice, DelegationRole } from './delegation.ts';
 import { phaseSchema, type Snapshot, type Phase, type Action, type ReadinessStep, type Suggestions } from './model.ts';
-import { readinessComplete, nextReadinessStep, readinessHelp, type SkippableStepId } from './readiness.ts';
+import { readinessComplete, readinessCoreComplete, nextReadinessStep, readinessHelp, type SkippableStepId } from './readiness.ts';
 import { parseReplyGate } from './gate.ts';
 import { checkHelp, rowActions, supplementaryChecks, toolHelp } from './check-actions.ts';
 import { updateInVersionDetails, VERSION_TTL } from './versions.ts';
@@ -121,7 +121,13 @@ function WorkflowCard({ threadId, initialTarget = '', phase = 'unknown', openFil
     const state = c.chat ? c.chat.result.status : c.state;
     return state === 'fail' ? 'destructive' : state === 'pass' || state === 'reported-pass' ? 'default' : 'secondary';
   };
-  const settingsAttention = !!snapshot && (snapshot.profile === 'invalid' ||
+  const coreReady = !snapshot || !snapshot.readiness.length || readinessCoreComplete(snapshot.readiness);
+  const openReadiness = () => {
+    setView('settings');
+    // Wait for the settings view to render, then bring the highlighted block into view.
+    requestAnimationFrame(() => document.getElementById('aif-readiness')?.scrollIntoView?.({ block: 'start', behavior: 'smooth' }));
+  };
+  const settingsAttention = !!snapshot && (snapshot.profile === 'invalid' || !coreReady ||
     snapshot.actions.some(a => a.group === 'maintenance' && a.available && updateInVersionDetails(snapshot, a.id)));
   const versionsLine = snapshot && <div className="aif-versions flex flex-wrap gap-x-4 gap-y-1 text-xs text-muted-foreground tabular-nums">
     <span>CLI <b className="font-semibold text-foreground">{snapshot.versions.globalCli ?? 'не найден'}</b></span>
@@ -153,8 +159,15 @@ function WorkflowCard({ threadId, initialTarget = '', phase = 'unknown', openFil
     {snapshot && <>
       {!delegation && versionsLine}
 
-      {delegation && view === 'nav' && snapshot.readiness.length > 0 && !readinessComplete(snapshot.readiness) &&
-        <ReadinessSection snapshot={snapshot} run={run} busy={busy} sending={sending} setReadinessSkip={setReadinessSkip} />}
+      {delegation && view === 'nav' && !coreReady && <Section label="Подготовка проекта" highlight>
+        <div className="flex min-w-0 items-center gap-3">
+          <div className="min-w-0 flex-1">
+            <p className="m-0 text-sm font-medium">Проект не подготовлен к AI Factory</p>
+            <p className="m-0 text-xs text-muted-foreground">Основных шагов осталось: {snapshot.readiness.filter(s => !s.skippable && s.state !== 'done').length} из {snapshot.readiness.filter(s => !s.skippable).length}</p>
+          </div>
+          <Button type="button" size="sm" onClick={openReadiness}>Подготовить</Button>
+        </div>
+      </Section>}
 
       {(!delegation || view === 'nav') && <Section label="Текущий этап" title="Сейчас">
         <p className="m-0 flex flex-wrap items-center gap-2" title={snapshot.phaseSource}>
@@ -215,9 +228,9 @@ function WorkflowCard({ threadId, initialTarget = '', phase = 'unknown', openFil
       </Disclosure>}
 
       {delegation && view === 'settings' && <>
+        {snapshot.readiness.length > 0 && <ReadinessSection snapshot={snapshot} run={run} busy={busy} sending={sending} setReadinessSkip={setReadinessSkip} />}
         {snapshot.configured && <DelegationSection threadId={threadId} environmentId={environmentId} busy={busy} />}
         <ChipScoringSection threadId={threadId} />
-        {snapshot.readiness.length > 0 && <ReadinessSection snapshot={snapshot} run={run} busy={busy} sending={sending} setReadinessSkip={setReadinessSkip} />}
         <Disclosure summary="Настройка инструментов">{renderActions(snapshot.actions.filter(a => a.group === 'setup' && (a.id === 'quality-setup' || a.id === 'ci-setup')))}</Disclosure>
         <ToolsSection actions={snapshot.actions.filter(a => a.group === 'setup' && toolHelp[a.id])} renderAction={renderAction} />
       </>}
@@ -316,10 +329,10 @@ function ModelChoice({ role, saved, providerName, environmentId, busy, locked: l
   }
   return <div className="flex min-w-0 flex-col gap-2 py-2.5 first:pt-0 last:pb-0">
     {/* Stretched button: the whole row opens the editor, while «?» sits right after the title without nesting buttons. */}
-    <div className={cn('relative flex min-h-11 min-w-0 items-center gap-2 px-1', locked && 'opacity-60')}>
+    <div className={cn('relative flex min-h-11 min-w-0 items-center gap-2', locked && 'opacity-60')}>
       <button type="button" aria-label={`Изменить: ${text.title}`} aria-expanded={editing} disabled={locked}
         onClick={() => (editing ? cancel() : setEditing(true))}
-        className="absolute inset-0 cursor-pointer rounded-md outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-default" />
+        className="absolute -inset-x-1 inset-y-0 cursor-pointer rounded-md outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-default" />
       <span className="pointer-events-none flex min-w-0 flex-1 flex-col">
         <span className="text-sm font-medium">{text.title}{text.note && <span className="pointer-events-auto relative z-10">
           <HelpMark label={`Подробнее: ${text.title}`} open={help} onToggle={() => setHelp(!help)} /></span>}</span>
@@ -329,7 +342,7 @@ function ModelChoice({ role, saved, providerName, environmentId, busy, locked: l
     </div>
     {role === 'implement' && saved.mode === 'bb' && !editing && <div className="flex min-h-11 flex-col justify-center gap-1 py-2.5">
       <div className="flex flex-wrap items-center gap-2">
-        <span className="min-w-0 flex-1 text-sm font-medium">Параллельно<HelpMark label="Подробнее: Параллельно" open={parallelHelp} onToggle={() => setParallelHelp(!parallelHelp)} /></span>
+        <span className="min-w-0 flex-1 text-sm">Параллельно<HelpMark label="Подробнее: Параллельно" open={parallelHelp} onToggle={() => setParallelHelp(!parallelHelp)} /></span>
         <div className="flex gap-1" role="group" aria-label="Параллельность">
           {([['Выкл', null], ['2', 2], ['3', 3], ['4', 4]] as const).map(([label, n]) =>
             <Button key={label} type="button" size="sm" variant={parallel === n ? 'secondary' : 'outline'} aria-pressed={parallel === n} disabled={locked || busy} onClick={() => setParallel(n)}>{label}</Button>)}
@@ -487,7 +500,10 @@ function ChipScoringSection({ threadId }: { threadId: string }) {
     <div className="flex min-w-0 flex-col divide-y divide-border">
       <div className="flex min-h-11 flex-col justify-center gap-1 py-2.5 first:pt-0">
         <div className="flex items-center gap-2">
-          <span className="min-w-0 flex-1 text-sm font-medium">Оценивать кнопки<HelpMark label="Что отправляется в Google" open={help} onToggle={() => setHelp(!help)} /></span>
+          <span className="flex min-w-0 flex-1 flex-col">
+            <span className="text-sm font-medium">Gemini Decisions<HelpMark label="Что отправляется в Google" open={help} onToggle={() => setHelp(!help)} /></span>
+            <span className="text-xs text-muted-foreground">Проценты вероятности на кнопках-подсказках</span>
+          </span>
           <Button type="button" size="sm" variant={view.enabled ? 'default' : 'outline'} aria-pressed={view.enabled} disabled={saving}
             onClick={() => void save({ enabled: !view.enabled })}>{view.enabled ? 'Вкл' : 'Выкл'}</Button>
         </div>
@@ -617,11 +633,12 @@ function ReadinessSection({ snapshot, run, busy, sending, setReadinessSkip }: {
   }
   const numbered = steps.map((s, i) => ({ s, n: i + 1 }));
   const rows = (items: typeof numbered) => <ol className="m-0 flex list-none flex-col divide-y divide-border p-0">{items.map(({ s, n }) => stepRow(s, n, next?.id === s.id))}</ol>;
-  if (readinessComplete(steps)) return <Disclosure summary="Проект готов к работе через AI Factory">{rows(numbered)}</Disclosure>;
+  if (readinessComplete(steps)) return <div id="aif-readiness"><Disclosure summary="Проект готов к работе через AI Factory">{rows(numbered)}</Disclosure></div>;
+  const core = readinessCoreComplete(steps);
   const finished = numbered.filter(({ s }) => s.state !== 'todo');
   const doneCount = finished.filter(({ s }) => s.state === 'done').length, skippedCount = finished.length - doneCount;
-  return <Section label="Подготовка проекта" title="Подготовка проекта">
-    <p className="m-0 text-xs text-muted-foreground">Выполните шаги по порядку, чтобы AI Factory работал полностью</p>
+  return <Section id="aif-readiness" label="Подготовка проекта" title="Подготовка проекта" highlight={!core}>
+    <p className="m-0 text-xs text-muted-foreground">{core ? 'Основное готово. Остальные шаги — по желанию, их можно пропустить' : 'Первые три шага нужны, чтобы AI Factory заработал. Выполните их по порядку'}</p>
     {finished.length > 0 && <Disclosure className="aif-readiness-finished" summary={<span className="text-sm font-normal text-muted-foreground">
       Выполнено · {doneCount}{skippedCount ? ` · пропущено · ${skippedCount}` : ''}</span>}>{rows(finished)}</Disclosure>}
     {rows(numbered.filter(({ s }) => s.state === 'todo'))}

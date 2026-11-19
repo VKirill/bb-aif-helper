@@ -234,9 +234,14 @@ test('workflow panel reads its owning thread and exposes maintenance without a t
   });
   try {
     await slot.findByRole('button', { name: 'Обновить AI Factory' });
+    await slot.findByText('Проект не подготовлен к AI Factory');
+    await slot.findByText('Основных шагов осталось: 1 из 2');
+    assert.equal(slot.queryByRole('button', { name: 'Запустить: Описать проект (/aif или aif-analyze)' }), null, 'navigation shows a prompt, not the step list');
+    fireEvent.click(slot.getByRole('button', { name: 'Подготовить' }));
+    assert.equal(slot.getByRole('tab', { name: /Настройки/ }).getAttribute('aria-selected'), 'true');
     await slot.findByRole('button', { name: 'Запустить: Описать проект (/aif или aif-analyze)' });
     assert.deepEqual(readThreads, ['thr_panel']); assert.equal(runs, 0);
-  } finally { slot.lifecycle.unmount(); }
+  } finally { slot.lifecycle.unmount(); window.sessionStorage.clear(); }
 });
 test('panel uses the BB provider/model picker and saves exactly its selection', async () => {
   const tab = app.tabs.find(t => t.id === 'workflow')!;
@@ -717,7 +722,8 @@ test('readiness title expands to reveal «Пропустить»; the chevron st
     setReadinessSkip: (input: any) => { skips.push(input); return { ok: true }; },
   } });
   try {
-    await slot.findByText('Подготовка проекта', { selector: '*' });
+    fireEvent.click(await slot.findByRole('button', { name: 'Подготовить' }));
+    await slot.findByText('Подготовка проекта', { selector: 'h3' });
     const title = (await slot.findAllByRole('button', { name: /Настроить CI/ })).find(b => !b.getAttribute('aria-label'))!;
     assert.equal(title.getAttribute('aria-expanded'), 'false');
     assert.equal(slot.queryByRole('button', { name: 'Пропустить' }), null);
