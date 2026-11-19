@@ -110,3 +110,20 @@ test('entry dispose closes all watches', async t => {
   await harness.experimental_dispose();
   assert.equal(calls[0]!.disposed, 1);
 });
+
+test('an existing .ai-factory/ gets its own subscription so git-ignored plans still signal', async t => {
+  const { mkdtemp, mkdir, rm } = await import('node:fs/promises');
+  const { tmpdir } = await import('node:os');
+  const path = await import('node:path');
+  const root = await mkdtemp(path.join(tmpdir(), 'aif-watch-'));
+  await mkdir(path.join(root, '.ai-factory'));
+  const { harness, calls } = setup();
+  t.after(async () => { await harness.experimental_dispose(); await rm(root, { recursive: true, force: true }); });
+  await harness.experimental_call('watch', { root });
+  assert.equal(calls.length, 2);
+  assert.deepEqual(calls[1]!.options, { rootPath: path.join(root, '.ai-factory'), ignoredPaths: [], debounceMs: 300, maxWaitMs: 1000 });
+  await calls[1]!.listener({ kind: 'changed', changes: [{ path: path.join(root, '.ai-factory/plans/p.md'), type: 'update' }] });
+  assert.deepEqual(harness.experimental_getSignals(), [{ signal: 'filesChanged', payload: { root } }]);
+  await harness.experimental_call('unwatch', { root });
+  assert.deepEqual(calls.map(c => c.disposed), [1, 1], 'unwatch closes both subscriptions');
+});
