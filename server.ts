@@ -651,11 +651,13 @@ export default async function plugin(bb: BbPluginApi) {
       let match = false;
       try {
         const parts: unknown = JSON.parse(key);
-        match = Array.isArray(parts) && parts[2] === root && parts[3] === hostId;
+        // Match by root only: the signal's hostId and environment.hostId may name the same daemon differently.
+        match = Array.isArray(parts) && parts[2] === root;
       } catch { /* Keys that are not JSON arrays cannot belong to a project root. */ }
       if (match) for (const id of watchers.get(key) ?? []) threadIds.add(id);
       return match;
     });
+    bb.log.debug(`aif-chat: files changed root=${root} hostId=${hostId} threads=${threadIds.size}`);
     if (threadIds.size) bb.rpc.experimental_invalidate([...threadIds].map(threadTag));
   };
   const rewatch = (hostId: string, root: string) => {
@@ -665,16 +667,16 @@ export default async function plugin(bb: BbPluginApi) {
   const offWatchLost = host.experimental_onSignal('watchLost', ({ hostId, payload }) => {
     bb.log.warn(`aif-chat: watch lost root=${payload.root} reason=${payload.reason}`);
     invalidateRoot(hostId, payload.root);
-    const live = liveRoots.get(liveKey(hostId, payload.root));
+    const live = [...liveRoots.values()].find(entry => entry.root === payload.root);
     if (!live) return;
     if (live.retried) { bb.log.warn(`aif-chat: watch lost again root=${payload.root}; staying unwatched`); return; }
     live.retried = true;
-    rewatch(hostId, payload.root);
+    rewatch(live.hostId, payload.root);
   });
   const offWorkerExit = host.experimental_onWorkerExit(({ hostId }) => {
     bb.log.warn(`aif-chat: host worker exited hostId=${hostId}`);
     for (const live of liveRoots.values()) {
-      if (live.hostId !== hostId) continue;
+      // Same hostId caveat as invalidateRoot; a redundant watch call is a no-op on a healthy host.
       invalidateRoot(hostId, live.root);
       if (live.retried) continue;
       live.retried = true;
@@ -700,7 +702,7 @@ export default async function plugin(bb: BbPluginApi) {
         try {
           await host.call('watch', { root }, { hostId });
           live.retried = false;
-          bb.log.debug(`aif-chat: watch on root=${root} refs=${live.refs}`);
+          bb.log.debug(`aif-chat: watch on root=${root} hostId=${hostId} refs=${live.refs}`);
         } catch (error) {
           bb.log.warn(`aif-chat: watch failed root=${root}: ${errMessage(error)}`);
         }
