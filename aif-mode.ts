@@ -8,6 +8,7 @@ export function aifModeInstructions(): string {
     'Drive work with `/aif-plan` → `/aif-implement` → `/aif-verify` → `/aif-commit`; fix bugs with `/aif-fix`.',
     'Follow the rules in `.ai-factory/skill-context/`.',
     'Call `aif_chat_status` at workflow boundaries.',
+    'When the next step is `/aif-fix`, `/aif-plan` or `/aif-explore`, write it with its topic (`/aif-fix <what to fix>`), so the chip can send it at once.',
     'This is the default path; a direct owner request to do otherwise wins.',
   ].join('\n');
 }

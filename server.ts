@@ -8,7 +8,7 @@ import type { DelegationChoice, DelegationDefaults, DelegationRole, DelegationSt
 import { requestSchema, phaseSchema, snapshotSchema, chipScoringStateSchema, type CardRequest, type ChipScoringState, type Snapshot, type Phase, type Suggestions } from './model.ts';
 import { actionPrompt, workflowActions } from './workflow.ts';
 import { applyRan, applySkipped, RUN_CONFIRMED_STEPS } from './readiness.ts';
-import { analyzeReply, nextStepItems } from './suggestions.ts';
+import { analyzeReply, nextStepItems, withTopic } from './suggestions.ts';
 import { blockedByGate } from './gate.ts';
 import { attachChatChecks, readChatChecks, type ChatCheck } from './check-history.ts';
 import { lockUnchangedChecks, unchangedCheck, unchangedReason } from './check-actions.ts';
@@ -265,7 +265,7 @@ export default async function plugin(bb: BbPluginApi) {
     const hidden = dismissed?.sourceKey === sourceKey ? dismissed.ids : [];
     const prefix = ['codex', 'codex-app'].includes(snapshot.runtime) ? '$' : '/';
     const offered = ids.filter(id => !hidden.includes(id));
-    const items: Suggestions['items'] = offered.filter(id => snapshot.skills.includes(id) || id === 'aif-chat' || id === reply.next).map(id => ({ id, command: `${prefix}${reply.commands.get(id) ?? id}`,
+    const items: Suggestions['items'] = offered.filter(id => snapshot.skills.includes(id) || id === 'aif-chat' || id === reply.next).map(id => ({ id, command: withTopic(`${prefix}${reply.commands.get(id) ?? id}`, id, reply.next === id ? reply.gate?.suggested_next?.reason : null),
       available: !reply.error && !blockedByGate(id, reply.gate) && !unchangedCheck(snapshot, id) && snapshot.profile !== 'invalid' && (snapshot.skills.includes(id) || id === 'aif-chat'),
       reason: reply.error ?? (blockedByGate(id, reply.gate) ? 'Gate содержит блокирующие проблемы.' : unchangedCheck(snapshot, id) ? unchangedReason : snapshot.profile === 'invalid' ? 'Проверьте конфигурацию проекта.' : !(snapshot.skills.includes(id) || id === 'aif-chat') ? `Skill не установлен для ${snapshot.runtime}` : reply.next === id ? reply.gate?.suggested_next?.reason ?? 'Следующий шаг из gate' : 'Команда из последнего ответа агента'),
       probability: null,

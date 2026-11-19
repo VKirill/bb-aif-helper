@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { extractAifCommands, extractAifInvocations, analyzeReply, chipDraft, isCommandDraft, nextStepItems } from '../suggestions.ts';
+import { extractAifCommands, extractAifInvocations, analyzeReply, chipDraft, isCommandDraft, nextStepItems, withTopic } from '../suggestions.ts';
 
 test('last-answer command names are extracted in order, without arguments or duplicates', () => {
   assert.deepEqual(extractAifCommands('Далее `$aif-architecture`, затем `$aif-roadmap`. Повтор: $aif-architecture; $aif-plan full #177; $aif.'), ['aif-architecture', 'aif-roadmap', 'aif-plan', 'aif']);
@@ -190,4 +190,13 @@ test('chipDraft drops mentions inside the replaced first line and shifts later o
   assert.equal(result.submit, false);
   assert.equal(result.text, '/aif-verify @plan.md\nkeep @y');
   assert.deepEqual(result.mentions, [{ ...after, from: 26, to: 28 }]);
+});
+
+test('withTopic gives a bare topic command the gate reason, then the chip sends it at once', () => {
+  const command = withTopic('/aif-fix', 'aif-fix', 'Reset the retry flag\n after a successful re-watch.');
+  assert.equal(command, '/aif-fix Reset the retry flag after a successful re-watch.');
+  assert.deepEqual(chipDraft({ text: '', mentions: [] }, command, 'aif-fix'), { text: command, mentions: [], submit: true });
+  assert.equal(withTopic('/aif-fix', 'aif-fix', null), '/aif-fix');
+  assert.equal(withTopic('/aif-fix login fails', 'aif-fix', 'other'), '/aif-fix login fails');
+  assert.equal(withTopic('/aif-verify', 'aif-verify', 'some reason'), '/aif-verify');
 });

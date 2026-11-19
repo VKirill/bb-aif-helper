@@ -51,6 +51,12 @@ export function analyzeReply(text: string) {
 // empty draft right away and only edits a non-empty one.
 export const TOPIC_COMMANDS = new Set(['aif-explore', 'aif-plan', 'aif-fix']);
 
+/** A bare topic command takes the gate's reason as its topic, so its chip can send at once. */
+export function withTopic(command: string, id: string, topic: string | null | undefined): string {
+  const text = topic?.replace(/\s+/g, ' ').trim().slice(0, 500);
+  return TOPIC_COMMANDS.has(id) && text && !/\s/.test(command.trim()) ? `${command} ${text}` : command;
+}
+
 const stripRanges = (text: string, ranges: readonly { from: number; to: number }[]) => {
   let out = '';
   let pos = 0;

@@ -544,8 +544,7 @@ test('readiness block in the tab: one run button on the first todo step, skip RP
     assert.equal(slot.queryByText(/^любой из:/), null, "any-of file lists live behind «?» to keep phone rows short");
     fireEvent.click(run);
     await waitFor(() => assert.deepEqual(runs, ['setup-context']));
-    fireEvent.click(await slot.findByRole('button', { name: 'Что делает шаг «Настроить CI»' }));
-    fireEvent.click(slot.getByRole('button', { name: 'Пропустить' }));
+    fireEvent.click(slot.getByRole('button', { name: 'Пропустить: Настроить CI' }));
     await waitFor(() => assert.deepEqual(skips, [{ threadId: 'thr_panel', stepId: 'ci', skipped: true }]));
   } finally { slot.lifecycle.unmount(); }
   const files = Object.fromEntries(['.ai-factory/DESCRIPTION.md', '.ai-factory/config.yaml', '.ai-factory/rules/base.md', 'AGENTS.md', '.ai-factory/ARCHITECTURE.md', 'lefthook.yml', 'Jenkinsfile', 'docs/index.md', '.ai-factory/RULES.md', 'Makefile', 'Dockerfile'].map(f => [f, true]));
@@ -712,7 +711,7 @@ function scoringView(patch: Record<string, unknown> = {}) {
     catalogNames: ['GEMINI_API_KEY_AISTUDIO'], manualKeySet: false, lastError: null, lastScoredAt: null, ...patch };
 }
 
-test('readiness title expands to reveal «Пропустить»; the chevron still launches the step', async () => {
+test('readiness rows show «Пропустить» and «Запустить» as buttons right in the row', async () => {
   const { readinessSteps } = await import('../readiness.ts');
   const tab = app.tabs.find(t => t.id === 'workflow')!;
   const s = data(); s.readiness = readinessSteps({ configured: true, contextSkill: true, files: {}, paths: {} });
@@ -724,15 +723,15 @@ test('readiness title expands to reveal «Пропустить»; the chevron st
   try {
     fireEvent.click(await slot.findByRole('button', { name: 'Подготовить' }));
     await slot.findByText('Подготовка проекта', { selector: 'h3' });
-    const title = (await slot.findAllByRole('button', { name: /Настроить CI/ })).find(b => !b.getAttribute('aria-label'))!;
-    assert.equal(title.getAttribute('aria-expanded'), 'false');
-    assert.equal(slot.queryByRole('button', { name: 'Пропустить' }), null);
-    fireEvent.click(title);
-    assert.equal(title.getAttribute('aria-expanded'), 'true');
-    fireEvent.click(await slot.findByRole('button', { name: 'Пропустить' }));
+    const skip = await slot.findByRole('button', { name: 'Пропустить: Настроить CI' });
+    assert.equal(skip.textContent, 'Пропустить');
+    assert.equal(slot.queryByRole('button', { name: /^Пропустить: Описать проект/ }), null, 'core steps cannot be skipped');
+    fireEvent.click(skip);
     await waitFor(() => assert.deepEqual(skips, [{ threadId: 'thr_expand', stepId: 'ci', skipped: true }]));
     assert.equal(runs.length, 0);
-    fireEvent.click(slot.getByRole('button', { name: 'Запустить: Настроить CI' }));
+    const run = slot.getByRole('button', { name: 'Запустить: Настроить CI' });
+    assert.equal(run.textContent, 'Запустить');
+    fireEvent.click(run);
     await waitFor(() => assert.deepEqual(runs, ['ci-setup']));
   } finally { slot.lifecycle.unmount(); }
 });

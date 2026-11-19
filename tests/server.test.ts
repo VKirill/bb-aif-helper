@@ -532,7 +532,7 @@ test('security dollar fix is offered without invalidating FAIL or enabling a com
     assert.equal(view.items.find((i: any) => i.id === 'aif-commit').available, false);
     await assert.rejects(h.harness.behavior.callRpc('runSuggestion', suggestionInput(view, 'aif-commit')));
     const result = await h.harness.behavior.callRpc('runSuggestion', suggestionInput(view, 'aif-fix')) as any;
-    assert.equal(result.sent, false); assert.equal(result.command, '$aif-fix');
+    assert.equal(result.sent, false); assert.equal(result.command, '$aif-fix Address advisories separately.');
     assert.equal(result.data.source, 'aif-chat'); assert.equal(result.data.gate.gate, 'security');
     assert.equal(result.data.gate.blockers[0].summary, 'Development dependency advisories remain.');
     assert.equal(h.sends, 0);
@@ -569,7 +569,7 @@ test('blocking gate disables prose commit and carries the actual problems to the
     await assert.rejects(h.harness.behavior.callRpc('runSuggestion', suggestionInput(view, 'aif-commit')));
     assert.equal(h.sends, 0);
     const result = await h.harness.behavior.callRpc('runSuggestion', suggestionInput(view, 'aif-fix')) as any;
-    assert.equal(result.sent, false); assert.equal(result.command, '$aif-fix');
+    assert.equal(result.sent, false); assert.equal(result.command, '$aif-fix Fix the blocking finding.');
     assert.equal(result.data.gate.blocking, true);
     assert.equal(result.data.gate.blockers[0].summary, 'Required implementation is missing.');
     const after = await h.harness.behavior.callRpc('suggestions', { threadId: 'thr_test' }) as any;

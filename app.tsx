@@ -606,9 +606,9 @@ function ReadinessSection({ snapshot, run, busy, sending, setReadinessSkip }: {
     const small = 'h-7 px-2.5 text-xs';
     const toggleHelp = () => setHelp(help === s.id ? null : s.id);
     const skip = s.state === 'skipped'
-      ? <Button type="button" size="sm" variant="ghost" className={cn(small, 'text-muted-foreground')} disabled={pendingSkip !== null} onClick={() => void toggleSkip(s, false)}>Вернуть</Button>
+      ? <Button type="button" size="sm" variant="ghost" className={cn(small, 'shrink-0 text-muted-foreground')} aria-label={`Вернуть: ${s.label}`} disabled={pendingSkip !== null} onClick={() => void toggleSkip(s, false)}>Вернуть</Button>
       : s.skippable && s.state === 'todo'
-        ? <Button type="button" size="sm" variant="ghost" className={cn(small, 'text-muted-foreground')} disabled={pendingSkip !== null} onClick={() => void toggleSkip(s, true)}>Пропустить</Button>
+        ? <Button type="button" size="sm" variant="ghost" className={cn(small, 'shrink-0 text-muted-foreground')} aria-label={`Пропустить: ${s.label}`} disabled={pendingSkip !== null} onClick={() => void toggleSkip(s, true)}>Пропустить</Button>
         : null;
     return <li key={s.id} className="flex min-h-11 flex-col justify-center py-2">
       <div className="flex items-center gap-2">
@@ -620,14 +620,13 @@ function ReadinessSection({ snapshot, run, busy, sending, setReadinessSkip }: {
           </button>
           {readinessHelp[s.id] && <HelpMark label={`Что делает шаг «${s.label}»`} open={help === s.id} onToggle={toggleHelp} />}
         </span>
-        {action && <Hint text={`${action.reason}\n${action.command}`}><Button type="button" variant="ghost" size="icon" className={cn('size-8 shrink-0', isNext ? 'text-primary' : 'text-muted-foreground')}
-          aria-label={`Запустить: ${s.label}`} disabled={sending || busy || !action.available} onClick={() => void run(action)}>
-          <Icon name="ChevronRight" className="size-4" /></Button></Hint>}
+        {skip}
+        {action && <Hint text={`${action.reason}\n${action.command}`}><Button type="button" size="sm" variant={isNext ? 'default' : 'outline'} className={cn(small, 'shrink-0')}
+          aria-label={`Запустить: ${s.label}`} disabled={sending || busy || !action.available} onClick={() => void run(action)}>Запустить</Button></Hint>}
       </div>
       {help === s.id && <div className="ml-6 rounded-md bg-muted px-3 py-2 text-xs">
         <p className="m-0">{readinessHelp[s.id]}</p>
         {s.state === 'todo' && s.missing.length > 0 && !s.anyOf && <p className="m-0 mt-1 break-words text-muted-foreground">Не найдено: {s.missing.join(', ')}</p>}
-        {skip && <div className="mt-2">{skip}</div>}
       </div>}
     </li>;
   }
