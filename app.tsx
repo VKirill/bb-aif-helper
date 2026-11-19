@@ -132,7 +132,7 @@ function WorkflowCard({ threadId, initialTarget = '', phase = 'unknown', openFil
   return <section aria-label="AI Factory workflow" className={cn('aif-card flex min-w-0 flex-col gap-4 text-sm text-foreground [overflow-wrap:anywhere]',
     compact ? '' : 'my-3 rounded-xl border border-border bg-card p-4')}>
     <header className={cn('flex min-h-8 flex-wrap items-center gap-2', delegation && 'sticky -top-3 z-10 -mx-3 -mt-3 border-b border-border bg-background/90 px-3 py-3 backdrop-blur')}>
-      <span className="grid size-6 shrink-0 place-items-center rounded-md bg-primary text-primary-foreground"><Icon name="Workflow" className="size-3.5" /></span>
+      <span className="grid size-6 shrink-0 place-items-center rounded-md bg-primary text-primary-foreground"><FactoryIcon className="size-3.5" /></span>
       <strong className="text-base font-semibold tracking-tight whitespace-nowrap">AI Factory</strong>
       {snapshot && snapshot.profile !== 'upstream' && <Badge variant="secondary" className="min-w-0 truncate font-medium">{profileNames[snapshot.profile]}</Badge>}
       {delegation && <div role="tablist" aria-label="Раздел панели" className="gap-0.5 rounded-lg bg-muted p-0.5 @max-md/aif:order-last @max-md/aif:basis-full @max-md/aif:grid @max-md/aif:grid-cols-2 @md/aif:ml-auto @md/aif:flex">
@@ -315,22 +315,21 @@ function ModelChoice({ role, saved, providerName, environmentId, busy, locked: l
     void onSave({ ...saved, parallel: n });
   }
   return <div className="flex min-w-0 flex-col gap-2 py-2.5 first:pt-0 last:pb-0">
-    <div className="flex min-w-0 items-center gap-1">
+    {/* Stretched button: the whole row opens the editor, while «?» sits right after the title without nesting buttons. */}
+    <div className={cn('relative flex min-h-11 min-w-0 items-center gap-2 px-1', locked && 'opacity-60')}>
       <button type="button" aria-label={`Изменить: ${text.title}`} aria-expanded={editing} disabled={locked}
         onClick={() => (editing ? cancel() : setEditing(true))}
-        className="flex min-h-11 min-w-0 flex-1 cursor-pointer items-center gap-2 rounded-md px-1 text-left outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-default disabled:opacity-60">
-        <span className="flex min-w-0 flex-1 flex-col">
-          <span className="text-sm font-medium">{text.title}</span>
-          <span className="block truncate text-xs text-muted-foreground">{savedLabel}</span>
-        </span>
-        <Icon name="ChevronRight" className={cn('size-4 shrink-0 text-muted-foreground transition-transform', editing && 'rotate-90')} />
-      </button>
-      {text.note && <HelpMark label={`Подробнее: ${text.title}`} open={help} onToggle={() => setHelp(!help)} />}
+        className="absolute inset-0 cursor-pointer rounded-md outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-default" />
+      <span className="pointer-events-none flex min-w-0 flex-1 flex-col">
+        <span className="text-sm font-medium">{text.title}{text.note && <span className="pointer-events-auto relative z-10">
+          <HelpMark label={`Подробнее: ${text.title}`} open={help} onToggle={() => setHelp(!help)} /></span>}</span>
+        <span className="block truncate text-xs text-muted-foreground">{savedLabel}</span>
+      </span>
+      <Icon name="ChevronRight" className={cn('pointer-events-none size-4 shrink-0 text-muted-foreground transition-transform', editing && 'rotate-90')} />
     </div>
     {role === 'implement' && saved.mode === 'bb' && !editing && <div className="flex min-h-11 flex-col justify-center gap-1 py-2.5">
       <div className="flex flex-wrap items-center gap-2">
-        <span className="min-w-0 flex-1 text-sm font-medium">Параллельно</span>
-        <HelpMark label="Подробнее: Параллельно" open={parallelHelp} onToggle={() => setParallelHelp(!parallelHelp)} />
+        <span className="min-w-0 flex-1 text-sm font-medium">Параллельно<HelpMark label="Подробнее: Параллельно" open={parallelHelp} onToggle={() => setParallelHelp(!parallelHelp)} /></span>
         <div className="flex gap-1" role="group" aria-label="Параллельность">
           {([['Выкл', null], ['2', 2], ['3', 3], ['4', 4]] as const).map(([label, n]) =>
             <Button key={label} type="button" size="sm" variant={parallel === n ? 'secondary' : 'outline'} aria-pressed={parallel === n} disabled={locked || busy} onClick={() => setParallel(n)}>{label}</Button>)}
@@ -488,8 +487,7 @@ function ChipScoringSection({ threadId }: { threadId: string }) {
     <div className="flex min-w-0 flex-col divide-y divide-border">
       <div className="flex min-h-11 flex-col justify-center gap-1 py-2.5 first:pt-0">
         <div className="flex items-center gap-2">
-          <span className="min-w-0 flex-1 text-sm font-medium">Оценивать кнопки</span>
-          <HelpMark label="Что отправляется в Google" open={help} onToggle={() => setHelp(!help)} />
+          <span className="min-w-0 flex-1 text-sm font-medium">Оценивать кнопки<HelpMark label="Что отправляется в Google" open={help} onToggle={() => setHelp(!help)} /></span>
           <Button type="button" size="sm" variant={view.enabled ? 'default' : 'outline'} aria-pressed={view.enabled} disabled={saving}
             onClick={() => void save({ enabled: !view.enabled })}>{view.enabled ? 'Вкл' : 'Выкл'}</Button>
         </div>
@@ -722,8 +720,8 @@ function removeAifPill(composer: PluginComposerApi) {
 const aifModeInput = (threadId: string | null, projectId: string | null) => threadId ? { threadId } : projectId ? { projectId } : {};
 
 /** Composer action: toggles the project-wide AI Factory mode; opens the tab when the project has no AI Factory. */
-function FactoryIcon() {
-  return <svg viewBox="0 0 24 24" className="size-4" fill="none" stroke="currentColor" strokeWidth={2} strokeLinejoin="round" aria-hidden="true">
+function FactoryIcon({ className = 'size-4' }: { className?: string }) {
+  return <svg viewBox="0 0 24 24" className={className} fill="none" stroke="currentColor" strokeWidth={2} strokeLinejoin="round" aria-hidden="true">
     <path d="M3 21V11l5 3V11l5 3V11l5 3V4h3v17z" /><path d="M7 18h2M12 18h2" />
   </svg>;
 }
@@ -810,11 +808,12 @@ export default definePluginApp(app => {
   app.composer.customize({ id: 'aif-mode-pill', scopes: ['thread'], banners: [{ id: 'aif-pill', chrome: 'bare', component: AifPillController }] });
   app.slots.messageDirective({ id: 'aif-chat', component: Directive });
   app.slots.experimental_threadContextCardSection({ id: 'workflow', title: 'AI Factory', group: '9_aif', order: 10, component: ContextCard });
-  app.slots.experimental_tab({ id: 'workflow', context: { kind: 'thread' }, availability: 'fixed', title: 'AI Factory', icon: 'Workflow', layout: 'flush', component: WorkflowPanel });
+  app.experimental_icons.register({ name: 'aif-factory', component: FactoryIcon });
+  app.slots.experimental_tab({ id: 'workflow', context: { kind: 'thread' }, availability: 'fixed', title: 'AI Factory', icon: 'aif-factory', layout: 'flush', component: WorkflowPanel });
   app.slots.experimental_threadAction({
-    id: 'open-workflow', title: 'AI Factory', icon: 'Workflow', group: '0_aif', placement: 'header',
+    id: 'open-workflow', title: 'AI Factory', icon: 'aif-factory', group: '0_aif', placement: 'header',
     item: ({ experimental_panel }) => ({
-      label: 'AI Factory', icon: 'Workflow', detail: 'Версии, workflow и прогресс проверок',
+      label: 'AI Factory', icon: 'aif-factory', detail: 'Версии, workflow и прогресс проверок',
       run: () => { experimental_panel.openTab({ tab: { id: 'workflow', context: { kind: 'thread' }, availability: 'fixed' } }); },
     }),
   });

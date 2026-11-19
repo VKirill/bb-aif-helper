@@ -740,8 +740,8 @@ test('an executor row is a single button that toggles aria-expanded and reveals 
     fireEvent.click(await slot.findByRole('tab', { name: /Настройки/ }));
     const row = await slot.findByRole('button', { name: 'Изменить: Код' });
     assert.equal(row.getAttribute('aria-expanded'), 'false');
-    assert.match(row.textContent!, /Код/);
-    assert.match(row.textContent!, /Codex · gpt-6\.2-sol · high/);
+    assert.match(row.parentElement!.textContent!, /Код/);
+    assert.match(row.parentElement!.textContent!, /Codex · gpt-6\.2-sol · high/);
     fireEvent.click(row);
     assert.equal(row.getAttribute('aria-expanded'), 'true');
     await slot.findByRole('radiogroup', { name: 'Кто пишет код' });
