@@ -1,9 +1,11 @@
-import { defineRpcContract } from '@get-bb/plugin-sdk';
+import type { defineRpcContract as DefineRpcContract } from '@get-bb/plugin-sdk';
 import { z } from 'zod';
 import { delegationChoiceSchema, delegationDefaultsSchema, delegationRoleSchema, delegationStateSchema } from './model.ts';
 import { requestSchema, runSchema, snapshotSchema, hostInputSchema, suggestionRequestSchema, suggestionActionSchema, suggestionsSchema, gateResultSchema } from './model.ts';
 import { SKIPPABLE_STEPS } from './readiness.ts';
 import { CHIP_SCORING_TAG, projectTag, threadTag } from './live-updates.ts';
+// The app bundle cannot import the server SDK at runtime; defineRpcContract is an identity helper.
+const defineRpcContract: typeof DefineRpcContract = contract => contract;
 export const delegationViewSchema = delegationStateSchema.extend({
   providers: z.array(z.object({ id: z.string(), name: z.string() })),
   children: z.array(z.object({ id: z.string(), title: z.string().nullable(), status: z.string(), providerId: z.string().nullable(), updatedAt: z.string(), worktree: z.boolean(),
