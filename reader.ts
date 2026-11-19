@@ -106,6 +106,14 @@ class Reader {
   }
 }
 
+export async function readPlanText(root: string, target: string): Promise<{ path: string; text: string }> {
+  const rel = safeRelative(target.replace(/^@/, ''));
+  if (!rel.endsWith('.md')) throw new Error('План должен быть файлом .md.');
+  const text = await new Reader(root).read(rel);
+  if (text === null) throw new Error(`План не найден: ${rel}`);
+  return { path: rel, text };
+}
+
 async function git(root: string, args: string[], signal?: AbortSignal, trim = true): Promise<string | null> {
   try {
     const { stdout } = await exec('git', ['--no-optional-locks', '-c', `safe.directory=${root.replaceAll('\\', '/')}`, '-c', 'core.fsmonitor=false', '-C', root, ...args],

@@ -17,6 +17,7 @@ import { AIF_MENTION, aifMentionItems, aifModeInstructions, shouldContribute } f
 import { versionSampleFresh } from './versions.ts';
 import { BASIC_PLAN_ROOT } from './basic-workflow.ts';
 import { DECISIONS_URL, decisionsRequest, decisionsResponseSchema, probabilitiesFor, scoringKey } from './chip-scoring.ts';
+import { parallelGroups } from './parallel-plan.ts';
 export { rpcContract } from './contract.ts';
 type Selection = { environmentId: string; target: string; phase: Phase };
 type Delivery = { requestId: string; fingerprint: string; actionId: string; state: 'attempting' | 'sent' | 'uncertain'; at: number };
@@ -312,7 +313,7 @@ export default async function plugin(bb: BbPluginApi) {
     ]);
     return { ...state,
       providers: providers.filter(p => p.available).map(p => ({ id: p.id, name: p.displayName })),
-      children: await Promise.all(children.map(async c => ({ id: c.id, title: c.title ?? null, status: c.status, providerId: c.providerId ?? null, updatedAt: String(c.updatedAt),
+      children: await Promise.all(children.map(async c => ({ id: c.id, title: c.title ?? null, status: c.status, providerId: c.providerId ?? null, updatedAt: String(c.updatedAt), worktree: c.environmentIsWorktree === true,
         ...await childModelFor(c, state) }))),
       defaults: defaults.success ? defaults.data : null,
       appliedDefaults: null };
@@ -668,15 +669,16 @@ export default async function plugin(bb: BbPluginApi) {
   });
   bb.cli.register({
     name: 'aif-chat', summary: 'AI Factory versions, live workflow card and read-only plan/check progress',
-    commands: ['status', 'show', 'check-updates', 'reset', 'reset-dispatch'].map(name => ({ name, summary: name === 'show' ? 'Show a live chat card' : name, usage: `bb plugin run aif-chat ${name} [--thread <id>] [--target <path>] [--phase <phase>] [--json]` })),
+    commands: [...['status', 'show', 'check-updates', 'reset', 'reset-dispatch'].map(name => ({ name, summary: name === 'show' ? 'Show a live chat card' : name, usage: `bb plugin run aif-chat ${name} [--thread <id>] [--target <path>] [--phase <phase>] [--json]` })),
+      { name: 'groups', summary: 'Parallel task groups of a plan', usage: 'bb plugin run aif-chat groups --target <path> [--max 1-4] [--json]' }],
     async run(argv, ctx) {
       try {
         const [command = 'help', ...args] = argv;
-        if (command === 'help' || command === '--help') return { exitCode: 0, stdout: 'bb plugin run aif-chat status|show|check-updates|reset|reset-dispatch [--thread ID] [--target PATH] [--phase explore|plan|improve|implement|verify|fix|done] [--json]' };
+        if (command === 'help' || command === '--help') return { exitCode: 0, stdout: 'bb plugin run aif-chat status|show|check-updates|reset|reset-dispatch|groups [--thread ID] [--target PATH] [--phase explore|plan|improve|implement|verify|fix|done] [--max 1-4] [--json]' };
         const options: Record<string, string> = {}; let json = false;
         for (let i = 0; i < args.length; i++) {
           if (args[i] === '--json') { json = true; continue; }
-          if (!['--thread', '--target', '--phase'].includes(args[i]) || !args[i + 1] || args[i + 1].startsWith('--')) throw new Error('Неизвестный аргумент или отсутствует значение.');
+          if (!['--thread', '--target', '--phase', '--max'].includes(args[i]) || !args[i + 1] || args[i + 1].startsWith('--')) throw new Error('Неизвестный аргумент или отсутствует значение.');
           if (args[i] in options) throw new Error('Повторяющийся аргумент.');
           const name = args[i]; options[name] = args[++i];
         }
@@ -685,6 +687,23 @@ export default async function plugin(bb: BbPluginApi) {
           await context(input.threadId);
           await bb.storage.kv.delete(`${command === 'reset' ? 'selection' : 'deliveries'}:${input.threadId}`);
           cache.invalidate(key => !!watchers.get(key)?.has(input.threadId)); return { exitCode: 0, stdout: 'Состояние интерфейса сброшено; проект не изменён.' };
+        }
+        if (command === 'groups') {
+          if (!input.target) throw new Error('Укажите план: --target <путь>.');
+          const { environment } = await context(input.threadId);
+          const plan = await host.call('planText', { root: environment.path!, target: input.target }, { hostId: environment.hostId });
+          const max = Number(options['--max'] ?? 3);
+          const result = parallelGroups(plan.text, max);
+          if ('error' in result) {
+            bb.log.warn(`aif-chat: parallel groups target=${plan.path} error=${result.error}`);
+            if (json) return { exitCode: 0, stdout: JSON.stringify({ target: plan.path, error: result.error }) };
+            return { exitCode: 1, stderr: result.error };
+          }
+          bb.log.info(`aif-chat: parallel groups target=${plan.path} groups=${result.groups.length}`);
+          if (json) return { exitCode: 0, stdout: JSON.stringify({ target: plan.path, max, ...result }) };
+          const lines = result.groups.map((group, i) => `Группа ${i + 1}: задачи ${group.join(', ')}`);
+          if (result.coordinatorOnly.length) lines.push(`Только координатор: задачи ${result.coordinatorOnly.join(', ')}`);
+          return { exitCode: 0, stdout: lines.join('\n') };
         }
         if (!['status', 'show', 'check-updates'].includes(command)) throw new Error('Неизвестная команда.');
         if (command === 'show') {

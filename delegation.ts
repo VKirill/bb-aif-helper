@@ -11,6 +11,9 @@ import { z } from 'zod';
 export const CONTEXT_PATH = '.ai-factory/skill-context/aif-implement/SKILL.md';
 const START = '<!-- bb-aif-helper:delegation:start -->';
 const END = '<!-- bb-aif-helper:delegation:end -->';
+export const PLAN_CONTEXT_PATH = '.ai-factory/skill-context/aif-plan/SKILL.md';
+const PLAN_START = '<!-- bb-aif-helper:plan:start -->';
+const PLAN_END = '<!-- bb-aif-helper:plan:end -->';
 // Research: every AI Factory skill reads the global skill-context, so Explore-style
 // subagents of /aif-plan, /aif-fix, /aif-qa… run as BB threads on the chosen model.
 // The block itself is the source of truth: its first lines record the model spec
@@ -30,7 +33,7 @@ const TIMEOUT_MS = 4 * 60 * 60 * 1000;
 const id = z.string().regex(/^[\w.-]{1,100}$/);
 export const delegationChoiceSchema = z.discriminatedUnion('mode', [
   z.object({ mode: z.literal('self') }).strict(),
-  z.object({ mode: z.literal('bb'), providerId: id, model: z.string().regex(/^[^\s?&#]{1,200}$/), reasoning: id.optional(), tier: id.optional() }).strict(),
+  z.object({ mode: z.literal('bb'), providerId: id, model: z.string().regex(/^[^\s?&#]{1,200}$/), reasoning: id.optional(), tier: id.optional(), parallel: z.number().int().min(2).max(4).optional() }).strict(),
 ]);
 export type DelegationChoice = z.infer<typeof delegationChoiceSchema>;
 export const delegationDefaultsSchema = z.object({ implement: delegationChoiceSchema, research: delegationChoiceSchema, research2: delegationChoiceSchema, research3: delegationChoiceSchema }).strict();
@@ -55,18 +58,24 @@ export type DelegationState = z.infer<typeof delegationStateSchema>;
 // selection lives in `model`: provider/model?reasoning=high&tier=fast.
 // The model part may itself contain "/" or ":" (OpenRouter, Ollama ids).
 export function modelSpec(c: Extract<DelegationChoice, { mode: 'bb' }>) {
-  const query = [c.reasoning && `reasoning=${c.reasoning}`, c.tier && `tier=${c.tier}`].filter(Boolean).join('&');
+  const query = [c.reasoning && `reasoning=${c.reasoning}`, c.tier && `tier=${c.tier}`, c.parallel && `parallel=${c.parallel}`].filter(Boolean).join('&');
   return `${c.providerId}/${c.model}${query ? `?${query}` : ''}`;
 }
 export function parseSpec(value: unknown): DelegationChoice | null {
   const m = typeof value === 'string' ? /^([\w.-]{1,100})\/([^\s?&#]{1,200})(?:\?([\w.=&-]{1,200}))?$/.exec(value) : null;
   if (!m) return null;
   const params = new URLSearchParams(m[3] ?? '');
-  const reasoning = params.get('reasoning'), tier = params.get('tier');
+  const reasoning = params.get('reasoning'), tier = params.get('tier'), parallel = params.get('parallel');
   const ok = (v: string | null) => v === null || /^[\w.-]{1,100}$/.test(v);
-  if (!ok(reasoning) || !ok(tier)) return null;
-  return { mode: 'bb', providerId: m[1], model: m[2], ...(reasoning ? { reasoning } : {}), ...(tier ? { tier } : {}) };
+  if (!ok(reasoning) || !ok(tier) || (parallel !== null && !/^[2-4]$/.test(parallel))) return null;
+  return { mode: 'bb', providerId: m[1], model: m[2], ...(reasoning ? { reasoning } : {}), ...(tier ? { tier } : {}), ...(parallel ? { parallel: Number(parallel) } : {}) };
 }
+
+// parallel workers are an implement-only setting: research choices never keep it.
+const stripParallel = (c: BbChoice): BbChoice => {
+  const { parallel: _p, ...rest } = c;
+  return rest;
+};
 
 type Json = Record<string, unknown>;
 const isObject = (v: unknown): v is Json => !!v && typeof v === 'object' && !Array.isArray(v);
@@ -97,7 +106,8 @@ export function parseResearch(text: string): ResearchSlots {
   const block = text.slice(start, end);
   for (const role of RESEARCH_ROLES) {
     const spec = new RegExp(`<!-- ${RESEARCH_MARK[role]}: (\\S{1,400}) -->`).exec(block)?.[1];
-    slots[role] = parseSpec(spec) ?? { mode: 'self' };
+    const c = parseSpec(spec);
+    slots[role] = c?.mode === 'bb' ? stripParallel(c) : c ?? { mode: 'self' };
   }
   return slots;
 }
@@ -195,9 +205,41 @@ bb thread spawn --project "$BB_PROJECT_ID" --environment "$BB_ENVIRONMENT_ID" --
 If \`bb thread spawn\` fails, say so and do that research yourself; do not repeat the same error. Use no \`node\` commands in this flow.`;
 }
 
+function parallelSection(n: number, flags: string): string {
+  return `## Parallel mode (managed by BB AIF Helper)
+
+The owner allowed up to ${n} workers at once. Run independent plan tasks in parallel, each worker in its own BB worktree copy of the project:
+
+1. Get the groups: \`bb plugin run aif-chat groups --target <plan path> --max ${n} --json\`. It answers \`{ groups, coordinatorOnly }\` — groups of task ids in execution order — or \`{ error }\`. On \`error\`, or for a fix plan, ultra bundle or OpenSpec change, use the one-worker flow above. Tasks in \`coordinatorOnly\` (commit and deploy tasks) you do yourself, as the plan says. A group with one task also uses the one-worker flow.
+2. Before each group with two or more tasks, \`git status --porcelain\` must show only your own changes from earlier tasks of this plan. If it shows changes you did not make, stop and ask the owner; never commit them.
+3. Checkpoint: if there are changes from earlier tasks, commit them locally (no push) with \`git commit -am 'chore(aif): <plan> · before group N'\` after \`git add\` of exactly those files. The copies are built from a commit and would not see uncommitted work.
+4. For each task of the group spawn its worker in a new worktree on top of that commit (\`<branch>\` = \`git branch --show-current\`):
+
+\`\`\`bash
+bb thread spawn --project "$BB_PROJECT_ID" --new-environment worktree --base-branch 'refs/heads/<branch>' --parent-self --lifecycle-owner-thread "$BB_THREAD_ID" --parent-notifications off ${flags} --title 'AIF · <plan> · <taskId>' --prompt-file <brief> --json
+\`\`\`
+
+   Add to each brief, after the worker rules: "You work in your own copy of the project. If dependencies are missing, install them first (\`<install command from the project's command catalog>\`). Do not commit."
+5. Wait for all workers of the group (step 4 of the one-worker flow for each id).
+6. Bring the results back one worker at a time. The copy's path is \`environment.path\` in \`bb thread show <id> --json\`. In that path run \`git add -A\` and \`git diff --cached --binary HEAD > <tmp>/task-<taskId>.patch\` (exclude \`node_modules\`, \`dist\` and other ignored output). In the main workspace run \`git apply --3way <tmp>/task-<taskId>.patch\`, then review the diff and run that task's verification as in step 5 of the one-worker flow. If \`git apply\` fails or leaves conflicts, undo it (\`git checkout -- <files>\` for that patch only), stop, and report the task and the conflicting files to the owner.
+7. Mark each task done only after its patch is applied and verified. Then archive its worker: \`bb thread archive <id>\`; BB removes the worktree a few minutes later.
+8. Continue with the next group. The final commits stay as the plan describes; the local checkpoint commits are part of them and are never pushed without the owner's approval.
+
+If \`bb thread spawn --new-environment worktree\` fails, report it and run the rest of the plan with the one-worker flow.`;
+}
+
+export function planRuleBlock(): string {
+  return `## Task hints for parallel execution (managed by BB AIF Helper)
+
+The project runs independent plan tasks in parallel. In every plan task line write, after the task text:
+- \`Files:\` with every file the task creates or changes, each in backticks, concrete paths only (no globs, no "listed above");
+- \`Depends on\` with the task numbers it needs (\`Depends on 2, 4\` or \`Depends on 1-3\`), or \`Depends on —\` when it needs none.
+Keep tasks that change the same file dependent or merged. Commit and deploy tasks stay last.`;
+}
+
 export function contextBlock(c: Extract<DelegationChoice, { mode: 'bb' }>) {
   const flags = spawnFlags(c);
-  return `## Code delegation (managed by BB AIF Helper)
+  const base = `## Code delegation (managed by BB AIF Helper)
 
 The project owner chose \`${modelSpec(c)}\` (BB provider/model?reasoning&tier) to write the code of plan tasks. The source of truth is \`.ai-factory.json\` → \`phases.implement\`; re-read it before each task. If it no longer has \`"agent": "bb"\`, implement tasks yourself as usual.
 
@@ -225,6 +267,8 @@ bb thread spawn --project "$BB_PROJECT_ID" --environment "$BB_ENVIRONMENT_ID" --
 6. Only after that mark the task done in the plan and move to the next task. One worker at a time: workers share this workspace.
 
 If \`bb thread spawn\` returns an error, report it and implement that task yourself; do not repeat the same error. Use no \`node\` commands in this flow.`;
+  if (!c.parallel) return base;
+  return base.replace('One worker at a time: workers share this workspace.', 'Outside parallel groups (below), run one worker at a time: workers in this workspace share it.') + '\n\n' + parallelSection(c.parallel, flags);
 }
 
 export async function writeDelegation(root: string, choice: DelegationChoice, role: DelegationRole = 'implement'): Promise<DelegationState> {
@@ -233,7 +277,8 @@ export async function writeDelegation(root: string, choice: DelegationChoice, ro
   if (role !== 'implement') {
     const file = join(root, RESEARCH_PATH);
     const text = await readText(file);
-    const next = mergeContextBlock(text, researchBlock({ ...parseResearch(text), [role]: choice }), RESEARCH_START, RESEARCH_END);
+    const picked = choice.mode === 'bb' ? stripParallel(choice) : choice;
+    const next = mergeContextBlock(text, researchBlock({ ...parseResearch(text), [role]: picked }), RESEARCH_START, RESEARCH_END);
     if (next) await writeAtomic(file, next); else await rm(file, { force: true });
     return readDelegation(root);
   }
@@ -254,6 +299,10 @@ export async function writeDelegation(root: string, choice: DelegationChoice, ro
   try { context = await readFile(contextFile, 'utf8'); } catch (e) { if ((e as NodeJS.ErrnoException).code !== 'ENOENT') throw e; }
   const nextContext = mergeContextBlock(context, choice.mode === 'bb' ? contextBlock(choice) : null);
   if (nextContext) await writeAtomic(contextFile, nextContext); else await rm(contextFile, { force: true });
+  const planFile = join(root, PLAN_CONTEXT_PATH);
+  const planText = await readText(planFile);
+  const nextPlan = mergeContextBlock(planText, choice.mode === 'bb' && choice.parallel ? planRuleBlock() : null, PLAN_START, PLAN_END);
+  if (nextPlan) await writeAtomic(planFile, nextPlan); else await rm(planFile, { force: true });
   let removedLegacy = false;
   try { await rm(join(root, '.ai-factory/bin/bb-aif-run.mjs')); removedLegacy = true; }
   catch (e) { if ((e as NodeJS.ErrnoException).code !== 'ENOENT') throw e; }

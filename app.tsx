@@ -281,6 +281,8 @@ const roleText = {
     selfLabel: 'Как разведчик 1', selfBadge: 'как разведчик 1', note: 'Ищет зависимости и связи. Разведчик 3 берёт и всех следующих, если навык просит больше трёх.' },
 } as const satisfies Record<DelegationRole, { title: string; group: string; saved: string; self: string; note: string; selfLabel?: string; selfBadge?: string }>;
 
+const PARALLEL_HELP = 'Независимые задачи плана идут одновременно, каждая в своей копии проекта на этой модели. Между группами координатор делает локальный коммит без push. Задачи, которые правят один и тот же файл, всё равно идут по очереди, поэтому план ускоряется не всегда.';
+
 /** One-line role row; the «Этот агент / Другая модель» editor opens on «Изменить» and saves through setDelegation. */
 function ModelChoice({ role, saved, providerName, environmentId, busy, locked: lockedOuter, onSave }: {
   role: DelegationRole; saved: DelegationChoice; providerName: (id: string | null) => string | null; environmentId: string | null; busy: boolean; locked: boolean;
@@ -289,15 +291,18 @@ function ModelChoice({ role, saved, providerName, environmentId, busy, locked: l
   const text: { title: string; group: string; saved: string; self: string; note: string; selfLabel?: string; selfBadge?: string } = roleText[role];
   const [editing, setEditing] = useState(false);
   const [help, setHelp] = useState(false);
+  const [parallelHelp, setParallelHelp] = useState(false);
   const [mode, setMode] = useState<'self' | 'bb'>(saved.mode);
   const [pick, setPick] = useState<PickerValue | null>(saved.mode === 'bb' ? toPicker(saved) : null);
   const [saving, setSaving] = useState(false);
   const savedKey = JSON.stringify(saved);
   useEffect(() => { setMode(saved.mode); setPick(saved.mode === 'bb' ? toPicker(saved) : null); }, [savedKey]); // eslint-disable-line react-hooks/exhaustive-deps
-  const choice: DelegationChoice | null = mode === 'self' ? { mode: 'self' } : pick?.model ? fromPicker(pick) : null;
+  const picked: DelegationChoice | null = mode === 'self' ? { mode: 'self' } : pick?.model ? fromPicker(pick) : null;
+  const choice: DelegationChoice | null = picked?.mode === 'bb' && role === 'implement' && saved.mode === 'bb' && saved.parallel ? { ...picked, parallel: saved.parallel } : picked;
   const dirty = !!choice && JSON.stringify(choice) !== savedKey;
   const locked = saving || lockedOuter;
   const savedLabel = saved.mode === 'bb' ? [providerName(saved.providerId), saved.model, saved.reasoning].filter(Boolean).join(' · ') : text.selfBadge ?? 'агент этого чата';
+  const parallel = saved.mode === 'bb' ? saved.parallel ?? null : null;
   async function save() {
     if (!choice) return;
     setSaving(true);
@@ -306,6 +311,11 @@ function ModelChoice({ role, saved, providerName, environmentId, busy, locked: l
   }
   function cancel() {
     setMode(saved.mode); setPick(saved.mode === 'bb' ? toPicker(saved) : null); setEditing(false);
+  }
+  function setParallel(n: number | null) {
+    if (saved.mode !== 'bb' || role !== 'implement' || locked || busy || (saved.parallel ?? null) === n) return;
+    if (n === null) { const { parallel: _p, ...rest } = saved; void onSave(rest); return; }
+    void onSave({ ...saved, parallel: n });
   }
   return <div className="flex min-w-0 flex-col gap-2 py-2.5 first:pt-0 last:pb-0">
     <div className="flex min-w-0 items-center gap-1">
@@ -320,6 +330,17 @@ function ModelChoice({ role, saved, providerName, environmentId, busy, locked: l
       </button>
       {text.note && <HelpMark label={`Подробнее: ${text.title}`} open={help} onToggle={() => setHelp(!help)} />}
     </div>
+    {role === 'implement' && saved.mode === 'bb' && !editing && <div className="flex min-h-11 flex-col justify-center gap-1 py-2.5">
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="min-w-0 flex-1 text-sm font-medium">Параллельно</span>
+        <HelpMark label="Подробнее: Параллельно" open={parallelHelp} onToggle={() => setParallelHelp(!parallelHelp)} />
+        <div className="flex gap-1" role="group" aria-label="Параллельность">
+          {([['Выкл', null], ['2', 2], ['3', 3], ['4', 4]] as const).map(([label, n]) =>
+            <Button key={label} type="button" size="sm" variant={parallel === n ? 'secondary' : 'outline'} aria-pressed={parallel === n} disabled={locked || busy} onClick={() => setParallel(n)}>{label}</Button>)}
+        </div>
+      </div>
+      {parallelHelp && <p className="m-0 text-xs text-muted-foreground">{PARALLEL_HELP}</p>}
+    </div>}
     {help && text.note && <p className="m-0 text-xs text-muted-foreground">{text.note}</p>}
     {editing && <>
       <div role="radiogroup" aria-label={text.group} className="grid grid-cols-2 gap-0.5 rounded-lg bg-muted p-0.5">
@@ -542,6 +563,7 @@ function WorkingSection({ threadId }: { threadId: string }) {
         <span className="min-w-0"><span className="block truncate">{c.title || 'Без названия'}</span>
           <span className="block truncate text-xs text-muted-foreground" title="Модель, с которой BB запустил ход. Подмену провайдером BB видит только у Claude Code">
             {[providerName(c.providerId), c.execution && [c.execution.model, c.execution.reasoning].filter(Boolean).join(' · '), st.label].filter(Boolean).join(' · ')}</span>
+          {c.worktree && <Badge variant="secondary" className="mt-0.5 w-fit px-1.5 py-0 text-[10px] font-normal">отдельная копия</Badge>}
           {c.fallback && <span className="block text-xs text-amber-600 dark:text-amber-400">⚠ Подмена: {c.fallback.from} → {c.fallback.to} ({c.fallback.reason === 'refusal' ? 'отказ модели' : 'провайдер'})</span>}
           {c.mismatch && <span className="block text-xs text-amber-600 dark:text-amber-400">⚠ {c.mismatch}</span>}</span>
         <Button type="button" variant="ghost" size="sm" className="h-7 gap-1 px-2 text-xs" onClick={() => navigate.toThread(c.id, { split: true })}>

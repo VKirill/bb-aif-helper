@@ -5,7 +5,7 @@ import { requestSchema, runSchema, snapshotSchema, hostInputSchema, suggestionRe
 import { SKIPPABLE_STEPS } from './readiness.ts';
 export const delegationViewSchema = delegationStateSchema.extend({
   providers: z.array(z.object({ id: z.string(), name: z.string() })),
-  children: z.array(z.object({ id: z.string(), title: z.string().nullable(), status: z.string(), providerId: z.string().nullable(), updatedAt: z.string(),
+  children: z.array(z.object({ id: z.string(), title: z.string().nullable(), status: z.string(), providerId: z.string().nullable(), updatedAt: z.string(), worktree: z.boolean(),
     execution: z.object({ model: z.string(), reasoning: z.string().nullable() }).nullable(),
     fallback: z.object({ from: z.string(), to: z.string(), reason: z.string() }).nullable(),
     mismatch: z.string().nullable() })),
@@ -24,6 +24,7 @@ export const hostContract = defineRpcContract({
   collect: { input: hostInputSchema, output: snapshotSchema, experimental_retryable: true },
   delegation: { input: z.object({ root: z.string().min(1).max(4096) }).strict(), output: delegationStateSchema, experimental_retryable: true },
   setDelegation: { input: z.object({ root: z.string().min(1).max(4096), choice: delegationChoiceSchema, role: delegationRoleSchema.optional() }).strict(), output: delegationStateSchema },
+  planText: { input: z.object({ root: z.string().min(1).max(4096), target: z.string().min(1).max(1000) }).strict(), output: z.object({ path: z.string(), text: z.string() }), experimental_retryable: true },
 });
 export const rpcContract = defineRpcContract({
   status: { input: requestSchema.extend({ checkUpdates: z.boolean().default(false), force: z.boolean().default(false) }), output: snapshotSchema },

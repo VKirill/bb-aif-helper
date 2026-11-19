@@ -80,11 +80,13 @@ bb plugin config aif-chat unset upstreamRef
 bb plugin run aif-chat status --json
 bb plugin run aif-chat show --phase plan --target .ai-factory/plans/my-feature.md
 bb plugin run aif-chat check-updates --json
+bb plugin run aif-chat groups --target .ai-factory/plans/my-feature.md --max 3 --json
 ```
 
 - `status` читает локальное состояние.
 - `show` сохраняет выбранные цель/этап и возвращает директиву карточки.
 - `check-updates` дополнительно читает GitHub upstream; ничего не устанавливает.
+- `groups` разбивает невыполненные задачи плана на группы для параллельного выполнения; ничего не меняет.
 - `reset` очищает сохранённый выбор цели и этапа этого чата.
 - `reset-dispatch` очищает историю доставки; применяйте только после проверки неопределённой отправки.
 
