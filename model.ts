@@ -25,6 +25,7 @@ export const snapshotSchema = z.object({
   pendingConfirmation: z.boolean().nullable().default(false),
   chatPlan: z.object({ seq: z.number().int(), hash: z.string().length(64), title: z.string(), accepted: z.boolean() }).optional(),
   sessionBrief: z.object({ target: z.string(), status: z.enum(['stale', 'missing', 'research', 'invalid', 'blocked', 'valid', 'fresh']), seq: z.number() }).optional(),
+  rulesSync: z.object({ command: z.string(), seq: z.number() }).optional(),
   fixDefaults: z.object({ mode: z.enum(['ask', 'now', 'plan']), patch: z.boolean() }).optional(),
   phase: phaseSchema, phaseSource: z.string(),
   versions: z.object({ globalCli: z.string().nullable(), globalSource: z.string().nullable(), installed: z.string().nullable(),

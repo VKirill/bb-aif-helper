@@ -4,7 +4,7 @@ import { z } from 'zod';
 import { hostContract, rpcContract } from './contract.ts';
 import { requestSchema, phaseSchema, snapshotSchema, type CardRequest, type Snapshot, type Phase, type Suggestions } from './model.ts';
 import { actionPrompt, workflowActions, commitNavigationDeferred } from './workflow.ts';
-import { analyzeReply } from './suggestions.ts';
+import { analyzeReply, rulesSyncCommand } from './suggestions.ts';
 import { blockedByGate } from './gate.ts';
 import { attachChatChecks, readChatChecks, type ChatCheck } from './check-history.ts';
 import { lockUnchangedChecks, unchangedCheck, unchangedReason } from './check-actions.ts';
@@ -265,6 +265,15 @@ export default async function plugin(bb: BbPluginApi) {
         order: 'desc', limit: '100', types: ['item/completed', 'client/turn/requested'] });
       snapshot.pendingConfirmation = pendingConfirmation(rows);
       await contextReport(input.threadId, environment, snapshot, rows);
+      if (snapshot.profile === 'aifhub-openspec' && snapshot.target?.kind === 'openspec') {
+        const reply = [...rows].sort((a, b) => b.seq - a.seq).find(row => row.type === 'item/completed'
+          && row.data.item.type === 'agentMessage' && !row.data.item.parentToolCallId
+          && row.data.item.text.replace(/::aif-chat\{[^\n]*\}/g, '').trim());
+        if (reply?.type === 'item/completed' && reply.data.item.type === 'agentMessage') {
+          const command = rulesSyncCommand(reply.data.item.text, snapshot.target.id);
+          if (command) snapshot.rulesSync = { command, seq: reply.seq };
+        }
+      }
       if (!snapshot.configured && snapshot.profile === 'none' && !snapshot.target) {
         const savedPlan = await bb.storage.kv.get<ChatPlanRecord>(`chat-plan:${input.threadId}`);
         const accepted = savedPlan?.environmentId === environment.id && savedPlan.root === snapshot.root ? savedPlan : null;
@@ -279,6 +288,7 @@ export default async function plugin(bb: BbPluginApi) {
     }
     if (snapshot.pendingConfirmation !== false) snapshot.threadState = 'awaiting_input';
     if (snapshot.sessionBrief) snapshot.fingerprint = createHash('sha256').update(JSON.stringify([snapshot.fingerprint, snapshot.sessionBrief])).digest('hex');
+    if (snapshot.rulesSync) snapshot.fingerprint = createHash('sha256').update(JSON.stringify([snapshot.fingerprint, snapshot.rulesSync])).digest('hex');
     if (snapshot.chatPlan) snapshot.fingerprint = createHash('sha256').update(JSON.stringify([snapshot.fingerprint, snapshot.chatPlan])).digest('hex');
     snapshot.actions = workflowActions(snapshot);
     await chatChecks(input.threadId, environment.id, environment.hostId, snapshot, fresh);
@@ -358,6 +368,8 @@ export default async function plugin(bb: BbPluginApi) {
     const hidden = dismissed?.sourceKey === sourceKey ? dismissed.ids : [];
     const prefix = ['codex', 'codex-app'].includes(snapshot.runtime) ? '$' : '/';
     const blockedReason = reply.gate?.blocking ? 'Gate содержит блокирующие проблемы.' : reply.warning;
+    const contextBlock = snapshot.rulesSync ? 'Сначала синхронизируйте правила выбранного change.'
+      : sessionBriefBlocked(snapshot) ? 'Сначала восстановите SessionBrief выбранного change.' : null;
     const view: Suggestions = { sourceKey, fingerprint: snapshot.fingerprint, threadState: snapshot.threadState, gate: reply.gate, gateError: reply.error, gateWarning: reply.warning,
       items: ids.filter(id => !hidden.includes(id)).map(id => id === IMPROVE_APPROVAL && proposal ? {
         id, label: 'Применить всё', kind: 'improve-approval' as const, command: proposal.command,
@@ -376,8 +388,8 @@ export default async function plugin(bb: BbPluginApi) {
         available: !reply.error && sessionBriefCommandAvailable(snapshot) && briefCommands(reply.commands.get(id)!).some(c => c.change === snapshot.target?.id),
         reason: 'Пересобрать контекст только выбранного change; команда объявлена установленным расширением' }
       : ({ id, command: `${prefix}${reply.commands.get(id) ?? id}`,
-        available: !reply.error && !blockedByGate(id, reply.gate, reply.warning) && !(id === 'aif-implement' && sessionBriefBlocked(snapshot)) && !(id === 'aif-commit' && commitNavigationDeferred(snapshot)) && !unchangedCheck(snapshot, id, reply.commands.get(id)) && snapshot.profile !== 'invalid' && (snapshot.skills.includes(id) || id === 'aif-chat'),
-        reason: reply.error ?? (id === 'aif-implement' && sessionBriefBlocked(snapshot) ? 'Сначала восстановите SessionBrief выбранного change.' : blockedByGate(id, reply.gate, reply.warning) ? blockedReason! : id === 'aif-commit' && commitNavigationDeferred(snapshot) ? 'Коммиты привязаны к плану; продолжите aif-implement до разрешённого commit-boundary.' : unchangedCheck(snapshot, id, reply.commands.get(id)) ? unchangedReason : snapshot.profile === 'invalid' ? 'Проверьте конфигурацию проекта.' : !(snapshot.skills.includes(id) || id === 'aif-chat') ? `Команда ${id} не установлена для ${snapshot.runtime}. Добавьте этот skill в установку AI Factory проекта.` : reply.next === id ? reply.gate?.suggested_next?.reason ?? 'Следующий шаг из gate' : 'Команда из последнего ответа агента'),
+        available: !reply.error && !blockedByGate(id, reply.gate, reply.warning) && !(id === 'aif-implement' && contextBlock) && !(id === 'aif-commit' && commitNavigationDeferred(snapshot)) && !unchangedCheck(snapshot, id, reply.commands.get(id)) && snapshot.profile !== 'invalid' && (snapshot.skills.includes(id) || id === 'aif-chat'),
+        reason: reply.error ?? (id === 'aif-implement' && contextBlock ? contextBlock : blockedByGate(id, reply.gate, reply.warning) ? blockedReason! : id === 'aif-commit' && commitNavigationDeferred(snapshot) ? 'Коммиты привязаны к плану; продолжите aif-implement до разрешённого commit-boundary.' : unchangedCheck(snapshot, id, reply.commands.get(id)) ? unchangedReason : snapshot.profile === 'invalid' ? 'Проверьте конфигурацию проекта.' : !(snapshot.skills.includes(id) || id === 'aif-chat') ? `Команда ${id} не установлена для ${snapshot.runtime}. Добавьте этот skill в установку AI Factory проекта.` : reply.next === id ? reply.gate?.suggested_next?.reason ?? 'Следующий шаг из gate' : 'Команда из последнего ответа агента'),
       })) };
     return { view, ids, hidden, snapshot, proposal };
   }

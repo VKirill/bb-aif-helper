@@ -816,6 +816,44 @@ test('a stale SessionBrief survives reload and offers scoped CLI recovery withou
   } finally { await live.lifecycle.dispose(); }
 });
 
+test('valid SessionBrief with stale generated rules offers the exact scoped sync before implementation', async () => {
+  const h = await setup();
+  const live = h.harness;
+  try {
+    h.value.profile = 'aifhub-openspec';
+    h.value.target!.kind = 'openspec';
+    h.value.extensions = [{ name: 'aifhub-extension', installedVersion: '1.8.1', recordedVersion: '1.8.1',
+      source: 'local', state: 'present', contributions: [], commands: ['aifhub-mode'] }];
+    const command = 'ai-factory aifhub-mode sync --change demo --json';
+    const text = 'SessionBrief: valid. Проверка отметила правила change и merged как `stale-generated-rules`.\n'
+      + 'Следующий шаг — отдельная синхронизация правил.\n```powershell\n' + command + '\n```\n'
+      + 'После синхронизации повторить `$aif-implement demo`.';
+    const report = { seq: 10, type: 'item/completed', data: { item: { type: 'agentMessage', text } } };
+    h.setEvents([report]);
+    h.setOutput(text);
+    const read = () => live.behavior.callRpc('status', { threadId: 'thr_test', phase: 'implement' }) as Promise<typeof h.value>;
+    const current = await read();
+    assert.equal(current.sessionBrief?.status, 'valid');
+    assert.equal(current.actions[0].id, 'rules-sync');
+    assert.equal(current.actions[0].command, command);
+    assert.equal(current.actions[0].available, true);
+    assert.equal(current.actions.find(a => a.id === 'implement')?.available, false);
+    const view = await live.behavior.callRpc('suggestions', { threadId: 'thr_test' }) as any;
+    assert.equal(view.items.find((a: any) => a.id === 'aif-implement').available, false);
+    await assert.rejects(live.behavior.callRpc('run', { ...runInput(current.fingerprint), phase: 'implement', actionId: 'implement' }), /синхронизируйте правила/);
+    assert.equal(h.sends, 0);
+    await live.behavior.callRpc('run', { ...runInput(current.fingerprint), phase: 'implement', actionId: 'rules-sync' });
+    const sent = (live.inspection.sdk.callsTo('threads.send')[0][0] as any).input;
+    assert.deepEqual(sent.filter((item: any) => item.visibility !== 'agent-only'), [{ type: 'text', text: command, mentions: [] }]);
+    assert.match(sent[1].text, /только для выбранного change/);
+    h.setEvents([{ seq: 12, type: 'item/completed', data: { item: { type: 'agentMessage', text: 'Правила change demo синхронизированы.' } } }, report]);
+    const synced = await read();
+    assert(!synced.actions.some(a => a.id === 'rules-sync'));
+    assert.equal(synced.actions.find(a => a.id === 'implement')?.available, true);
+    assert.equal(h.sends, 1);
+  } finally { await live.lifecycle.dispose(); }
+});
+
 test('SessionBrief CLI suggestions reject a different change and missing extension command', async () => {
   const h = await setup(); try {
     h.value.profile = 'aifhub-openspec'; h.value.target!.kind = 'openspec';

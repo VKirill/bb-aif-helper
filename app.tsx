@@ -21,7 +21,7 @@ const actionIcons: Record<string, string> = {
   commit: 'GitBranch', fix: 'ToolCase', 'fix-new': 'ToolCase', 'fix-findings': 'ToolCase', 'execute-fix': 'ToolCase',
   verify: 'CircleCheck', 'check-verify': 'ListTodo', implement: 'Play', 'implement-proposed': 'Play',
   explore: 'Search', plan: 'ListTodo', improve: 'Edit', 'apply-improvements': 'Check',
-  done: 'Archive', 'ultra-receipt': 'FileText', sync: 'FolderSync', 'context-sync': 'FolderSync',
+  done: 'Archive', 'ultra-receipt': 'FileText', sync: 'FolderSync', 'context-sync': 'FolderSync', 'rules-sync': 'FolderSync',
   'context-compile': 'FileText', 'setup-context': 'Settings', analyze: 'Search', init: 'Download',
   install: 'Download', 'install-factory': 'Download', 'update-factory': 'PackageReceive', 'update-extensions': 'Puzzle',
   'check-rules': 'FileText', 'rules-check': 'FileText', 'check-security': 'SecurityCheck', 'security-checklist': 'SecurityCheck',
@@ -345,6 +345,7 @@ function WorkflowCard({ threadId, initialTarget = '', phase = 'unknown', openFil
           </span>
         </div>
         {usesBasicWorkflow(snapshot) && <p className="aif-muted" aria-label="Базовый workflow">Без AI Factory доступен встроенный flow: исследование → Plan BB → выполнение → проверка → коммит. «Составить план» включает штатный режим Plan.{hasPreparation && ' Установка доступна в «Подготовке проекта».'}</p>}
+        {snapshot.rulesSync && <p className="aif-error" role="status">В последнем ответе правила выбранного change отмечены как устаревшие. Синхронизируйте их перед выполнением.</p>}
         {sessionBriefBlocked(snapshot) && <p className="aif-error" role="status" aria-label="Блокировка SessionBrief">SessionBrief: {snapshot.sessionBrief!.status.toUpperCase()} · из чата. Выполнение остановлено. Синхронизируйте выбранный change, затем пересоберите SessionBrief. Актуальность контекста проверяет владелец workflow.</p>}
         {snapshot.fixDefaults && <p className="aif-muted aif-small">Fix: <code>{snapshot.fixDefaults.mode}</code> · learning patch: {snapshot.fixDefaults.patch ? 'включён' : 'выключен'} · настройки применяет aif-fix</p>}
         {snapshot.candidates.length > 0 && <label className="aif-target">План

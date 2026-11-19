@@ -1,6 +1,19 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { extractAifCommands, extractAifInvocations, analyzeReply } from '../suggestions.ts';
+import { extractAifCommands, extractAifInvocations, analyzeReply, rulesSyncCommand } from '../suggestions.ts';
+
+test('stale generated rules use only an exact, scoped sync invocation in completed code', () => {
+  const command = 'ai-factory aifhub-mode sync --change "268-demo" --json';
+  const report = 'SessionBrief актуален (`valid`), но проверка отметила правила как `stale-generated-rules`.\n';
+  assert.equal(rulesSyncCommand(report + '```powershell\r\n' + command + '\r\n```', '268-demo'), command);
+  assert.equal(rulesSyncCommand(report + '`' + command + '`', '268-demo'), command);
+  for (const text of [report + '```powershell\n' + command, report + '```powershell\n' + command + ' --all\n```',
+    report + '`' + command + '; next-command`', '```text\nstale-generated-rules\n' + command + '\n```',
+    report + '`' + command + '` и `ai-factory aifhub-mode sync --change other --json`']) {
+    assert.equal(rulesSyncCommand(text, '268-demo'), undefined);
+  }
+  assert.equal(rulesSyncCommand(report + '`' + command + '`', 'other'), undefined);
+});
 
 test('last-answer command names are extracted in order, without arguments or duplicates', () => {
   assert.deepEqual(extractAifCommands('Далее `$aif-architecture`, затем `$aif-roadmap`. Повтор: $aif-architecture; $aif-plan full #177; $aif.'), ['aif-architecture', 'aif-roadmap', 'aif-plan', 'aif']);
