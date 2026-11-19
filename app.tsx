@@ -686,7 +686,7 @@ function SuggestionBar({ threadId, composer, composerBusy }: { threadId: string;
       const scored = data.items.some(i => typeof i.probability === 'number');
       const items = scored ? [...data.items].sort((a, b) => (b.probability ?? -1) - (a.probability ?? -1)) : data.items;
       const topId = scored ? items[0].id : null;
-      return <><span className="aif-suggestions-label">Из ответа агента</span><div className="aif-suggestion-list">{items.map(item => {
+      return <><span className="aif-suggestions-label">{data.origin === 'plan' ? 'Следующий шаг по плану' : 'Из ответа агента'}</span><div className="aif-suggestion-list">{items.map(item => {
         const pct = typeof item.probability === 'number' ? chipPercent(item.probability) : null;
         const label = `${pct ? `${pct} ` : ''}${item.command}`;
         return <div className={cn('aif-suggestion', item.id === topId && 'aif-suggestion-top')} key={item.id}>
@@ -722,6 +722,12 @@ function removeAifPill(composer: PluginComposerApi) {
 const aifModeInput = (threadId: string | null, projectId: string | null) => threadId ? { threadId } : projectId ? { projectId } : {};
 
 /** Composer action: toggles the project-wide AI Factory mode; opens the tab when the project has no AI Factory. */
+function FactoryIcon() {
+  return <svg viewBox="0 0 24 24" className="size-4" fill="none" stroke="currentColor" strokeWidth={2} strokeLinejoin="round" aria-hidden="true">
+    <path d="M3 21V11l5 3V11l5 3V11l5 3V4h3v17z" /><path d="M7 18h2M12 18h2" />
+  </svg>;
+}
+
 function AifModeAction() {
   const composer = useComposer();
   const rpc = useRpc<typeof rpcContract>();
@@ -763,8 +769,10 @@ function AifModeAction() {
   return <button type="button" aria-label="Режим AI Factory" aria-pressed={!!view?.on} title={title}
     disabled={pending || !view || (!threadId && !projectId)} onClick={() => void toggle()}
     className={cn('grid size-7 cursor-pointer place-items-center rounded-md outline-none transition-colors focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-default disabled:opacity-50',
-      view?.on ? 'bg-primary text-primary-foreground hover:bg-primary/90' : 'text-muted-foreground hover:bg-state-hover hover:text-foreground')}>
-    <Icon name="Workflow" className="size-4" />
+      view?.on ? 'hover:brightness-110' : 'text-muted-foreground hover:bg-state-hover hover:text-foreground')}
+    // Own colour, not the theme's primary: some themes pair primary with a low-contrast foreground.
+    style={view?.on ? { background: '#EA580C', color: '#fff' } : undefined}>
+    <FactoryIcon />
   </button>;
 }
 

@@ -249,7 +249,7 @@ export default async function plugin(bb: BbPluginApi) {
     return { snapshot, previewDirective: cardDirective({ target: snapshot.target?.path ?? input.target, phase: input.phase }) };
   }
   async function suggested(threadId: string, fresh = false) {
-    const empty: Suggestions = { sourceKey: '', fingerprint: '', threadState: 'unknown', items: [], gate: null, gateError: null };
+    const empty: Suggestions = { sourceKey: '', fingerprint: '', threadState: 'unknown', items: [], gate: null, gateError: null, origin: 'reply' };
     if (!enabled) return { view: empty, ids: [] as string[], hidden: [] as string[], snapshot: null };
     const { output } = await bb.sdk.threads.output({ threadId });
     const reply = analyzeReply(output ?? '');
@@ -272,7 +272,7 @@ export default async function plugin(bb: BbPluginApi) {
     }));
     if (offered.length > items.length) bb.log.debug(`aif-chat: suggestions threadId=${threadId} shown=${items.length} hiddenUnknown=${offered.length - items.length}`);
     await chipScoringFor(threadId, sourceKey, reply.prose, items);
-    const view: Suggestions = { sourceKey, fingerprint: snapshot.fingerprint, threadState: snapshot.threadState, gate: reply.gate, gateError: reply.error, items };
+    const view: Suggestions = { sourceKey, fingerprint: snapshot.fingerprint, threadState: snapshot.threadState, gate: reply.gate, gateError: reply.error, origin: 'reply', items };
     return { view, ids, hidden, snapshot };
   }
   async function fallbackSuggestions(threadId: string, output: string | null, fresh: boolean) {
@@ -284,7 +284,7 @@ export default async function plugin(bb: BbPluginApi) {
       prefix: ['codex', 'codex-app'].includes(snapshot.runtime) ? '$' : '/', hidden });
     bb.log.debug(`aif-chat: fallback suggestions threadId=${threadId} count=${items.length}`);
     await chipScoringFor(threadId, sourceKey, output ?? '', items);
-    const view: Suggestions = { sourceKey, fingerprint: snapshot.fingerprint, threadState: snapshot.threadState, gate: null, gateError: null, items };
+    const view: Suggestions = { sourceKey, fingerprint: snapshot.fingerprint, threadState: snapshot.threadState, gate: null, gateError: null, origin: 'plan', items };
     return { view, ids: items.map(i => i.id), hidden, snapshot };
   }
   // Requested model per child thread, cached by id + updatedAt so panel refreshes do not re-read events.

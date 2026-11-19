@@ -134,6 +134,7 @@ test('fallback suggestions offer next actions only while the project mode is on'
     assert(view.items.every((i: any) => i.reason === 'Следующий шаг' && i.available));
     assert(view.items.some((i: any) => i.id === 'aif-improve'));
     assert(view.items.some((i: any) => i.id === 'aif-implement'));
+    assert.equal(view.origin, 'plan', 'plan-derived chips are labelled as plan steps, not reply commands');
   } finally { await h.harness.lifecycle.dispose(); }
 });
 

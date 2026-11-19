@@ -158,3 +158,14 @@ test('«В работе» shows the requested model and warns on fallback and mi
     assert.equal([...slot.container.querySelectorAll('span')].filter(el => el.textContent?.trim().startsWith('⚠')).length, 2);
   } finally { slot.lifecycle.unmount(); }
 });
+
+test('the enabled mode button uses its own orange fill with a white factory icon', async () => {
+  const slot = renderSlot(modeAction, {}, { composer: { scope: { kind: 'thread', threadId: 'thr_test' } }, rpc: { aifMode: () => modeView(true, true) } });
+  try {
+    const button = await slot.findByRole('button', { name: 'Режим AI Factory' }) as HTMLButtonElement;
+    await waitFor(() => assert.equal(button.getAttribute('aria-pressed'), 'true'));
+    assert.equal(button.style.color, 'rgb(255, 255, 255)');
+    assert.equal(button.style.background.includes('rgb(234, 88, 12)'), true);
+    assert.ok(button.querySelector('svg path'), 'factory icon is drawn inline');
+  } finally { slot.lifecycle.unmount(); }
+});

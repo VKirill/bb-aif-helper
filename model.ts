@@ -70,6 +70,8 @@ export type GateResult = z.infer<typeof gateResultSchema>;
 export const suggestionsSchema = z.object({
   sourceKey: z.string(), fingerprint: z.string(), threadState: z.string(),
   gate: gateResultSchema.nullable().default(null), gateError: z.string().nullable().default(null),
+  // 'plan' when the reply had no commands and chips come from the plan's next steps.
+  origin: z.enum(['reply', 'plan']).default('reply'),
   items: z.array(z.object({ id: z.string(), command: z.string(), available: z.boolean(), reason: z.string(), probability: z.number().min(0).max(1).nullable().default(null) })),
 });
 export type Suggestions = z.infer<typeof suggestionsSchema>;
