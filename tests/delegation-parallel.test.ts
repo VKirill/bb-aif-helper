@@ -40,7 +40,7 @@ test('contextBlock without parallel keeps the one-worker text and no parallel se
 test('contextBlock with parallel adds the worktree flow and keeps provider flags', () => {
   const text = contextBlock({ mode: 'bb', providerId: 'codex', model: 'gpt-6.2-sol', reasoning: 'high', tier: 'fast', parallel: 3 });
   for (const part of [
-    'Parallel mode', '--max 3', '--new-environment worktree', 'refs/heads/',
+    'Parallel mode', '--max 3', 'git worktree add --detach', 'refs/heads/', '--environment <copy>', 'git worktree remove --force',
     'git status --porcelain', 'git apply --3way',
     "--provider 'codex'", "--model 'gpt-6.2-sol'", "--reasoning-level 'high'", "--service-tier 'fast'",
     'bb plugin run aif-chat groups', 'Do not commit',
