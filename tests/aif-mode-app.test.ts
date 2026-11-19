@@ -10,7 +10,7 @@ for (const key of ['window', 'document', 'navigator', 'HTMLElement', 'Element', 
 (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
 registerHooks({ load(url, context, next) { return url.endsWith('.css') ? { format: 'module', source: '', shortCircuit: true } : next(url, context); } });
 const { loadPluginApp, renderSlot } = await import('@get-bb/plugin-sdk/testing/app');
-const { fireEvent, waitFor, within } = await import('@testing-library/react');
+const { act, fireEvent, waitFor, within } = await import('@testing-library/react');
 const app = await loadPluginApp(() => import('../app.tsx'));
 
 const modeAction = app.composerCustomizations.find(c => c.id === 'aif-mode')!.actions![0];
@@ -78,6 +78,38 @@ test('a pending pill flag inserts the mention once and acknowledges it once', as
     await waitFor(() => assert.equal(slot.inspection.rpcCalls.filter(c => c.method === 'aifMode').length, 2));
     assert.equal(acks, 1);
     assert.equal(pillMentions(slot.inspection.composer.draft).length, 1);
+  } finally { slot.lifecycle.unmount(); }
+});
+
+test('a pending pill is not inserted into a command draft and arrives with plain text', async () => {
+  let pill = true; let acks = 0;
+  const slot = renderSlot(pillBanner, {}, {
+    composer: { scope: { kind: 'thread', threadId: 'thr_test' }, text: '/aif-plan fix' },
+    rpc: { aifMode: () => modeView(true, true, pill), ackAifPill: () => { acks++; pill = false; return { ok: true as const }; } },
+  });
+  try {
+    await waitFor(() => assert.equal(slot.inspection.rpcCalls.filter(c => c.method === 'aifMode').length, 1));
+    await act(async () => {});
+    assert.equal(acks, 0);
+    assert.equal(pillMentions(slot.inspection.composer.draft).length, 0);
+    await slot.behavior.setComposerText('fix this');
+    await waitFor(() => assert.equal(acks, 1));
+    await waitFor(() => assert.equal(pillMentions(slot.inspection.composer.draft).length, 1));
+  } finally { slot.lifecycle.unmount(); }
+});
+
+test('the pill is removed when the draft becomes a command', async () => {
+  const pillMention = { from: 0, to: 11, label: 'AI Factory', kind: 'plugin' as const, pluginId: 'test-plugin', provider: 'aif-mode', id: 'aif-mode', icon: null };
+  const slot = renderSlot(pillBanner, {}, {
+    composer: { scope: { kind: 'thread', threadId: 'thr_test' }, text: '@AI Factory', mentions: [pillMention] },
+    rpc: { aifMode: () => modeView(true, true, false),
+      ackAifPill: () => { throw new Error('ackAifPill must not be called'); } },
+  });
+  try {
+    await waitFor(() => assert.equal(slot.inspection.rpcCalls.filter(c => c.method === 'aifMode').length, 1));
+    await slot.behavior.setComposerText('/aif-verify @AI Factory');
+    await waitFor(() => assert.equal(pillMentions(slot.inspection.composer.draft).length, 0));
+    assert.equal(slot.inspection.composer.draft.text, '/aif-verify ');
   } finally { slot.lifecycle.unmount(); }
 });
 

@@ -474,7 +474,7 @@ test('stale answers, changed files, hidden suggestions and missing skills cannot
     await assert.rejects(h.harness.behavior.callRpc('runSuggestion', suggestionInput(fresh)));
     h.setOutput('Next $aif-missing');
     const missing = await h.harness.behavior.callRpc('suggestions', { threadId: 'thr_test' }) as any;
-    assert.equal(missing.items[0].available, false);
+    assert.deepEqual(missing.items, []);
     await assert.rejects(h.harness.behavior.callRpc('runSuggestion', suggestionInput(missing, 'aif-missing'))); assert.equal(h.sends, 0);
   } finally { await h.harness.lifecycle.dispose(); }
 });
@@ -583,6 +583,20 @@ test('slash runtimes retain slash invocation for a structured gate suggestion', 
     h.value = { ...h.value, runtime: 'claude' }; h.setOutput(gateText());
     const view = await h.harness.behavior.callRpc('suggestions', { threadId: 'thr_test' }) as any;
     assert.equal(view.items[0].command, '/aif-commit');
+  } finally { await h.harness.lifecycle.dispose(); }
+});
+test('uninstalled reply commands are hidden while a gate next step stays visible but unavailable', async () => {
+  const h = await setup(); try {
+    h.setOutput('Сначала /aif-plan, затем /aif-composer-mode.');
+    const view = await h.harness.behavior.callRpc('suggestions', { threadId: 'thr_test' }) as any;
+    assert.deepEqual(view.items.map((i: any) => i.id), ['aif-plan']);
+    h.setOutput(gateText({ suggested_next: { command: '/aif-rules', reason: 'Check the rules gate.' } }));
+    const gated = await h.harness.behavior.callRpc('suggestions', { threadId: 'thr_test' }) as any;
+    assert.equal(gated.items.length, 1);
+    assert.equal(gated.items[0].id, 'aif-rules');
+    assert.equal(gated.items[0].available, false);
+    await assert.rejects(h.harness.behavior.callRpc('runSuggestion', suggestionInput(gated, 'aif-rules')));
+    assert.equal(h.sends, 0);
   } finally { await h.harness.lifecycle.dispose(); }
 });
 test('a blocking last-answer gate also stops advancing from a workflow card without blocking re-verification', async () => {

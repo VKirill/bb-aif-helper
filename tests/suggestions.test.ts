@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { extractAifCommands, extractAifInvocations, analyzeReply, chipDraft, nextStepItems } from '../suggestions.ts';
+import { extractAifCommands, extractAifInvocations, analyzeReply, chipDraft, isCommandDraft, nextStepItems } from '../suggestions.ts';
 
 test('last-answer command names are extracted in order, without arguments or duplicates', () => {
   assert.deepEqual(extractAifCommands('Далее `$aif-architecture`, затем `$aif-roadmap`. Повтор: $aif-architecture; $aif-plan full #177; $aif.'), ['aif-architecture', 'aif-roadmap', 'aif-plan', 'aif']);
@@ -94,12 +94,36 @@ test('chipDraft prepends when a mention overlaps the leading command instead of 
   assert.equal(result.text, '/aif-verify /aif-plan fix this');
   assert.deepEqual(result.mentions, [{ ...mention, from: 13, to: 16 }]);
 });
-test('chipDraft keeps the AI Factory pill when the draft holds only it', () => {
+test('isCommandDraft detects leading / and $ commands and ignores the pill', () => {
+  const pill = { from: 0, to: 11, kind: 'plugin', provider: 'aif-mode', id: 'aif-mode' };
+  assert.equal(isCommandDraft({ text: '/aif-plan fix', mentions: [] }), true);
+  assert.equal(isCommandDraft({ text: '  $aif-verify', mentions: [] }), true);
+  assert.equal(isCommandDraft({ text: 'fix /aif-plan', mentions: [] }), false);
+  assert.equal(isCommandDraft({ text: '@AI Factory /aif-plan', mentions: [pill] }), true);
+  assert.equal(isCommandDraft({ text: '@AI Factory', mentions: [pill] }), false);
+  assert.equal(isCommandDraft({ text: '', mentions: [] }), false);
+});
+test('chipDraft drops the AI Factory pill: a draft holding only it counts as empty', () => {
   const pill = { from: 0, to: 10, kind: 'plugin', provider: 'aif-mode', id: 'aif-mode' };
   const result = chipDraft({ text: 'AI Factory', mentions: [pill] }, '/aif-plan', 'aif-plan');
   assert.equal(result.submit, false);
-  assert.equal(result.text, '/aif-plan AI Factory ');
-  assert.deepEqual(result.mentions, [{ ...pill, from: 10, to: 20 }]);
+  assert.equal(result.text, '/aif-plan ');
+  assert.deepEqual(result.mentions, []);
+});
+test('chipDraft removes the pill from a command draft and shifts other mentions', () => {
+  const pill = { from: 0, to: 11, kind: 'plugin', provider: 'aif-mode', id: 'aif-mode' };
+  const mention = { from: 26, to: 28, label: '@x', kind: 'path', path: 'x', source: 'workspace', entryKind: 'file' };
+  const result = chipDraft({ text: '@AI Factory /aif-plan fix @x', mentions: [pill, mention] }, '/aif-fix', 'aif-fix');
+  assert.equal(result.submit, true);
+  assert.equal(result.text, ' /aif-fix fix @x');
+  assert.deepEqual(result.mentions, [{ ...mention, from: 14, to: 16 }]);
+});
+test('chipDraft drops the pill when prepending a command to plain text', () => {
+  const pill = { from: 4, to: 15, kind: 'plugin', provider: 'aif-mode', id: 'aif-mode' };
+  const result = chipDraft({ text: 'fix @AI Factory now', mentions: [pill] }, '/aif-verify', 'aif-verify');
+  assert.equal(result.submit, true);
+  assert.equal(result.text, '/aif-verify fix  now');
+  assert.deepEqual(result.mentions, []);
 });
 
 test('next-step chips: available next actions of installed skills, one per skill, at most three, runtime prefix', () => {
@@ -110,4 +134,60 @@ test('next-step chips: available next actions of installed skills, one per skill
   assert.deepEqual(nextStepItems(actions as any, { skills, invalid: false, prefix: '$', hidden: ['aif-qa'] }).map(i => i.command),
     ['$aif-commit', '$aif-implement @.ai-factory/plans/x.md', '$aif-fix']);
   assert.deepEqual(nextStepItems(actions as any, { skills, invalid: true, prefix: '/', hidden: [] }), []);
+});
+
+test('inline code spans keep the full one-line command with its arguments', () => {
+  const reply = 'Next: `/aif-fix refresh src/rooms/sma-map/provenance.json via npx tsx scripts/sma-provenance.ts so npm run sma:facts:check passes on HEAD` or `/aif-commit`.';
+  const command = 'aif-fix refresh src/rooms/sma-map/provenance.json via npx tsx scripts/sma-provenance.ts so npm run sma:facts:check passes on HEAD';
+  assert.deepEqual(extractAifInvocations(reply), [
+    { id: 'aif-fix', command }, { id: 'aif-commit', command: 'aif-commit' },
+  ]);
+  assert.equal(analyzeReply(reply).commands.get('aif-fix'), command);
+});
+test('a span variant with arguments replaces the bare command; the first one wins', () => {
+  assert.deepEqual(extractAifInvocations('/aif-plan then `/aif-plan full #1` then `/aif-plan other`'),
+    [{ id: 'aif-plan', command: 'aif-plan full #1' }]);
+  assert.deepEqual(extractAifInvocations('`/aif-plan full #1` and /aif-plan'),
+    [{ id: 'aif-plan', command: 'aif-plan full #1' }]);
+  assert.deepEqual(extractAifInvocations('/aif-zeta `/aif-alpha x` /aif-commit `/aif-commit --amend`'),
+    [{ id: 'aif-zeta', command: 'aif-zeta' }, { id: 'aif-alpha', command: 'aif-alpha x' }, { id: 'aif-commit', command: 'aif-commit --amend' }]);
+});
+test('overlong, multiline, fenced or control-character spans keep only the bare command', () => {
+  assert.deepEqual(extractAifInvocations('`/aif-fix ' + 'x'.repeat(300) + '`'), [{ id: 'aif-fix', command: 'aif-fix' }]);
+  assert.deepEqual(extractAifInvocations('`/aif-fix x\ny`'), [{ id: 'aif-fix', command: 'aif-fix' }]);
+  assert.deepEqual(extractAifInvocations('```\n/aif-fix x\n```'), [{ id: 'aif-fix', command: 'aif-fix' }]);
+  assert.deepEqual(extractAifInvocations('`/aif-fix\tx`'), [{ id: 'aif-fix', command: 'aif-fix' }]);
+});
+test('span commands are trimmed and inner whitespace collapses to single spaces', () => {
+  assert.deepEqual(extractAifInvocations('`  /aif-fix   refresh   x  `'), [{ id: 'aif-fix', command: 'aif-fix refresh x' }]);
+  assert.deepEqual(extractAifInvocations('`$aif-verify @plan.md`'), [{ id: 'aif-verify', command: 'aif-verify @plan.md' }]);
+});
+test('chipDraft submits a command with arguments from an empty draft', () => {
+  assert.deepEqual(chipDraft({ text: '', mentions: [] }, '/aif-fix refresh x so y', 'aif-fix'),
+    { text: '/aif-fix refresh x so y', mentions: [], submit: true });
+  assert.deepEqual(chipDraft({ text: '  \n ', mentions: [] }, '/aif-verify @plan.md', 'aif-verify'),
+    { text: '/aif-verify @plan.md', mentions: [], submit: true });
+});
+test('chipDraft puts an argument command on the first line of a plain draft without submitting', () => {
+  const mention = { from: 6, to: 8, label: '@a', kind: 'path', path: 'a', source: 'workspace', entryKind: 'file' };
+  const result = chipDraft({ text: 'check @a now', mentions: [mention] }, '/aif-verify @plan.md', 'aif-verify');
+  assert.equal(result.submit, false);
+  assert.equal(result.text, '/aif-verify @plan.md\ncheck @a now');
+  assert.deepEqual(result.mentions, [{ ...mention, from: 27, to: 29 }]);
+});
+test('chipDraft replaces the whole first line of a command draft with an argument command', () => {
+  assert.deepEqual(chipDraft({ text: '/aif-fix B old args', mentions: [] }, '/aif-fix A', 'aif-fix'),
+    { text: '/aif-fix A', mentions: [], submit: false });
+  assert.deepEqual(chipDraft({ text: '/aif-fix B\nkeep this line', mentions: [] }, '/aif-fix A', 'aif-fix'),
+    { text: '/aif-fix A\nkeep this line', mentions: [], submit: false });
+  assert.deepEqual(chipDraft({ text: '/aif-plan ', mentions: [] }, '/aif-fix A', 'aif-fix'),
+    { text: '/aif-fix A', mentions: [], submit: false });
+});
+test('chipDraft drops mentions inside the replaced first line and shifts later ones', () => {
+  const inside = { from: 9, to: 11, label: '@x', kind: 'path', path: 'x', source: 'workspace', entryKind: 'file' };
+  const after = { from: 17, to: 19, label: '@y', kind: 'path', path: 'y', source: 'workspace', entryKind: 'file' };
+  const result = chipDraft({ text: '/aif-fix @x\nkeep @y', mentions: [inside, after] }, '/aif-verify @plan.md', 'aif-verify');
+  assert.equal(result.submit, false);
+  assert.equal(result.text, '/aif-verify @plan.md\nkeep @y');
+  assert.deepEqual(result.mentions, [{ ...after, from: 26, to: 28 }]);
 });

@@ -1,4 +1,4 @@
-import type { ReactElement, ReactNode } from 'react';
+import { createContext, useContext, type ReactElement, type ReactNode } from 'react';
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
 import { Icon } from '@/components/ui/icon';
 import { cn } from '@/lib/utils';
@@ -6,7 +6,22 @@ import { cn } from '@/lib/utils';
 // Layout primitives for the panel. One grid: 16px between blocks, 12px inside a
 // block, 8px between controls; host theme tokens only (bg-card, text-muted-foreground…).
 
+export type Surface = 'panel' | 'card';
+const SurfaceContext = createContext<Surface>('card');
+export const SurfaceProvider = SurfaceContext.Provider;
+export const useSurface = () => useContext(SurfaceContext);
+
 export function Section({ title, aside, label, className, children }: { title?: ReactNode; aside?: ReactNode; label: string; className?: string; children: ReactNode }) {
+  const surface = useSurface();
+  if (surface === 'panel') {
+    return <section aria-label={label} className={cn('flex min-w-0 flex-col gap-2', className)}>
+      {(title || aside) && <div className="flex min-w-0 items-center justify-between gap-2 px-1">
+        {title && <h3 className="m-0 text-xs text-muted-foreground">{title}</h3>}
+        {aside}
+      </div>}
+      <div className="flex min-w-0 flex-col gap-3 rounded-xl bg-card p-4">{children}</div>
+    </section>;
+  }
   return <section aria-label={label} className={cn('flex min-w-0 flex-col gap-3 rounded-lg border border-border bg-card p-4', className)}>
     {(title || aside) && <div className="flex min-w-0 items-center justify-between gap-2">
       {title && <h3 className="m-0 text-xs font-medium text-muted-foreground">{title}</h3>}

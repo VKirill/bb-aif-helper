@@ -1,11 +1,11 @@
 import type { BbPluginApi } from '@get-bb/plugin-sdk';
 import { createHash } from 'node:crypto';
 import { z } from 'zod';
-import { hostContract, rpcContract, type DelegationView } from './contract.ts';
+import { hostContract, rpcContract, type ChipScoringView, type DelegationView } from './contract.ts';
 import { DELEGATION_ROLES, delegationDefaultsSchema, modelSpec } from './delegation.ts';
 import { childModel, type ChildModel } from './child-model.ts';
 import type { DelegationChoice, DelegationDefaults, DelegationRole, DelegationState } from './delegation.ts';
-import { requestSchema, phaseSchema, snapshotSchema, type CardRequest, type Snapshot, type Phase, type Suggestions } from './model.ts';
+import { requestSchema, phaseSchema, snapshotSchema, chipScoringStateSchema, type CardRequest, type ChipScoringState, type Snapshot, type Phase, type Suggestions } from './model.ts';
 import { actionPrompt, workflowActions } from './workflow.ts';
 import { applyRan, applySkipped, RUN_CONFIRMED_STEPS } from './readiness.ts';
 import { analyzeReply, nextStepItems } from './suggestions.ts';
@@ -16,11 +16,19 @@ import { SnapshotCache } from './snapshot-cache.ts';
 import { AIF_MENTION, aifMentionItems, aifModeInstructions, shouldContribute } from './aif-mode.ts';
 import { versionSampleFresh } from './versions.ts';
 import { BASIC_PLAN_ROOT } from './basic-workflow.ts';
+import { DECISIONS_URL, decisionsRequest, decisionsResponseSchema, probabilitiesFor, scoringKey } from './chip-scoring.ts';
 export { rpcContract } from './contract.ts';
 type Selection = { environmentId: string; target: string; phase: Phase };
 type Delivery = { requestId: string; fingerprint: string; actionId: string; state: 'attempting' | 'sent' | 'uncertain'; at: number };
 type DismissedSuggestions = { sourceKey: string; ids: string[] };
 const suggestionSource = (root: string, output: string | null) => createHash('sha256').update(JSON.stringify([root, output])).digest('hex');
+const CHIP_SCORE_CACHE_LIMIT = 200;
+const chipScoreCache = new Map<string, Record<string, number>>();
+const chipScoreInflight = new Set<string>();
+const rememberChipScore = (key: string, value: Record<string, number>) => {
+  if (!chipScoreCache.has(key) && chipScoreCache.size >= CHIP_SCORE_CACHE_LIMIT) chipScoreCache.delete(chipScoreCache.keys().next().value!);
+  chipScoreCache.set(key, value);
+};
 const chatStorageKey = (threadId: string, environmentId: string, hostId: string, root: string) =>
   `chat-checks:${threadId}:${environmentId}:${createHash('sha256').update(JSON.stringify([hostId, root])).digest('hex')}`;
 const commandInput = (command: string, context: string) => [
@@ -31,6 +39,8 @@ export function cardDirective(request: { target?: string; phase?: Phase }): stri
   const attrs = [request.target ? `target=${JSON.stringify(request.target)}` : '', request.phase && request.phase !== 'unknown' ? `phase=${JSON.stringify(request.phase)}` : ''].filter(Boolean).join(' ');
   return `::aif-chat{${attrs}}`;
 }
+const envListOutputSchema = z.looseObject({ variables: z.array(z.looseObject({ name: z.string() })) });
+const envValueOutputSchema = z.looseObject({ name: z.string(), value: z.string().nullable() });
 export default async function plugin(bb: BbPluginApi) {
   const settings = bb.settings.define({
     enabled: { type: 'boolean', label: 'Карточки AI Factory в чате', default: true },
@@ -38,6 +48,7 @@ export default async function plugin(bb: BbPluginApi) {
     runtime: { type: 'select', label: 'Runtime установки проекта', options: ['auto', 'codex', 'codex-app', 'claude', 'cursor', 'opencode', 'gemini'], default: 'auto' },
     upstreamRepo: { type: 'string', label: 'GitHub upstream AI Factory', default: 'lee-to/ai-factory', experimental_schema: z.string().regex(/^[\w.-]+\/[\w.-]+$/) },
     upstreamRef: { type: 'string', label: 'Upstream ref (пусто — последний стабильный release)', default: '', experimental_schema: z.string().max(200) },
+    decisionsKey: { type: 'string', label: 'Ключ Gemini Decisions (ручной ввод)', secret: true, default: '' },
   });
   const host = bb.hosts.experimental_client({ contract: hostContract });
   let enabled = (await settings.get()).enabled;
@@ -251,11 +262,15 @@ export default async function plugin(bb: BbPluginApi) {
     const dismissed = await bb.storage.kv.get<DismissedSuggestions>(`suggestions-dismissed:${threadId}`);
     const hidden = dismissed?.sourceKey === sourceKey ? dismissed.ids : [];
     const prefix = ['codex', 'codex-app'].includes(snapshot.runtime) ? '$' : '/';
-    const view: Suggestions = { sourceKey, fingerprint: snapshot.fingerprint, threadState: snapshot.threadState, gate: reply.gate, gateError: reply.error,
-      items: ids.filter(id => !hidden.includes(id)).map(id => ({ id, command: `${prefix}${reply.commands.get(id) ?? id}`,
-        available: !reply.error && !blockedByGate(id, reply.gate) && !unchangedCheck(snapshot, id) && snapshot.profile !== 'invalid' && (snapshot.skills.includes(id) || id === 'aif-chat'),
-        reason: reply.error ?? (blockedByGate(id, reply.gate) ? 'Gate содержит блокирующие проблемы.' : unchangedCheck(snapshot, id) ? unchangedReason : snapshot.profile === 'invalid' ? 'Проверьте конфигурацию проекта.' : !(snapshot.skills.includes(id) || id === 'aif-chat') ? `Skill не установлен для ${snapshot.runtime}` : reply.next === id ? reply.gate?.suggested_next?.reason ?? 'Следующий шаг из gate' : 'Команда из последнего ответа агента'),
-      })) };
+    const offered = ids.filter(id => !hidden.includes(id));
+    const items: Suggestions['items'] = offered.filter(id => snapshot.skills.includes(id) || id === 'aif-chat' || id === reply.next).map(id => ({ id, command: `${prefix}${reply.commands.get(id) ?? id}`,
+      available: !reply.error && !blockedByGate(id, reply.gate) && !unchangedCheck(snapshot, id) && snapshot.profile !== 'invalid' && (snapshot.skills.includes(id) || id === 'aif-chat'),
+      reason: reply.error ?? (blockedByGate(id, reply.gate) ? 'Gate содержит блокирующие проблемы.' : unchangedCheck(snapshot, id) ? unchangedReason : snapshot.profile === 'invalid' ? 'Проверьте конфигурацию проекта.' : !(snapshot.skills.includes(id) || id === 'aif-chat') ? `Skill не установлен для ${snapshot.runtime}` : reply.next === id ? reply.gate?.suggested_next?.reason ?? 'Следующий шаг из gate' : 'Команда из последнего ответа агента'),
+      probability: null,
+    }));
+    if (offered.length > items.length) bb.log.info(`aif-chat: suggestions threadId=${threadId} shown=${items.length} hiddenUnknown=${offered.length - items.length}`);
+    await chipScoringFor(threadId, sourceKey, reply.prose, items);
+    const view: Suggestions = { sourceKey, fingerprint: snapshot.fingerprint, threadState: snapshot.threadState, gate: reply.gate, gateError: reply.error, items };
     return { view, ids, hidden, snapshot };
   }
   async function fallbackSuggestions(threadId: string, output: string | null, fresh: boolean) {
@@ -266,6 +281,7 @@ export default async function plugin(bb: BbPluginApi) {
     const items = nextStepItems(snapshot.actions, { skills: snapshot.skills, invalid: snapshot.profile === 'invalid',
       prefix: ['codex', 'codex-app'].includes(snapshot.runtime) ? '$' : '/', hidden });
     bb.log.info(`aif-chat: fallback suggestions threadId=${threadId} count=${items.length}`);
+    await chipScoringFor(threadId, sourceKey, output ?? '', items);
     const view: Suggestions = { sourceKey, fingerprint: snapshot.fingerprint, threadState: snapshot.threadState, gate: null, gateError: null, items };
     return { view, ids: items.map(i => i.id), hidden, snapshot };
   }
@@ -386,6 +402,108 @@ export default async function plugin(bb: BbPluginApi) {
     const pill = threadId ? await bb.storage.kv.get<boolean>(`aif-pill:${threadId}`) === true : false;
     return { projectId, on, configured, pill };
   }
+  const CHIP_SCORING_KV = 'chip-scoring';
+  const scoringState = async (): Promise<ChipScoringState> => {
+    const parsed = chipScoringStateSchema.safeParse(await bb.storage.kv.get(CHIP_SCORING_KV) ?? {});
+    return parsed.success ? parsed.data : chipScoringStateSchema.parse({});
+  };
+  async function catalogSecrets(): Promise<{ available: boolean; names: string[] }> {
+    try {
+      const { variables } = await bb.sdk.plugins.callRpc({ pluginId: 'env-catalog', method: 'env_list', input: { kind: 'secret' },
+        outputSchema: envListOutputSchema, signal: AbortSignal.timeout(5000) });
+      const gemini = (name: string) => name.toUpperCase().includes('GEMINI');
+      const names = variables.map(v => v.name).sort((a, b) => Number(gemini(b)) - Number(gemini(a)) || a.localeCompare(b));
+      return { available: true, names };
+    } catch (error) {
+      bb.log.warn(`aif-chat: env-catalog unavailable: ${error instanceof Error ? error.name : 'error'}`);
+      return { available: false, names: [] };
+    }
+  }
+  async function chipScoringView(): Promise<ChipScoringView> {
+    const [state, catalog, config] = await Promise.all([scoringState(), catalogSecrets(), settings.get()]);
+    return { ...state, catalogAvailable: catalog.available, catalogNames: catalog.names, manualKeySet: config.decisionsKey !== '' };
+  }
+  async function setChipScoring(input: { enabled?: boolean; source?: 'catalog' | 'manual'; catalogName?: string | null; manualKey?: string | null }) {
+    const state = await scoringState();
+    const next: ChipScoringState = { ...state, enabled: input.enabled ?? state.enabled, source: input.source ?? state.source,
+      catalogName: input.catalogName === undefined ? state.catalogName : input.catalogName };
+    if (input.manualKey !== undefined) await settings.experimental_set({ decisionsKey: input.manualKey });
+    await bb.storage.kv.set(CHIP_SCORING_KV, next);
+    bb.log.info(`aif-chat: chip scoring settings enabled=${next.enabled} source=${next.source}`);
+    return chipScoringView();
+  }
+  async function resolveDecisionsKey(): Promise<{ key: string } | { error: string }> {
+    const state = await scoringState();
+    if (state.source === 'manual') {
+      const key = (await settings.get()).decisionsKey;
+      return key ? { key } : { error: 'Ключ не задан' };
+    }
+    if (!state.catalogName) return { error: 'ключ не найден в каталоге' };
+    try {
+      const { value } = await bb.sdk.plugins.callRpc({ pluginId: 'env-catalog', method: 'env_get_value', input: { name: state.catalogName },
+        outputSchema: envValueOutputSchema, signal: AbortSignal.timeout(5000) });
+      if (!value) return { error: 'ключ не найден в каталоге' };
+      bb.log.info(`aif-chat: decisions key read source=catalog name=${state.catalogName}`);
+      return { key: value };
+    } catch (error) {
+      bb.log.warn(`aif-chat: decisions key read failed name=${state.catalogName}: ${error instanceof Error ? error.message : String(error)}`);
+      return { error: 'ключ не найден в каталоге' };
+    }
+  }
+  async function scoreChips(threadId: string, key: string, reply: string, options: { id: string; command: string }[]) {
+    const started = Date.now();
+    const fail = async (lastError: string, detail: string) => {
+      rememberChipScore(key, {});
+      bb.log.warn(`aif-chat: chip scoring failed threadId=${threadId}: ${detail}`);
+      await serial(CHIP_SCORING_KV, async () => {
+        const state = await scoringState();
+        await bb.storage.kv.set(CHIP_SCORING_KV, { ...state, lastError });
+      });
+    };
+    const resolved = await resolveDecisionsKey();
+    if ('error' in resolved) return fail(resolved.error, resolved.error);
+    let probabilities: Record<string, number>;
+    try {
+      const response = await fetch(DECISIONS_URL, { method: 'POST', headers: { 'x-goog-api-key': resolved.key, 'content-type': 'application/json' },
+        body: JSON.stringify(decisionsRequest(reply, options)), signal: AbortSignal.timeout(15000) });
+      if (!response.ok) return fail(`Gemini ответил HTTP ${response.status}`, `HTTP ${response.status}`);
+      const text = await response.text();
+      if (text.length > 1_048_576) return fail('Неверный ответ Gemini', 'response too large');
+      const parsed = decisionsResponseSchema.safeParse(JSON.parse(text));
+      if (!parsed.success) return fail('Неверный ответ Gemini', 'invalid response');
+      probabilities = probabilitiesFor(parsed.data, options.map(o => o.id));
+    } catch (error) {
+      const name = error instanceof Error ? error.name : 'error';
+      const lastError = name === 'TimeoutError' || name === 'AbortError' ? 'Таймаут Gemini' : name === 'SyntaxError' ? 'Неверный ответ Gemini' : 'Gemini недоступен';
+      return fail(lastError, name);
+    }
+    rememberChipScore(key, probabilities);
+    bb.realtime.publish('changed', { threadId });
+    const top = options.reduce((a, b) => (probabilities[b.id] ?? 0) > (probabilities[a.id] ?? 0) ? b : a).id;
+    bb.log.info(`aif-chat: chips scored threadId=${threadId} options=${options.length} top=${top} ms=${Date.now() - started}`);
+    await serial(CHIP_SCORING_KV, async () => {
+      const state = await scoringState();
+      await bb.storage.kv.set(CHIP_SCORING_KV, { ...state, lastError: null, lastScoredAt: Date.now() });
+    });
+  }
+  async function chipScoringFor(threadId: string, sourceKey: string, reply: string, items: Suggestions['items']) {
+    const options = items.filter(item => item.available);
+    if (options.length < 2) return;
+    if (!(await scoringState()).enabled) return;
+    const key = scoringKey(sourceKey, options.map(item => item.id));
+    const cached = chipScoreCache.get(key);
+    if (cached) {
+      for (const item of items) {
+        const p = cached[item.id];
+        if (p !== undefined) item.probability = p;
+      }
+      return;
+    }
+    if (chipScoreInflight.has(key)) return;
+    chipScoreInflight.add(key);
+    void scoreChips(threadId, key, reply, options.map(item => ({ id: item.id, command: item.command })))
+      .catch(() => {}).finally(() => { chipScoreInflight.delete(key); });
+  }
   bb.rpc.register(rpcContract, {
     status: input => status(input, input.checkUpdates, input.force),
     suggestions: async input => (await suggested(input.threadId)).view,
@@ -395,6 +513,8 @@ export default async function plugin(bb: BbPluginApi) {
     },
     setDelegation: input => serial(`delegation:${input.threadId}`, () => setDelegation(input.threadId, input.choice, input.role)),
     setDelegationDefaults: input => serial(`delegation:${input.threadId}`, () => setDelegationDefaults(input.threadId, input.action)),
+    chipScoring: () => chipScoringView(),
+    setChipScoring: input => serial('chip-scoring', () => setChipScoring(input)),
     setReadinessSkip: async input => {
       const { environment } = await context(input.threadId);
       const key = `readiness-skip:${environment.hostId}:${environment.path!}`;

@@ -20,7 +20,10 @@
 .aif-suggestion-list{display:flex;flex-wrap:wrap;gap:var(--aif-2)}
 .aif-suggestion{display:inline-flex;max-width:100%;overflow:hidden;border:1px solid var(--border);border-radius:var(--aif-r);background:var(--card,var(--background))}
 .aif-suggestion button{min-height:32px;border:0;background:transparent;color:var(--foreground);font:inherit;font-size:12px;line-height:16px;cursor:pointer;transition:background-color .3s var(--aif-ease)}
-.aif-suggestion-run{padding:var(--aif-2) var(--aif-3);font-family:var(--font-mono,ui-monospace,monospace)!important;text-align:left;overflow-wrap:anywhere}
+.aif-suggestion-run{display:flex;align-items:center;gap:var(--aif-1);min-width:0;padding:var(--aif-2) var(--aif-3);font-family:var(--font-mono,ui-monospace,monospace)!important;text-align:left;overflow-wrap:anywhere}
+.aif-suggestion-top{border-color:var(--primary)}
+.aif-suggestion-score{flex:none;padding:1px var(--aif-1);border-radius:4px;background:var(--muted);font-size:11px;line-height:14px;font-variant-numeric:tabular-nums;color:var(--muted-foreground)}
+.aif-suggestion-command{flex:1 1 auto;min-width:0;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .aif-suggestion-dismiss{padding:0 var(--aif-3);border-left:1px solid var(--border)!important;color:var(--muted-foreground)!important;font-size:16px!important}
 .aif-suggestion button:hover:not(:disabled){background:var(--muted)}
 .aif-suggestion button:active:not(:disabled){transform:scale(.98)}

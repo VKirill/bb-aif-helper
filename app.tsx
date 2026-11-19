@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
 import { definePluginApp, useRpc, useRealtime, useComposer, useBbNavigate, experimental_useAppPanel, experimental_ProviderModelPicker as ProviderModelPicker, type ExperimentalProviderModelPickerValue as PickerValue, type PluginMessageDirectiveProps, type ExperimentalThreadContextCardProps, type ExperimentalThreadTabProps, type ExperimentalCodeFenceRendererProps, type PluginComposerApi } from '@get-bb/plugin-sdk/app';
-import type { rpcContract, DelegationView } from './contract.ts';
+import type { rpcContract, ChipScoringView, DelegationView } from './contract.ts';
 import type { DelegationChoice, DelegationRole } from './delegation.ts';
 import { phaseSchema, type Snapshot, type Phase, type Action, type ReadinessStep, type Suggestions } from './model.ts';
 import { readinessComplete, nextReadinessStep, readinessHelp, type SkippableStepId } from './readiness.ts';
@@ -8,7 +8,7 @@ import { parseReplyGate } from './gate.ts';
 import { checkHelp, rowActions, supplementaryChecks, toolHelp } from './check-actions.ts';
 import { updateInVersionDetails, VERSION_TTL } from './versions.ts';
 import { contextSetupInDetails } from './workflow.ts';
-import { chipDraft } from './suggestions.ts';
+import { chipDraft, isCommandDraft } from './suggestions.ts';
 import { AIF_MENTION } from './aif-mode.ts';
 import { BASIC_PLAN_ROOT, usesBasicWorkflow } from './basic-workflow.ts';
 import { toast } from 'sonner';
@@ -17,12 +17,13 @@ import { Badge } from '@/components/ui/badge';
 import { Progress } from '@/components/ui/progress';
 import { Icon } from '@/components/ui/icon';
 import { cn } from '@/lib/utils';
-import { Callout, Disclosure, Hint, Section, StatusDot, type Tone } from '@/components/aif/layout';
+import { Callout, Disclosure, Hint, Section, StatusDot, SurfaceProvider, useSurface, type Tone } from '@/components/aif/layout';
 import './aif-chat.css';
 
 const phaseNames: Record<Phase, string> = { unknown: 'Контекст задачи', explore: 'Исследование', plan: 'Планирование', improve: 'Уточнение плана', implement: 'Выполнение плана', verify: 'Проверка', fix: 'Исправление замечаний', done: 'Финализация' };
 const profileNames: Record<Snapshot['profile'], string> = { none: 'Нет установки', upstream: 'AI Factory', 'aifhub-classic': 'AIFHub · classic', 'aifhub-openspec': 'AIFHub · OpenSpec', 'aifhub-ultra': 'AIFHub · legacy ultra', invalid: 'Проверьте конфигурацию' };
 const checkLabels = { notrun: 'Не запускалась', 'reported-pass': 'PASS в отчёте', warn: 'С замечаниями', fail: 'Ошибка', unknown: 'Не подтверждено' };
+const chipPercent = (p: number) => p > 0 && Math.round(p * 100) === 0 ? '<1%' : `${Math.round(p * 100)}%`;
 
 /** Info mark: "?" in a circle, drawn inline so it never falls back to a host glyph. */
 const InfoIcon = () => <svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" aria-hidden="true">
@@ -49,6 +50,7 @@ function GateData({ code, status, Original }: ExperimentalCodeFenceRendererProps
 function WorkflowCard({ threadId, initialTarget = '', phase = 'unknown', openFile, compact = false, delegation = false, environmentId = null }: {
   threadId: string; initialTarget?: string; phase?: Phase; openFile?: ((path: string) => boolean) | null; compact?: boolean; delegation?: boolean; environmentId?: string | null;
 }) {
+  const surface = useSurface();
   const rpc = useRpc<typeof rpcContract>();
   const [target, setTarget] = useState(initialTarget);
   const [snapshot, setSnapshot] = useState<Snapshot | null>(null);
@@ -132,18 +134,18 @@ function WorkflowCard({ threadId, initialTarget = '', phase = 'unknown', openFil
   </div>;
   return <section aria-label="AI Factory workflow" className={cn('aif-card flex min-w-0 flex-col gap-4 text-sm text-foreground [overflow-wrap:anywhere]',
     compact ? '' : 'my-3 rounded-xl border border-border bg-card p-4')}>
-    <header className={cn('flex min-h-8 items-center gap-2', delegation && 'sticky -top-4 z-10 -mx-4 -mt-4 border-b border-border bg-background/90 px-4 py-3 backdrop-blur')}>
+    <header className={cn('flex min-h-8 flex-wrap items-center gap-2', delegation && 'sticky -top-3 z-10 -mx-3 -mt-3 border-b border-border bg-background/90 px-3 py-3 backdrop-blur')}>
       <span className="grid size-6 shrink-0 place-items-center rounded-md bg-primary text-primary-foreground"><Icon name="Workflow" className="size-3.5" /></span>
       <strong className="text-base font-semibold tracking-tight whitespace-nowrap">AI Factory</strong>
       {snapshot && snapshot.profile !== 'upstream' && <Badge variant="secondary" className="min-w-0 truncate font-medium">{profileNames[snapshot.profile]}</Badge>}
-      <span className="ml-auto flex items-center gap-2">
-        {delegation && <div role="tablist" aria-label="Раздел панели" className="flex gap-0.5 rounded-lg bg-muted p-0.5">
-          {(['nav', 'settings'] as const).map(v => <button key={v} type="button" role="tab" aria-selected={view === v} onClick={() => setView(v)}
-            className={cn('h-7 cursor-pointer rounded-md px-2.5 text-xs font-medium transition-colors outline-none focus-visible:ring-1 focus-visible:ring-ring',
-              view === v ? 'bg-background text-foreground shadow-xs' : 'text-muted-foreground hover:text-foreground')}>
-            {v === 'nav' ? 'Навигация' : 'Настройки'}{v === 'settings' && settingsAttention && <><span aria-hidden="true" className="ml-1 inline-block size-1.5 rounded-full bg-primary" /><span className="sr-only">, есть что проверить</span></>}
-          </button>)}
-        </div>}
+      {delegation && <div role="tablist" aria-label="Раздел панели" className="gap-0.5 rounded-lg bg-muted p-0.5 @max-md/aif:order-last @max-md/aif:basis-full @max-md/aif:grid @max-md/aif:grid-cols-2 @md/aif:ml-auto @md/aif:flex">
+        {(['nav', 'settings'] as const).map(v => <button key={v} type="button" role="tab" aria-selected={view === v} onClick={() => setView(v)}
+          className={cn('h-8 cursor-pointer whitespace-nowrap rounded-md px-2.5 text-xs font-medium transition-colors outline-none focus-visible:ring-1 focus-visible:ring-ring',
+            view === v ? 'bg-background text-foreground shadow-xs' : 'text-muted-foreground hover:text-foreground')}>
+          {v === 'nav' ? 'Навигация' : 'Настройки'}{v === 'settings' && settingsAttention && <><span aria-hidden="true" className="ml-1 inline-block size-1.5 rounded-full bg-primary" /><span className="sr-only">, есть что проверить</span></>}
+        </button>)}
+      </div>}
+      <span className={cn('flex items-center gap-2', delegation ? '@max-md/aif:ml-auto' : 'ml-auto')}>
         <Hint text="Перечитать задачи и проверки; версии CLI/Git и GitHub кэшируются на сутки"><Button type="button" variant="ghost" size="icon" className="size-8 text-muted-foreground" onClick={() => void refresh(false, true)}
           aria-label="Обновить статус AI Factory"><Icon name="RotateCcw" className="size-4" /></Button></Hint>
       </span>
@@ -193,7 +195,7 @@ function WorkflowCard({ threadId, initialTarget = '', phase = 'unknown', openFil
 
       {(!delegation || view === 'nav') && snapshot.target && snapshot.checks.length > 0 && <Disclosure className="aif-checks" summary={<>Что проверить <span className="font-normal text-muted-foreground">· из чата: {snapshot.checks.filter(c => c.chat).length} · отчётов PASS: {snapshot.checks.filter(c => c.state === 'reported-pass').length}</span></>}>
         <p className="m-0 text-xs text-muted-foreground">Дополнительные проверки — по выбору. Правила проекта и обязательные gates могут требовать их перед завершением; блокирующий FAIL сохраняет силу. Галочки задач и результаты проверок независимы. Актуальность отчётов подтверждает владелец workflow.</p>
-        <ul className="m-0 flex list-none flex-col divide-y divide-border rounded-lg border border-border p-0">{snapshot.checks.map(c => <li key={c.id} className="flex flex-col gap-2 p-3">
+        <ul className={cn('m-0 flex list-none flex-col divide-y divide-border p-0', surface === 'card' && 'rounded-lg border border-border')}>{snapshot.checks.map(c => <li key={c.id} className="flex flex-col gap-2 p-3">
           <div className="flex flex-wrap items-center gap-2">
             <strong className="font-medium">{c.label}{checkHelp[c.id] && <HelpMark label={`Что проверяет «${c.label}»`} open={help === c.id} onToggle={() => setHelp(help === c.id ? null : c.id)} />}</strong>
             {c.required ? <span className="text-xs text-muted-foreground">нужно для завершения</span> : supplementaryChecks.has(c.id) && <span className="text-xs text-muted-foreground" title="Дополнительный шаг flow; действующие правила проекта сохраняют приоритет">по выбору</span>}
@@ -217,6 +219,7 @@ function WorkflowCard({ threadId, initialTarget = '', phase = 'unknown', openFil
 
       {delegation && view === 'settings' && <>
         {snapshot.configured && <DelegationSection threadId={threadId} environmentId={environmentId} busy={busy} />}
+        <ChipScoringSection threadId={threadId} />
         {snapshot.readiness.length > 0 && <ReadinessSection snapshot={snapshot} run={run} busy={busy} sending={sending} setReadinessSkip={setReadinessSkip} />}
         <Disclosure summary="Настройка инструментов">{renderActions(snapshot.actions.filter(a => a.group === 'setup' && (a.id === 'quality-setup' || a.id === 'ci-setup')))}</Disclosure>
         <ToolsSection actions={snapshot.actions.filter(a => a.group === 'setup' && toolHelp[a.id])} renderAction={renderAction} />
@@ -264,26 +267,26 @@ const fromPicker = (v: PickerValue): DelegationChoice =>
 const pickerSeed: PickerValue = { providerId: 'codex', model: '', reasoningLevel: 'high' as PickerValue['reasoningLevel'] };
 
 const roleText = {
-  implement: { title: 'Код', skills: '/aif-implement', group: 'Кто пишет код',
+  implement: { title: 'Код', group: 'Кто пишет код',
     saved: '/aif-implement будет передавать задачи выбранной модели.', self: 'Код снова пишет агент этого чата.',
     note: 'Хранится в .ai-factory.json → phases.implement. /aif-implement отдаёт каждую задачу дочернему треду на этой модели, затем сам проверяет diff и отмечает задачу в плане.' },
-  research: { title: 'Разведчик 1', skills: '/aif-plan, /aif-fix, /aif-qa', group: 'Кто исследует код',
+  research: { title: 'Разведчик 1', group: 'Кто исследует код',
     saved: 'Разведчики AI Factory будут запускаться дочерними тредами на выбранной модели.', self: 'Разведку снова делают встроенные помощники агента.',
-    note: 'Разведчик 1 — архитектура и затронутые модули; если навык просит одного разведчика, это он. Хранится в .ai-factory/skill-context/global-skill-context.md. Разведчики идут дочерними тредами параллельно, агент собирает их отчёты.' },
-  research2: { title: 'Разведчик 2', skills: 'шаблоны и соглашения', group: 'Кто ищет шаблоны',
+    note: 'Работает в /aif-plan, /aif-fix, /aif-qa. Разведчик 1 — архитектура и затронутые модули; если навык просит одного разведчика, это он. Хранится в .ai-factory/skill-context/global-skill-context.md. Разведчики идут дочерними тредами параллельно, агент собирает их отчёты.' },
+  research2: { title: 'Разведчик 2', group: 'Кто ищет шаблоны',
     saved: 'Разведчик 2 будет работать на выбранной модели.', self: 'Разведчик 2 снова работает как разведчик 1.',
-    selfLabel: 'Как разведчик 1', selfBadge: 'как разведчик 1', note: '' },
-  research3: { title: 'Разведчик 3', skills: 'зависимости и связи', group: 'Кто ищет связи',
+    selfLabel: 'Как разведчик 1', selfBadge: 'как разведчик 1', note: 'Ищет шаблоны и соглашения в коде.' },
+  research3: { title: 'Разведчик 3', group: 'Кто ищет связи',
     saved: 'Разведчик 3 будет работать на выбранной модели.', self: 'Разведчик 3 снова работает как разведчик 1.',
-    selfLabel: 'Как разведчик 1', selfBadge: 'как разведчик 1', note: 'Разведчик 3 берёт и всех следующих, если навык просит больше трёх.' },
-} as const satisfies Record<DelegationRole, { title: string; skills: string; group: string; saved: string; self: string; note: string; selfLabel?: string; selfBadge?: string }>;
+    selfLabel: 'Как разведчик 1', selfBadge: 'как разведчик 1', note: 'Ищет зависимости и связи. Разведчик 3 берёт и всех следующих, если навык просит больше трёх.' },
+} as const satisfies Record<DelegationRole, { title: string; group: string; saved: string; self: string; note: string; selfLabel?: string; selfBadge?: string }>;
 
 /** One-line role row; the «Этот агент / Другая модель» editor opens on «Изменить» and saves through setDelegation. */
 function ModelChoice({ role, saved, providerName, environmentId, busy, locked: lockedOuter, onSave }: {
   role: DelegationRole; saved: DelegationChoice; providerName: (id: string | null) => string | null; environmentId: string | null; busy: boolean; locked: boolean;
   onSave: (choice: DelegationChoice) => Promise<void>;
 }) {
-  const text: { title: string; skills: string; group: string; saved: string; self: string; note: string; selfLabel?: string; selfBadge?: string } = roleText[role];
+  const text: { title: string; group: string; saved: string; self: string; note: string; selfLabel?: string; selfBadge?: string } = roleText[role];
   const [editing, setEditing] = useState(false);
   const [help, setHelp] = useState(false);
   const [mode, setMode] = useState<'self' | 'bb'>(saved.mode);
@@ -305,11 +308,17 @@ function ModelChoice({ role, saved, providerName, environmentId, busy, locked: l
     setMode(saved.mode); setPick(saved.mode === 'bb' ? toPicker(saved) : null); setEditing(false);
   }
   return <div className="flex min-w-0 flex-col gap-2 py-2.5 first:pt-0 last:pb-0">
-    <div className="flex min-w-0 items-center gap-2">
-      <h4 className="m-0 shrink-0 text-sm font-medium">{text.title}{text.note && <HelpMark label={`Подробнее: ${text.title}`} open={help} onToggle={() => setHelp(!help)} />}</h4>
-      <span className="truncate text-xs text-muted-foreground max-sm:hidden">{text.skills}</span>
-      <Badge variant="secondary" className="ml-auto min-w-0 max-w-[55%] truncate font-medium">{savedLabel}</Badge>
-      {!editing && <Button type="button" size="sm" variant="outline" className="h-7 shrink-0 px-2.5 text-xs" aria-label={`Изменить: ${text.title}`} disabled={locked} onClick={() => setEditing(true)}>Изменить</Button>}
+    <div className="flex min-w-0 items-center gap-1">
+      <button type="button" aria-label={`Изменить: ${text.title}`} aria-expanded={editing} disabled={locked}
+        onClick={() => (editing ? cancel() : setEditing(true))}
+        className="flex min-h-11 min-w-0 flex-1 cursor-pointer items-center gap-2 rounded-md px-1 text-left outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-default disabled:opacity-60">
+        <span className="flex min-w-0 flex-1 flex-col">
+          <span className="text-sm font-medium">{text.title}</span>
+          <span className="block truncate text-xs text-muted-foreground">{savedLabel}</span>
+        </span>
+        <Icon name="ChevronRight" className={cn('size-4 shrink-0 text-muted-foreground transition-transform', editing && 'rotate-90')} />
+      </button>
+      {text.note && <HelpMark label={`Подробнее: ${text.title}`} open={help} onToggle={() => setHelp(!help)} />}
     </div>
     {help && text.note && <p className="m-0 text-xs text-muted-foreground">{text.note}</p>}
     {editing && <>
@@ -426,13 +435,107 @@ function DefaultsSection({ view, busy, onChange }: { view: DelegationView; busy:
   </Disclosure>;
 }
 
+function useChipScoringView(threadId: string) {
+  const rpc = useRpc<typeof rpcContract>();
+  const [view, setView] = useState<ChipScoringView | null>(null);
+  const [error, setError] = useState('');
+  const mounted = useRef(true);
+  useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
+  const load = useCallback(async () => {
+    try {
+      const next = await rpc.call('chipScoring', {});
+      if (mounted.current) { setView(next); setError(''); }
+    } catch (e) { if (mounted.current) setError(e instanceof Error ? e.message : String(e)); }
+  }, [rpc]);
+  useEffect(() => { void load(); }, [load]);
+  useRealtime('changed', (payload: unknown) => { if ((payload as { threadId?: string })?.threadId === threadId) void load(); });
+  return { view, setView, error, setError };
+}
+
+const CHIP_SCORING_HELP = 'Плагин отправляет последний ответ агента и список кнопок в Google Gemini Decisions и показывает вероятность каждой кнопки. Ответ может содержать пути и код проекта. Ключ API берётся из Env Catalog или вводится вручную; значение ключа во вкладку не попадает.';
+
+/** Plugin-wide Gemini Decisions scoring: toggle, key source and status. The key value never reaches the tab. */
+function ChipScoringSection({ threadId }: { threadId: string }) {
+  const rpc = useRpc<typeof rpcContract>();
+  const { view, setView, error, setError } = useChipScoringView(threadId);
+  const [help, setHelp] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [manualKey, setManualKey] = useState('');
+  const mounted = useRef(true);
+  useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
+  if (!view) return <Section label="Оценка кнопок" title="Оценка кнопок">
+    {error ? <p className="m-0 text-xs text-muted-foreground">Настройка недоступна: {error}</p> : <div className="h-20 animate-pulse rounded-md bg-muted motion-reduce:animate-none" aria-hidden="true" />}
+  </Section>;
+  const source = view.catalogAvailable ? view.source : 'manual';
+  const save = async (input: { enabled?: boolean; source?: 'catalog' | 'manual'; catalogName?: string | null; manualKey?: string | null }) => {
+    if (saving) return false;
+    setSaving(true); setError('');
+    try {
+      const next = await rpc.call('setChipScoring', input);
+      if (mounted.current) setView(next);
+      return true;
+    } catch (e) { if (mounted.current) setError(e instanceof Error ? e.message : String(e)); return false; }
+    finally { if (mounted.current) setSaving(false); }
+  };
+  const radioClass = (on: boolean) => cn('h-8 cursor-pointer rounded-md px-3 text-sm font-medium transition-colors outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-default disabled:opacity-50',
+    on ? 'bg-background text-foreground shadow-xs' : 'text-muted-foreground hover:text-foreground');
+  return <Section label="Оценка кнопок" title="Оценка кнопок">
+    <div className="flex min-w-0 flex-col divide-y divide-border">
+      <div className="flex min-h-11 flex-col justify-center gap-1 py-2.5 first:pt-0">
+        <div className="flex items-center gap-2">
+          <span className="min-w-0 flex-1 text-sm font-medium">Оценивать кнопки</span>
+          <HelpMark label="Что отправляется в Google" open={help} onToggle={() => setHelp(!help)} />
+          <Button type="button" size="sm" variant={view.enabled ? 'default' : 'outline'} aria-pressed={view.enabled} disabled={saving}
+            onClick={() => void save({ enabled: !view.enabled })}>{view.enabled ? 'Вкл' : 'Выкл'}</Button>
+        </div>
+        {help && <p className="m-0 text-xs text-muted-foreground">{CHIP_SCORING_HELP}</p>}
+      </div>
+      {view.enabled && <>
+        {view.catalogAvailable && <div className="py-2.5">
+          <div role="radiogroup" aria-label="Источник ключа" className="grid grid-cols-2 gap-0.5 rounded-lg bg-muted p-0.5">
+            {(['catalog', 'manual'] as const).map(s => <button key={s} type="button" role="radio" aria-checked={source === s} disabled={saving}
+              onClick={() => void save({ source: s })} className={radioClass(source === s)}>{s === 'catalog' ? 'Из Env Catalog' : 'Ввести вручную'}</button>)}
+          </div>
+        </div>}
+        {source === 'catalog' ? <div className="py-2.5">
+          <label className="flex flex-col gap-1 text-xs text-muted-foreground">Ключ из Env Catalog
+            <select aria-label="Ключ из Env Catalog" value={view.catalogName ?? ''} disabled={saving}
+              onChange={e => void save({ catalogName: e.target.value || null })}
+              className="h-9 w-full cursor-pointer rounded-md border border-input bg-transparent px-3 text-sm text-foreground outline-none focus-visible:ring-1 focus-visible:ring-ring">
+              <option value="">Выберите ключ</option>
+              {view.catalogNames.map(n => <option key={n} value={n}>{n}</option>)}
+            </select></label>
+        </div> : <div className="flex flex-col gap-2 py-2.5">
+          <label className="flex flex-col gap-1 text-xs text-muted-foreground">Ключ Gemini API
+            <input type="password" autoComplete="off" value={manualKey} disabled={saving}
+              onChange={e => setManualKey(e.target.value)}
+              className="h-9 w-full rounded-md border border-input bg-transparent px-3 text-sm text-foreground outline-none focus-visible:ring-1 focus-visible:ring-ring" /></label>
+          <div className="flex flex-wrap items-center gap-2">
+            <Button type="button" size="sm" disabled={saving || !manualKey.trim()}
+              onClick={async () => { if (await save({ manualKey })) setManualKey(''); }}>Сохранить</Button>
+            {view.manualKeySet && <Button type="button" size="sm" variant="outline" disabled={saving}
+              onClick={() => void save({ manualKey: null })}>Удалить ключ</Button>}
+          </div>
+        </div>}
+        {(source === 'manual' && view.manualKeySet) || typeof view.lastScoredAt === 'number' ? <div className="flex flex-col gap-1 py-2.5 text-xs text-muted-foreground">
+          {source === 'manual' && view.manualKeySet && <span>Ключ задан</span>}
+          {typeof view.lastScoredAt === 'number' && <span>Последняя оценка: {new Date(view.lastScoredAt).toLocaleTimeString('ru-RU')}</span>}
+        </div> : null}
+      </>}
+    </div>
+    {view.lastError && <Callout>{view.lastError}</Callout>}
+    {error && <Callout tone="error" role="status">{error}</Callout>}
+  </Section>;
+}
+
 function WorkingSection({ threadId }: { threadId: string }) {
   const navigate = useBbNavigate();
   const { view } = useDelegationView(threadId);
+  const surface = useSurface();
   if (!view || view.children.length === 0) return null;
   const providerName = (id: string | null) => view.providers.find(p => p.id === id)?.name ?? id;
   return <Section label="В работе" title="В работе">
-    <ul className="m-0 flex list-none flex-col divide-y divide-border rounded-md border border-border p-0">{view.children.map(c => {
+    <ul className={cn('m-0 flex list-none flex-col divide-y divide-border p-0', surface === 'card' && 'rounded-md border border-border')}>{view.children.map(c => {
       const st = childStatus[c.status] ?? { label: c.status, tone: 'idle' as const };
       return <li key={c.id} className="grid min-h-10 grid-cols-[8px_minmax(0,1fr)_auto] items-center gap-3 px-3 py-2">
         <StatusDot tone={st.tone} />
@@ -481,32 +584,35 @@ function ReadinessSection({ snapshot, run, busy, sending, setReadinessSkip }: {
   function stepRow(s: ReadinessStep, n: number, isNext: boolean) {
     const action = s.state === 'todo' ? actionFor(s) : undefined;
     const small = 'h-7 px-2.5 text-xs';
+    const toggleHelp = () => setHelp(help === s.id ? null : s.id);
     const skip = s.state === 'skipped'
       ? <Button type="button" size="sm" variant="ghost" className={cn(small, 'text-muted-foreground')} disabled={pendingSkip !== null} onClick={() => void toggleSkip(s, false)}>Вернуть</Button>
       : s.skippable && s.state === 'todo'
         ? <Button type="button" size="sm" variant="ghost" className={cn(small, 'text-muted-foreground')} disabled={pendingSkip !== null} onClick={() => void toggleSkip(s, true)}>Пропустить</Button>
         : null;
-    return <li key={s.id} className="flex flex-col gap-1">
-      <div className="flex min-h-7 items-center gap-2">
+    return <li key={s.id} className="flex min-h-11 flex-col justify-center py-2">
+      <div className="flex items-center gap-2">
         <Icon name={iconFor(s)} aria-label={stateLabel(s)} className={cn('size-4 shrink-0', s.state === 'done' ? 'text-primary' : 'text-muted-foreground')} />
-        <span className={cn('min-w-0 flex-1 text-sm', s.state === 'todo' ? 'font-medium' : 'text-muted-foreground')}>
-          <span className="mr-1.5 text-xs tabular-nums text-muted-foreground">{n}.</span>{s.label}{readinessHelp[s.id] && <HelpMark label={`Что делает шаг «${s.label}»`} open={help === s.id} onToggle={() => setHelp(help === s.id ? null : s.id)} />}
+        <span className="min-w-0 flex-1 text-sm">
+          <button type="button" aria-expanded={help === s.id} onClick={toggleHelp}
+            className={cn('cursor-pointer text-left [overflow-wrap:normal] break-words', s.state === 'todo' ? 'font-medium' : 'text-muted-foreground')}>
+            <span className="mr-1.5 text-xs tabular-nums text-muted-foreground">{n}.</span>{s.label}
+          </button>
+          {readinessHelp[s.id] && <HelpMark label={`Что делает шаг «${s.label}»`} open={help === s.id} onToggle={toggleHelp} />}
         </span>
-        {(action || skip) && <span className="flex shrink-0 items-center gap-1">
-          {action && <Hint text={`${action.reason}\n${action.command}`}><Button type="button" size="sm" variant={isNext ? 'default' : 'outline'} className={small}
-            aria-label={`Запустить: ${s.label}`} disabled={sending || busy || !action.available} onClick={() => void run(action)}>
-            Запустить{!action.available && (action.disabledReason === 'unchanged' ? ' · без изменений' : ' · не установлен')}</Button></Hint>}
-          {skip}
-        </span>}
+        {action && <Hint text={`${action.reason}\n${action.command}`}><Button type="button" variant="ghost" size="icon" className={cn('size-8 shrink-0', isNext ? 'text-primary' : 'text-muted-foreground')}
+          aria-label={`Запустить: ${s.label}`} disabled={sending || busy || !action.available} onClick={() => void run(action)}>
+          <Icon name="ChevronRight" className="size-4" /></Button></Hint>}
       </div>
       {help === s.id && <div className="ml-6 rounded-md bg-muted px-3 py-2 text-xs">
         <p className="m-0">{readinessHelp[s.id]}</p>
         {s.state === 'todo' && s.missing.length > 0 && !s.anyOf && <p className="m-0 mt-1 break-words text-muted-foreground">Не найдено: {s.missing.join(', ')}</p>}
+        {skip && <div className="mt-2">{skip}</div>}
       </div>}
     </li>;
   }
   const numbered = steps.map((s, i) => ({ s, n: i + 1 }));
-  const rows = (items: typeof numbered) => <ol className="m-0 flex list-none flex-col gap-1 p-0">{items.map(({ s, n }) => stepRow(s, n, next?.id === s.id))}</ol>;
+  const rows = (items: typeof numbered) => <ol className="m-0 flex list-none flex-col divide-y divide-border p-0">{items.map(({ s, n }) => stepRow(s, n, next?.id === s.id))}</ol>;
   if (readinessComplete(steps)) return <Disclosure summary="Проект готов к работе через AI Factory">{rows(numbered)}</Disclosure>;
   const finished = numbered.filter(({ s }) => s.state !== 'todo');
   const doneCount = finished.filter(({ s }) => s.state === 'done').length, skippedCount = finished.length - doneCount;
@@ -524,7 +630,7 @@ function Directive(props: PluginMessageDirectiveProps) {
   return <WorkflowCard threadId={props.message.threadId} initialTarget={props.attributes.target ?? ''} phase={parsed.data} openFile={props.openWorkspaceFile} />;
 }
 function ContextCard({ threadId }: ExperimentalThreadContextCardProps) { return <WorkflowCard threadId={threadId} compact />; }
-function WorkflowPanel({ threadId, environment }: ExperimentalThreadTabProps) { return <div className="aif-panel h-full min-h-0 overflow-y-auto overscroll-contain p-4 pb-8"><WorkflowCard key={threadId} threadId={threadId} environmentId={environment?.id ?? null} compact delegation /></div>; }
+function WorkflowPanel({ threadId, environment }: ExperimentalThreadTabProps) { return <SurfaceProvider value="panel"><div className="aif-panel h-full min-h-0 overflow-y-auto overscroll-contain bg-muted/40 @container/aif px-3 pt-3 pb-[max(1rem,env(safe-area-inset-bottom))]"><WorkflowCard key={threadId} threadId={threadId} environmentId={environment?.id ?? null} compact delegation /></div></SurfaceProvider>; }
 function SuggestedCommands() {
   const composer = useComposer();
   return composer.scope.kind === 'thread' ? <SuggestionBar key={composer.scope.threadId} threadId={composer.scope.threadId} composer={composer} composerBusy={composer.isRunning || composer.isSubmitting} /> : null;
@@ -582,13 +688,22 @@ function SuggestionBar({ threadId, composer, composerBusy }: { threadId: string;
       </>}
       {data.gateError && <p className="aif-error" role="alert">Некорректный gate: {data.gateError}</p>}
     </div>}
-    {!!data?.items.length && <><span className="aif-suggestions-label">Из ответа агента</span><div className="aif-suggestion-list">{data.items.map(item => <div className="aif-suggestion" key={item.id}>
-      <button type="button" className="aif-suggestion-run" disabled={working || busy || !item.available}
-        title={busy ? 'Дождитесь завершения текущей работы' : composer.isEmpty ? item.reason : `${item.command} + ваш текст из поля`}
-        aria-label={composer.isEmpty ? undefined : `${item.command} + ваш текст из поля`}
-        onClick={() => void act(item.id, false)}>{item.command}</button>
-      <button type="button" className="aif-suggestion-dismiss" disabled={working} aria-label={`Удалить предложение ${item.command}`} title="Убрать из предложений этого ответа" onClick={() => void act(item.id, true)}>×</button>
-    </div>)}</div></>}
+    {!!data?.items.length && (() => {
+      const scored = data.items.some(i => typeof i.probability === 'number');
+      const items = scored ? [...data.items].sort((a, b) => (b.probability ?? -1) - (a.probability ?? -1)) : data.items;
+      const topId = scored ? items[0].id : null;
+      return <><span className="aif-suggestions-label">Из ответа агента</span><div className="aif-suggestion-list">{items.map(item => {
+        const pct = typeof item.probability === 'number' ? chipPercent(item.probability) : null;
+        const label = `${pct ? `${pct} ` : ''}${item.command}`;
+        return <div className={cn('aif-suggestion', item.id === topId && 'aif-suggestion-top')} key={item.id}>
+          <button type="button" className="aif-suggestion-run" disabled={working || busy || !item.available}
+            title={busy ? 'Дождитесь завершения текущей работы' : composer.isEmpty ? `${item.command}\n${item.reason}` : `${item.command} + ваш текст из поля`}
+            aria-label={composer.isEmpty ? (pct ? label : undefined) : `${label} + ваш текст из поля`}
+            onClick={() => void act(item.id, false)}>{pct && <span className="aif-suggestion-score">{pct}</span>}<span className="aif-suggestion-command">{item.command}</span></button>
+          <button type="button" className="aif-suggestion-dismiss" disabled={working} aria-label={`Удалить предложение ${item.command}`} title="Убрать из предложений этого ответа" onClick={() => void act(item.id, true)}>×</button>
+        </div>;
+      })}</div></>;
+    })()}
     {error && <p className="aif-error" role="alert">{error}</p>}
     {notice && <p className="aif-muted aif-small" role="status">{notice}</p>}
   </section>;
@@ -685,14 +800,20 @@ function AifPillController() {
   useEffect(() => { void load(); }, [load]);
   useRealtime('changed', (payload: unknown) => { if (threadId && (payload as { threadId?: string | null })?.threadId === threadId) void load(); });
   useEffect(() => { if (!pill) handled.current = false; }, [pill]);
+  const commandDraft = isCommandDraft(composer.draft);
+  // The pill's text would reach a `/aif-…` skill as arguments; commands read
+  // the mode from skill-context instead, so a command draft never keeps it.
   useEffect(() => {
-    if (!threadId || !pill || handled.current) return;
+    if (commandDraft && composer.draft.mentions.some(isAifPill)) removeAifPill(composer);
+  }, [composer, commandDraft, composer.draft]);
+  useEffect(() => {
+    if (!threadId || !pill || handled.current || commandDraft) return;
     handled.current = true;
     try {
       if (!composer.draft.mentions.some(isAifPill)) composer.insert(AIF_MENTION, { at: 'end' });
     } catch { handled.current = false; return; } // composer gone; the next 'changed' event retries
     void rpc.call('ackAifPill', { threadId }).catch(() => undefined); // the flag stays; the pill is already in the draft
-  }, [composer, rpc, threadId, pill]);
+  }, [composer, rpc, threadId, pill, commandDraft]);
   return null;
 }
 

@@ -70,6 +70,14 @@ export type GateResult = z.infer<typeof gateResultSchema>;
 export const suggestionsSchema = z.object({
   sourceKey: z.string(), fingerprint: z.string(), threadState: z.string(),
   gate: gateResultSchema.nullable().default(null), gateError: z.string().nullable().default(null),
-  items: z.array(z.object({ id: z.string(), command: z.string(), available: z.boolean(), reason: z.string() })),
+  items: z.array(z.object({ id: z.string(), command: z.string(), available: z.boolean(), reason: z.string(), probability: z.number().min(0).max(1).nullable().default(null) })),
 });
 export type Suggestions = z.infer<typeof suggestionsSchema>;
+export const chipScoringStateSchema = z.object({
+  enabled: z.boolean().default(false),
+  source: z.enum(['catalog', 'manual']).default('catalog'),
+  catalogName: z.string().nullable().default(null),
+  lastError: z.string().nullable().default(null),
+  lastScoredAt: z.number().nullable().default(null),
+});
+export type ChipScoringState = z.infer<typeof chipScoringStateSchema>;

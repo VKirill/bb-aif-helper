@@ -14,6 +14,12 @@ export const delegationViewSchema = delegationStateSchema.extend({
 });
 export const aifModeViewSchema = z.object({ projectId: z.string(), on: z.boolean(), configured: z.boolean().nullable(), pill: z.boolean() });
 export type DelegationView = z.infer<typeof delegationViewSchema>;
+export const chipScoringViewSchema = z.object({
+  enabled: z.boolean(), source: z.enum(['catalog', 'manual']), catalogName: z.string().nullable(),
+  catalogAvailable: z.boolean(), catalogNames: z.array(z.string()), manualKeySet: z.boolean(),
+  lastError: z.string().nullable(), lastScoredAt: z.number().nullable(),
+});
+export type ChipScoringView = z.infer<typeof chipScoringViewSchema>;
 export const hostContract = defineRpcContract({
   collect: { input: hostInputSchema, output: snapshotSchema, experimental_retryable: true },
   delegation: { input: z.object({ root: z.string().min(1).max(4096) }).strict(), output: delegationStateSchema, experimental_retryable: true },
@@ -27,6 +33,9 @@ export const rpcContract = defineRpcContract({
   delegation: { input: z.object({ threadId: z.string().min(1).max(200) }).strict(), output: delegationViewSchema },
   setDelegation: { input: z.object({ threadId: z.string().min(1).max(200), choice: delegationChoiceSchema, role: delegationRoleSchema.optional() }).strict(), output: delegationViewSchema },
   setDelegationDefaults: { input: z.object({ threadId: z.string().min(1).max(200), action: z.enum(['from-project', 'apply', 'clear']) }).strict(), output: delegationViewSchema },
+  chipScoring: { input: z.object({}).strict(), output: chipScoringViewSchema },
+  setChipScoring: { input: z.object({ enabled: z.boolean().optional(), source: z.enum(['catalog', 'manual']).optional(),
+    catalogName: z.string().max(200).nullable().optional(), manualKey: z.string().max(500).nullable().optional() }).strict(), output: chipScoringViewSchema },
   setReadinessSkip: { input: z.object({ threadId: z.string().min(1).max(200), stepId: z.enum(SKIPPABLE_STEPS), skipped: z.boolean() }).strict(), output: z.object({ ok: z.literal(true) }) },
   runSuggestion: { input: suggestionActionSchema.extend({ fingerprint: z.string().length(64), requestId: z.string().uuid() }), output: z.object({ sent: z.boolean(), stale: z.boolean().optional(), message: z.string(),
     command: z.string().optional(),

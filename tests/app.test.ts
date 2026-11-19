@@ -525,7 +525,8 @@ test('readiness block in the tab: one run button on the first todo step, skip RP
     assert.equal(slot.queryByText(/^любой из:/), null, "any-of file lists live behind «?» to keep phone rows short");
     fireEvent.click(run);
     await waitFor(() => assert.deepEqual(runs, ['setup-context']));
-    fireEvent.click(slot.getAllByRole('button', { name: 'Пропустить' })[1]);
+    fireEvent.click(await slot.findByRole('button', { name: 'Что делает шаг «Настроить CI»' }));
+    fireEvent.click(slot.getByRole('button', { name: 'Пропустить' }));
     await waitFor(() => assert.deepEqual(skips, [{ threadId: 'thr_panel', stepId: 'ci', skipped: true }]));
   } finally { slot.lifecycle.unmount(); }
   const files = Object.fromEntries(['.ai-factory/DESCRIPTION.md', '.ai-factory/config.yaml', '.ai-factory/rules/base.md', 'AGENTS.md', '.ai-factory/ARCHITECTURE.md', 'lefthook.yml', 'Jenkinsfile', 'docs/index.md', '.ai-factory/RULES.md', 'Makefile', 'Dockerfile'].map(f => [f, true]));
@@ -684,4 +685,160 @@ test('auto-applied defaults appear as a status callout inside settings', async (
     const found = await slot.findAllByText(applied);
     assert(found.some(el => el.closest('[role="status"]')));
   } finally { slot.lifecycle.unmount(); }
+});
+
+function scoringView(patch: Record<string, unknown> = {}) {
+  return { enabled: false, source: 'catalog', catalogName: null, catalogAvailable: true,
+    catalogNames: ['GEMINI_API_KEY_AISTUDIO'], manualKeySet: false, lastError: null, lastScoredAt: null, ...patch };
+}
+
+test('readiness title expands to reveal «Пропустить»; the chevron still launches the step', async () => {
+  const { readinessSteps } = await import('../readiness.ts');
+  const tab = app.tabs.find(t => t.id === 'workflow')!;
+  const s = data(); s.readiness = readinessSteps({ configured: true, contextSkill: true, files: {}, paths: {} });
+  const runs: string[] = []; const skips: unknown[] = [];
+  const slot = renderSlot(tab as any, { threadId: 'thr_expand', environment: { id: 'env_expand' } }, { rpc: {
+    status: () => s, run: (input: any) => { runs.push(input.actionId); return { sent: true, message: 'Отправлено' }; },
+    setReadinessSkip: (input: any) => { skips.push(input); return { ok: true }; },
+  } });
+  try {
+    await slot.findByText('Подготовка проекта', { selector: '*' });
+    const title = (await slot.findAllByRole('button', { name: /Настроить CI/ })).find(b => !b.getAttribute('aria-label'))!;
+    assert.equal(title.getAttribute('aria-expanded'), 'false');
+    assert.equal(slot.queryByRole('button', { name: 'Пропустить' }), null);
+    fireEvent.click(title);
+    assert.equal(title.getAttribute('aria-expanded'), 'true');
+    fireEvent.click(await slot.findByRole('button', { name: 'Пропустить' }));
+    await waitFor(() => assert.deepEqual(skips, [{ threadId: 'thr_expand', stepId: 'ci', skipped: true }]));
+    assert.equal(runs.length, 0);
+    fireEvent.click(slot.getByRole('button', { name: 'Запустить: Настроить CI' }));
+    await waitFor(() => assert.deepEqual(runs, ['ci-setup']));
+  } finally { slot.lifecycle.unmount(); }
+});
+
+test('an executor row is a single button that toggles aria-expanded and reveals the model picker', async () => {
+  const tab = app.tabs.find(t => t.id === 'workflow')!;
+  const s = data();
+  const view = { ...delegView(), choice: { mode: 'bb' as const, providerId: 'codex', model: 'gpt-6.2-sol', reasoning: 'high' } };
+  const slot = renderSlot(tab as any, { threadId: 'thr_roles', environment: { id: 'env_roles' } }, { rpc: { status: () => s, delegation: () => view } });
+  try {
+    fireEvent.click(await slot.findByRole('tab', { name: /Настройки/ }));
+    const row = await slot.findByRole('button', { name: 'Изменить: Код' });
+    assert.equal(row.getAttribute('aria-expanded'), 'false');
+    assert.match(row.textContent!, /Код/);
+    assert.match(row.textContent!, /Codex · gpt-6\.2-sol · high/);
+    fireEvent.click(row);
+    assert.equal(row.getAttribute('aria-expanded'), 'true');
+    await slot.findByRole('radiogroup', { name: 'Кто пишет код' });
+    await slot.findByTestId('bb-provider-model-picker');
+    fireEvent.click(row);
+    assert.equal(row.getAttribute('aria-expanded'), 'false');
+    await waitFor(() => assert.equal(slot.queryByRole('radiogroup'), null));
+  } finally { slot.lifecycle.unmount(); }
+});
+
+test('scored chips sort by probability with percent badges; the top chip is highlighted and unscored ones have no badge', async () => {
+  const items = [
+    { id: 'aif-commit', command: '/aif-commit', available: true, reason: 'Ответ', probability: null },
+    { id: 'aif-plan', command: '/aif-plan full #1', available: true, reason: 'Ответ', probability: 0.03 },
+    { id: 'aif-verify', command: '/aif-verify @plan.md', available: true, reason: 'Ответ', probability: 0.96 },
+    { id: 'aif-fix', command: '/aif-fix refresh x so y', available: true, reason: 'Ответ', probability: 0.004 },
+  ];
+  const slot = renderSlot(banner, {}, { composer: { scope: { kind: 'thread', threadId: 'thr_test' } }, rpc: { suggestions: () => ({ ...suggestedData(), items }) } });
+  try {
+    await slot.findByRole('button', { name: '96% /aif-verify @plan.md' });
+    const chips = [...slot.container.querySelectorAll('.aif-suggestion')];
+    assert.equal(chips.length, 4);
+    assert(chips[0].classList.contains('aif-suggestion-top'));
+    assert(!chips[1].classList.contains('aif-suggestion-top'));
+    assert(!chips[2].classList.contains('aif-suggestion-top'));
+    assert(!chips[3].classList.contains('aif-suggestion-top'));
+    assert.deepEqual([...slot.container.querySelectorAll('.aif-suggestion-score')].map(el => el.textContent), ['96%', '3%', '<1%']);
+    assert.match(chips[0].textContent!, /\/aif-verify/);
+    assert.match(chips[1].textContent!, /\/aif-plan/);
+    assert.match(chips[2].textContent!, /\/aif-fix/);
+    assert.match(chips[3].textContent!, /\/aif-commit/);
+    assert.equal(chips[3].querySelector('.aif-suggestion-score'), null);
+    assert.ok(slot.getByRole('button', { name: '/aif-commit' }));
+  } finally { slot.lifecycle.unmount(); }
+});
+
+test('«Оценка кнопок» toggles scoring, hides the catalog without env-catalog and clears the manual key input', async () => {
+  const tab = app.tabs.find(t => t.id === 'workflow')!;
+  const s = data();
+  const saved: any[] = [];
+  let view = scoringView({ catalogAvailable: false, source: 'manual', catalogNames: [] });
+  const slot = renderSlot(tab as any, { threadId: 'thr_score1', environment: { id: 'env_score1' } }, { rpc: {
+    status: () => s, delegation: () => delegView(),
+    chipScoring: () => view,
+    setChipScoring: (input: any) => {
+      saved.push(input);
+      view = { ...view, ...input,
+        manualKeySet: input.manualKey === null ? false : input.manualKey ? true : view.manualKeySet,
+        lastError: input.manualKey ? 'Gemini ответил HTTP 403' : view.lastError };
+      return view;
+    },
+  } });
+  try {
+    fireEvent.click(await slot.findByRole('tab', { name: /Настройки/ }));
+    await slot.findByRole('heading', { name: 'Оценка кнопок' });
+    fireEvent.click(await slot.findByRole('button', { name: 'Выкл' }));
+    await waitFor(() => assert.deepEqual(saved, [{ enabled: true }]));
+    const toggle = await slot.findByRole('button', { name: 'Вкл' });
+    assert.equal(toggle.getAttribute('aria-pressed'), 'true');
+    await slot.findByLabelText('Ключ Gemini API');
+    assert.equal(slot.queryByRole('radiogroup', { name: 'Источник ключа' }), null);
+    fireEvent.change(slot.getByLabelText('Ключ Gemini API'), { target: { value: 'decisions-test-key' } });
+    fireEvent.click(slot.getByRole('button', { name: 'Сохранить' }));
+    await waitFor(() => assert.deepEqual(saved[1], { manualKey: 'decisions-test-key' }));
+    await waitFor(() => assert.equal((slot.getByLabelText('Ключ Gemini API') as HTMLInputElement).value, ''));
+    await slot.findByText('Ключ задан');
+    await slot.findByText('Gemini ответил HTTP 403');
+    fireEvent.click(slot.getByRole('button', { name: 'Удалить ключ' }));
+    await waitFor(() => assert.deepEqual(saved[2], { manualKey: null }));
+  } finally { slot.lifecycle.unmount(); }
+});
+
+test('«Оценка кнопок» with env-catalog offers the key source radio and the name select', async () => {
+  const tab = app.tabs.find(t => t.id === 'workflow')!;
+  const s = data();
+  const saved: any[] = [];
+  let view = scoringView({ enabled: true, source: 'catalog', catalogName: 'GEMINI_API_KEY_AISTUDIO', catalogNames: ['GEMINI_API_KEY_AISTUDIO', 'OTHER_KEY'] });
+  const slot = renderSlot(tab as any, { threadId: 'thr_score2', environment: { id: 'env_score2' } }, { rpc: {
+    status: () => s, delegation: () => delegView(),
+    chipScoring: () => view,
+    setChipScoring: (input: any) => { saved.push(input); view = { ...view, ...input }; return view; },
+  } });
+  try {
+    fireEvent.click(await slot.findByRole('tab', { name: /Настройки/ }));
+    const group = await slot.findByRole('radiogroup', { name: 'Источник ключа' });
+    assert.equal(within(group).getByRole('radio', { name: 'Из Env Catalog' }).getAttribute('aria-checked'), 'true');
+    assert.equal((slot.getByLabelText('Ключ из Env Catalog') as HTMLSelectElement).value, 'GEMINI_API_KEY_AISTUDIO');
+    fireEvent.change(slot.getByLabelText('Ключ из Env Catalog'), { target: { value: 'OTHER_KEY' } });
+    await waitFor(() => assert.deepEqual(saved.at(-1), { catalogName: 'OTHER_KEY' }));
+    fireEvent.click(within(group).getByRole('radio', { name: 'Ввести вручную' }));
+    await waitFor(() => assert.deepEqual(saved.at(-1), { source: 'manual' }));
+    await slot.findByLabelText('Ключ Gemini API');
+  } finally { slot.lifecycle.unmount(); }
+});
+
+test('the message card keeps bordered sections while the panel groups sections without borders', async () => {
+  const s = data();
+  const card = renderSlot(app.messageDirectives[0], props, { rpc: { status: () => s } });
+  try {
+    await card.findByText('Сейчас');
+    const cardSection = card.container.querySelector('section[aria-label="Текущий этап"]') as HTMLElement;
+    assert(cardSection?.classList.contains('border'));
+    assert(cardSection.classList.contains('rounded-lg'));
+  } finally { card.lifecycle.unmount(); }
+  const tab = app.tabs.find(t => t.id === 'workflow')!;
+  const panel = renderSlot(tab as any, { threadId: 'thr_surface', environment: { id: 'env_surface' } }, { rpc: { status: () => s, delegation: () => delegView() } });
+  try {
+    await panel.findByText('Сейчас');
+    const panelSection = panel.container.querySelector('section[aria-label="Текущий этап"]') as HTMLElement;
+    assert(panelSection && !panelSection.classList.contains('border'));
+    const panelBlock = [...panelSection.children].find(el => el.classList.contains('rounded-xl')) as HTMLElement;
+    assert(panelBlock?.classList.contains('bg-card'));
+    assert(!panelBlock.classList.contains('border'));
+  } finally { panel.lifecycle.unmount(); }
 });
