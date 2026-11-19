@@ -229,7 +229,7 @@ test('panel uses the BB provider/model picker and saves exactly its selection', 
   const saved: unknown[] = [];
   const view = (choice: unknown, research: unknown = { mode: 'self' }) => ({ choice, research, research2: { mode: 'self' }, research3: { mode: 'self' }, configured: true, foreign: null, error: null, providers: [{ id: 'codex', name: 'Codex' }],
     defaults: null, appliedDefaults: null,
-    children: [{ id: 'thr_child', title: 'Задача 1', status: 'active', providerId: 'codex', updatedAt: '2026-11-17T00:00:00Z' }] });
+    children: [{ id: 'thr_child', title: 'Задача 1', status: 'active', providerId: 'codex', updatedAt: '2026-11-17T00:00:00Z', execution: null, fallback: null, mismatch: null }] });
   const slot = renderSlot(tab as any, { threadId: 'thr_panel', environment: { id: 'env_panel' } }, { rpc: {
     status: () => data(),
     delegation: () => view({ mode: 'self' }),
@@ -638,7 +638,7 @@ test('a message card has no navigation/settings switcher', async () => {
 test('«В работе» lists child threads on navigation and hides when there are none', async () => {
   const tab = app.tabs.find(t => t.id === 'workflow')!;
   const s = data();
-  let children: any[] = [{ id: 'thr_child', title: 'Задача 1', status: 'active', providerId: 'codex', updatedAt: '2026-11-17T00:00:00Z' }];
+  let children: any[] = [{ id: 'thr_child', title: 'Задача 1', status: 'active', providerId: 'codex', updatedAt: '2026-11-17T00:00:00Z', execution: null, fallback: null, mismatch: null }];
   const slot = renderSlot(tab as any, { threadId: 'thr_working', environment: { id: 'env_working' } }, { rpc: {
     status: () => s, delegation: () => delegView({ children }),
   } });

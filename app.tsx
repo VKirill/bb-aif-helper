@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
-import { definePluginApp, useRpc, useRealtime, useComposer, useBbNavigate, experimental_ProviderModelPicker as ProviderModelPicker, type ExperimentalProviderModelPickerValue as PickerValue, type PluginMessageDirectiveProps, type ExperimentalThreadContextCardProps, type ExperimentalThreadTabProps, type ExperimentalCodeFenceRendererProps, type PluginComposerApi } from '@get-bb/plugin-sdk/app';
+import { definePluginApp, useRpc, useRealtime, useComposer, useBbNavigate, experimental_useAppPanel, experimental_ProviderModelPicker as ProviderModelPicker, type ExperimentalProviderModelPickerValue as PickerValue, type PluginMessageDirectiveProps, type ExperimentalThreadContextCardProps, type ExperimentalThreadTabProps, type ExperimentalCodeFenceRendererProps, type PluginComposerApi } from '@get-bb/plugin-sdk/app';
 import type { rpcContract, DelegationView } from './contract.ts';
 import type { DelegationChoice, DelegationRole } from './delegation.ts';
 import { phaseSchema, type Snapshot, type Phase, type Action, type ReadinessStep, type Suggestions } from './model.ts';
@@ -9,6 +9,7 @@ import { checkHelp, rowActions, supplementaryChecks, toolHelp } from './check-ac
 import { updateInVersionDetails, VERSION_TTL } from './versions.ts';
 import { contextSetupInDetails } from './workflow.ts';
 import { chipDraft } from './suggestions.ts';
+import { AIF_MENTION } from './aif-mode.ts';
 import { BASIC_PLAN_ROOT, usesBasicWorkflow } from './basic-workflow.ts';
 import { toast } from 'sonner';
 import { Button } from '@/components/ui/button';
@@ -436,7 +437,10 @@ function WorkingSection({ threadId }: { threadId: string }) {
       return <li key={c.id} className="grid min-h-10 grid-cols-[8px_minmax(0,1fr)_auto] items-center gap-3 px-3 py-2">
         <StatusDot tone={st.tone} />
         <span className="min-w-0"><span className="block truncate">{c.title || 'Без названия'}</span>
-          <span className="block truncate text-xs text-muted-foreground">{[providerName(c.providerId), st.label].filter(Boolean).join(' · ')}</span></span>
+          <span className="block truncate text-xs text-muted-foreground" title="Модель, с которой BB запустил ход. Подмену провайдером BB видит только у Claude Code">
+            {[providerName(c.providerId), c.execution && [c.execution.model, c.execution.reasoning].filter(Boolean).join(' · '), st.label].filter(Boolean).join(' · ')}</span>
+          {c.fallback && <span className="block text-xs text-amber-600 dark:text-amber-400">⚠ Подмена: {c.fallback.from} → {c.fallback.to} ({c.fallback.reason === 'refusal' ? 'отказ модели' : 'провайдер'})</span>}
+          {c.mismatch && <span className="block text-xs text-amber-600 dark:text-amber-400">⚠ {c.mismatch}</span>}</span>
         <Button type="button" variant="ghost" size="sm" className="h-7 gap-1 px-2 text-xs" onClick={() => navigate.toThread(c.id, { split: true })}>
           Открыть<Icon name="ExternalLink" className="size-3.5" /></Button>
       </li>;
@@ -589,9 +593,114 @@ function SuggestionBar({ threadId, composer, composerBusy }: { threadId: string;
     {notice && <p className="aif-muted aif-small" role="status">{notice}</p>}
   </section>;
 }
+const isAifPill = (m: { kind?: string; provider?: string; id?: string }) =>
+  m.kind === 'plugin' && m.provider === AIF_MENTION.provider && m.id === AIF_MENTION.id;
+
+/** Drop our mode pill(s) from the draft, shifting later mentions left. */
+function removeAifPill(composer: PluginComposerApi) {
+  composer.replace(current => {
+    const pills = current.mentions.filter(isAifPill).sort((a, b) => a.from - b.from);
+    if (!pills.length) return current;
+    let text = '';
+    let pos = 0;
+    for (const m of pills) { text += current.text.slice(pos, m.from); pos = Math.max(pos, m.to); }
+    text += current.text.slice(pos);
+    const shift = (at: number) => pills.reduce((n, m) => n + (m.to <= at ? m.to - m.from : m.from < at ? at - m.from : 0), 0);
+    return { text, mentions: current.mentions.filter(m => !isAifPill(m)).map(m => ({ ...m, from: m.from - shift(m.from), to: m.to - shift(m.to) })) };
+  });
+}
+
+/** Composer action: toggles the project-wide AI Factory mode; opens the tab when the project has no AI Factory. */
+function AifModeAction() {
+  const composer = useComposer();
+  const rpc = useRpc<typeof rpcContract>();
+  const panel = experimental_useAppPanel();
+  const threadId = composer.scope.kind === 'thread' ? composer.scope.threadId : null;
+  const projectId = composer.scope.kind === 'new-thread' ? composer.scope.projectId : null;
+  const [view, setView] = useState<{ on: boolean; configured: boolean | null; projectId: string } | null>(null);
+  const [pending, setPending] = useState(false);
+  const [error, setError] = useState('');
+  const mounted = useRef(true);
+  useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
+  const load = useCallback(async () => {
+    const input = threadId ? { threadId } : projectId ? { projectId } : null;
+    if (!input) { if (mounted.current) setView(null); return; }
+    try {
+      const next = await rpc.call('aifMode', input);
+      if (mounted.current) { setView(next); setError(''); }
+    } catch (e) { if (mounted.current) setError(e instanceof Error ? e.message : String(e)); }
+  }, [rpc, threadId, projectId]);
+  useEffect(() => { void load(); }, [load]);
+  useRealtime('changed', (payload: unknown) => {
+    const p = payload as { threadId?: string | null; projectId?: string };
+    const hit = threadId ? p.threadId === threadId || (!!view?.projectId && p.projectId === view.projectId)
+      : !!projectId && p.projectId === projectId;
+    if (hit) void load();
+  });
+  async function toggle() {
+    if (pending || !view) return;
+    if (threadId && view.configured === false) {
+      panel.openTab({ tab: { id: 'workflow', context: { kind: 'thread' }, availability: 'fixed' } });
+      return;
+    }
+    const input = threadId ? { threadId, on: !view.on } : projectId ? { projectId, on: !view.on } : null;
+    if (!input) return;
+    setPending(true); setError('');
+    try {
+      const next = await rpc.call('setAifMode', input);
+      if (!mounted.current) return;
+      setView(next);
+      if (threadId && !next.on) removeAifPill(composer);
+    } catch (e) {
+      const message = e instanceof Error ? e.message : String(e);
+      if (mounted.current) { setError(message); console.warn('aif-chat: aif-mode toggle failed', e); }
+    } finally { if (mounted.current) setPending(false); }
+  }
+  const title = error
+    || (!threadId && !projectId ? 'Сначала выберите проект' : '')
+    || (threadId && view?.configured === false ? 'В проекте нет AI Factory — откройте вкладку, чтобы установить' : '')
+    || (view?.on ? 'AI Factory включён для проекта: агент ведёт работу через /aif-plan → /aif-implement' : 'Включить режим AI Factory для проекта');
+  return <button type="button" aria-label="Режим AI Factory" aria-pressed={!!view?.on} title={title}
+    disabled={pending || !view || (!threadId && !projectId)} onClick={() => void toggle()}
+    className={cn('grid size-7 cursor-pointer place-items-center rounded-md outline-none transition-colors focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-default disabled:opacity-50',
+      view?.on ? 'bg-primary text-primary-foreground hover:bg-primary/90' : 'text-muted-foreground hover:bg-state-hover hover:text-foreground')}>
+    <Icon name="Workflow" className="size-4" />
+  </button>;
+}
+
+/** Composer banner (invisible): inserts the AI Factory pill into the draft once per server flag. */
+function AifPillController() {
+  const composer = useComposer();
+  const rpc = useRpc<typeof rpcContract>();
+  const threadId = composer.scope.kind === 'thread' ? composer.scope.threadId : null;
+  const [pill, setPill] = useState(false);
+  const handled = useRef(false);
+  const mounted = useRef(true);
+  useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
+  const load = useCallback(async () => {
+    if (!threadId) return;
+    try { const next = await rpc.call('aifMode', { threadId }); if (mounted.current) setPill(next.pill); }
+    catch { /* transient; the next 'changed' event retries */ }
+  }, [rpc, threadId]);
+  useEffect(() => { void load(); }, [load]);
+  useRealtime('changed', (payload: unknown) => { if (threadId && (payload as { threadId?: string | null })?.threadId === threadId) void load(); });
+  useEffect(() => { if (!pill) handled.current = false; }, [pill]);
+  useEffect(() => {
+    if (!threadId || !pill || handled.current) return;
+    handled.current = true;
+    try {
+      if (!composer.draft.mentions.some(isAifPill)) composer.insert(AIF_MENTION, { at: 'end' });
+    } catch (e) { handled.current = false; console.warn('aif-chat: aif pill insert failed', e); return; }
+    void rpc.call('ackAifPill', { threadId }).catch(e => console.warn('aif-chat: ackAifPill failed', e));
+  }, [composer, rpc, threadId, pill]);
+  return null;
+}
+
 export default definePluginApp(app => {
   app.slots.experimental_codeFenceRenderer({ id: 'gate-data', languages: ['aif-gate-result'], component: GateData });
   app.composer.customize({ id: 'suggested-commands', scopes: ['thread'], banners: [{ id: 'commands', chrome: 'bare', component: SuggestedCommands }] });
+  app.composer.customize({ id: 'aif-mode', scopes: ['new-thread', 'thread'], actions: [{ id: 'aif-mode', component: AifModeAction }] });
+  app.composer.customize({ id: 'aif-mode-pill', scopes: ['thread'], banners: [{ id: 'aif-pill', chrome: 'bare', component: AifPillController }] });
   app.slots.messageDirective({ id: 'aif-chat', component: Directive });
   app.slots.experimental_threadContextCardSection({ id: 'workflow', title: 'AI Factory', group: '9_aif', order: 10, component: ContextCard });
   app.slots.experimental_tab({ id: 'workflow', context: { kind: 'thread' }, availability: 'fixed', title: 'AI Factory', icon: 'Workflow', layout: 'flush', component: WorkflowPanel });

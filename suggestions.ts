@@ -33,17 +33,39 @@ export function analyzeReply(text: string) {
 // wait for text, everything else submits the composer draft right away.
 export const TOPIC_COMMANDS = new Set(['aif-explore', 'aif-plan', 'aif-fix']);
 
-export function chipDraft<M extends { from: number; to: number }>(
+const stripRanges = (text: string, ranges: readonly { from: number; to: number }[]) => {
+  let out = '';
+  let pos = 0;
+  for (const m of ranges) { out += text.slice(pos, m.from); pos = Math.max(pos, m.to); }
+  return out + text.slice(pos);
+};
+
+export function chipDraft<M extends { from: number; to: number; kind?: string; provider?: string; id?: string }>(
   draft: { text: string; mentions: readonly M[] },
   command: string,
   id: string,
 ): { text: string; mentions: M[]; submit: boolean } {
-  const empty = () => TOPIC_COMMANDS.has(id)
-    ? { text: `${command} `, mentions: [] as M[], submit: false }
-    : { text: command, mentions: [] as M[], submit: true };
+  // The AI Factory mode pill marks the draft; it is not topic text. A draft
+  // holding only it counts as empty, and the pill is kept after the command.
+  const pills = draft.mentions
+    .filter(m => m.kind === 'plugin' && m.provider === 'aif-mode' && m.id === 'aif-mode')
+    .sort((a, b) => a.from - b.from);
+  const empty = () => {
+    const topic = TOPIC_COMMANDS.has(id);
+    let text = topic ? `${command} ` : command;
+    const mentions: M[] = [];
+    for (const m of pills) {
+      if (text && !text.endsWith(' ')) text += ' ';
+      const from = text.length;
+      text += draft.text.slice(m.from, m.to);
+      mentions.push({ ...m, from, to: text.length });
+    }
+    if (topic && mentions.length) text += ' ';
+    return { text, mentions, submit: !topic };
+  };
   const lead = /^\s*/.exec(draft.text)![0].length;
   const body = draft.text.slice(lead);
-  if (!body.trim()) return empty();
+  if (!stripRanges(draft.text, pills).trim()) return empty();
   const head = /^[/$][\w-]+/.exec(body);
   if (head) {
     const start = lead;

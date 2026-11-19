@@ -94,3 +94,10 @@ test('chipDraft prepends when a mention overlaps the leading command instead of 
   assert.equal(result.text, '/aif-verify /aif-plan fix this');
   assert.deepEqual(result.mentions, [{ ...mention, from: 13, to: 16 }]);
 });
+test('chipDraft keeps the AI Factory pill when the draft holds only it', () => {
+  const pill = { from: 0, to: 10, kind: 'plugin', provider: 'aif-mode', id: 'aif-mode' };
+  const result = chipDraft({ text: 'AI Factory', mentions: [pill] }, '/aif-plan', 'aif-plan');
+  assert.equal(result.submit, false);
+  assert.equal(result.text, '/aif-plan AI Factory ');
+  assert.deepEqual(result.mentions, [{ ...pill, from: 10, to: 20 }]);
+});

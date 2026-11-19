@@ -2,8 +2,8 @@ import type { BbPluginApi } from '@get-bb/plugin-sdk';
 import { createHash } from 'node:crypto';
 import { z } from 'zod';
 import { hostContract, rpcContract, type DelegationView } from './contract.ts';
-import { DELEGATION_ROLES, delegationDefaultsSchema, modelSpec } from './delegation.ts';
-import type { DelegationChoice, DelegationDefaults, DelegationRole } from './delegation.ts';
+import { DELEGATION_ROLES, childModel, delegationDefaultsSchema, modelSpec } from './delegation.ts';
+import type { ChildModel, DelegationChoice, DelegationDefaults, DelegationRole, DelegationState } from './delegation.ts';
 import { requestSchema, phaseSchema, snapshotSchema, type CardRequest, type Snapshot, type Phase, type Suggestions } from './model.ts';
 import { actionPrompt, workflowActions } from './workflow.ts';
 import { applyRan, applySkipped, RUN_CONFIRMED_STEPS } from './readiness.ts';
@@ -12,6 +12,7 @@ import { blockedByGate } from './gate.ts';
 import { attachChatChecks, readChatChecks, type ChatCheck } from './check-history.ts';
 import { lockUnchangedChecks, unchangedCheck, unchangedReason } from './check-actions.ts';
 import { SnapshotCache } from './snapshot-cache.ts';
+import { AIF_MENTION, aifModeInstructions, shouldContribute } from './aif-mode.ts';
 import { versionSampleFresh } from './versions.ts';
 import { BASIC_PLAN_ROOT } from './basic-workflow.ts';
 export { rpcContract } from './contract.ts';
@@ -44,7 +45,8 @@ export default async function plugin(bb: BbPluginApi) {
   let disposed = false;
   const db = bb.storage.database();
   bb.storage.migrate(db, ['CREATE TABLE IF NOT EXISTS status_cache (key TEXT PRIMARY KEY, at INTEGER NOT NULL, value TEXT NOT NULL)',
-    'CREATE TABLE IF NOT EXISTS local_versions (key TEXT PRIMARY KEY, at INTEGER NOT NULL, value TEXT NOT NULL)']);
+    'CREATE TABLE IF NOT EXISTS local_versions (key TEXT PRIMARY KEY, at INTEGER NOT NULL, value TEXT NOT NULL)',
+    'CREATE TABLE IF NOT EXISTS project_modes (project_id TEXT PRIMARY KEY, enabled INTEGER NOT NULL, updated_at INTEGER NOT NULL)']);
   const versionScopes = new Map<string, string>();
   const readLocalVersions = (key: string) => {
     const row = db.prepare('SELECT at, value FROM local_versions WHERE key = ?').get(key) as { at: number; value: string } | undefined;
@@ -56,6 +58,10 @@ export default async function plugin(bb: BbPluginApi) {
   };
   const cacheRead = db.prepare('SELECT at, value FROM status_cache WHERE key = ?');
   const cacheWrite = db.prepare('INSERT INTO status_cache (key, at, value) VALUES (?, ?, ?) ON CONFLICT(key) DO UPDATE SET at=excluded.at, value=excluded.value');
+  const modeRead = db.prepare('SELECT enabled FROM project_modes WHERE project_id = ?');
+  const modeWrite = db.prepare('INSERT INTO project_modes (project_id, enabled, updated_at) VALUES (?, ?, ?) ON CONFLICT(project_id) DO UPDATE SET enabled=excluded.enabled, updated_at=excluded.updated_at');
+  const getMode = (projectId: string) => (modeRead.get(projectId) as { enabled: number } | undefined)?.enabled === 1;
+  const setMode = (projectId: string, on: boolean) => { modeWrite.run(projectId, on ? 1 : 0, Date.now()); };
   const watchers = new Map<string, Set<string>>();
   const cache = new SnapshotCache({
     read(key) {
@@ -234,7 +240,11 @@ export default async function plugin(bb: BbPluginApi) {
     const { output } = await bb.sdk.threads.output({ threadId });
     const reply = analyzeReply(output ?? '');
     const ids = reply.ids;
-    if (!ids.length && !reply.gate && !reply.error) return { view: empty, ids, hidden: [] as string[], snapshot: null };
+    if (!ids.length && !reply.gate && !reply.error) {
+      const projectId = (await bb.sdk.threads.get({ threadId })).projectId;
+      if (!getMode(projectId)) return { view: empty, ids, hidden: [] as string[], snapshot: null };
+      return fallbackSuggestions(threadId, output, fresh);
+    }
     const snapshot = await status({ threadId, target: '', phase: 'unknown' }, false, fresh);
     const sourceKey = suggestionSource(snapshot.root, output);
     const dismissed = await bb.storage.kv.get<DismissedSuggestions>(`suggestions-dismissed:${threadId}`);
@@ -247,6 +257,41 @@ export default async function plugin(bb: BbPluginApi) {
       })) };
     return { view, ids, hidden, snapshot };
   }
+  async function fallbackSuggestions(threadId: string, output: string | null, fresh: boolean) {
+    const snapshot = await status({ threadId, target: '', phase: 'unknown' }, false, fresh);
+    const sourceKey = suggestionSource(snapshot.root, output);
+    const dismissed = await bb.storage.kv.get<DismissedSuggestions>(`suggestions-dismissed:${threadId}`);
+    const hidden = dismissed?.sourceKey === sourceKey ? dismissed.ids : [];
+    const prefix = ['codex', 'codex-app'].includes(snapshot.runtime) ? '$' : '/';
+    const seen = new Set<string>();
+    const items = snapshot.actions.filter(a => a.group === 'next' && a.available).flatMap(a => {
+      const body = a.command.replace(/^[/$]/, '');
+      const id = body.split(/\s/, 1)[0];
+      if (seen.has(id) || snapshot.profile === 'invalid' || !(snapshot.skills.includes(id) || id === 'aif-chat')) return [];
+      seen.add(id);
+      return [{ id, command: `${prefix}${body}`, available: true, reason: 'Следующий шаг' }];
+    }).filter(item => !hidden.includes(item.id)).slice(0, 3);
+    bb.log.info(`aif-chat: fallback suggestions threadId=${threadId} count=${items.length}`);
+    const view: Suggestions = { sourceKey, fingerprint: snapshot.fingerprint, threadState: snapshot.threadState, gate: null, gateError: null, items };
+    return { view, ids: items.map(i => i.id), hidden, snapshot };
+  }
+  // Requested model per child thread, cached by id + updatedAt so panel refreshes do not re-read events.
+  const childModels = new Map<string, ChildModel>();
+  async function childModelFor(c: { id: string; title?: string | null; providerId?: string | null; updatedAt: unknown }, state: DelegationState): Promise<ChildModel> {
+    const key = `${c.id}:${String(c.updatedAt)}:${JSON.stringify([state.choice, state.research, state.research2, state.research3])}`;
+    const hit = childModels.get(key);
+    if (hit) return hit;
+    try {
+      const rows = await bb.sdk.threads.events.list({ threadId: c.id, order: 'desc', limit: '20', types: ['client/turn/requested', 'provider/modelFallback'] });
+      const value = childModel(rows, { title: c.title ?? null, providerId: c.providerId ?? null }, state);
+      childModels.set(key, value);
+      if (childModels.size > 200) childModels.delete(childModels.keys().next().value!);
+      return value;
+    } catch (error) {
+      bb.log.warn(`aif-chat: child model read failed childId=${c.id}: ${error instanceof Error ? error.message : String(error)}`);
+      return { execution: null, fallback: null, mismatch: null };
+    }
+  }
   async function delegationView(threadId: string): Promise<DelegationView> {
     const { environment } = await context(threadId);
     const defaults = delegationDefaultsSchema.safeParse(await bb.storage.kv.get<DelegationDefaults>('delegation-defaults'));
@@ -257,7 +302,8 @@ export default async function plugin(bb: BbPluginApi) {
     ]);
     return { ...state,
       providers: providers.filter(p => p.available).map(p => ({ id: p.id, name: p.displayName })),
-      children: children.map(c => ({ id: c.id, title: c.title ?? null, status: c.status, providerId: c.providerId ?? null, updatedAt: String(c.updatedAt) })),
+      children: await Promise.all(children.map(async c => ({ id: c.id, title: c.title ?? null, status: c.status, providerId: c.providerId ?? null, updatedAt: String(c.updatedAt),
+        ...await childModelFor(c, state) }))),
       defaults: defaults.success ? defaults.data : null,
       appliedDefaults: null };
   }
@@ -336,6 +382,15 @@ export default async function plugin(bb: BbPluginApi) {
       });
       return `Применены модели по умолчанию: ${parts.join(', ')}`;
     });
+  }
+  async function aifModeTarget(input: { threadId?: string; projectId?: string }) {
+    if ((input.threadId ? 1 : 0) + (input.projectId ? 1 : 0) !== 1) throw new Error('Укажите ровно один параметр: threadId или projectId.');
+    return { threadId: input.threadId, projectId: input.projectId ?? (await bb.sdk.threads.get({ threadId: input.threadId! })).projectId };
+  }
+  async function aifModeView(threadId: string | undefined, projectId: string, on: boolean) {
+    const configured = threadId ? await status({ threadId, target: '', phase: 'unknown' }).then(s => s.configured).catch(() => null) : null;
+    const pill = threadId ? await bb.storage.kv.get<boolean>(`aif-pill:${threadId}`) === true : false;
+    return { projectId, on, configured, pill };
   }
   bb.rpc.register(rpcContract, {
     status: input => status(input, input.checkUpdates, input.force),
@@ -443,6 +498,27 @@ export default async function plugin(bb: BbPluginApi) {
       cache.invalidate(key => !!watchers.get(key)?.has(input.threadId)); bb.realtime.publish('changed', { threadId: input.threadId });
       return { sent: true, message: 'Команда отправлена в этот чат.' };
     }),
+    aifMode: async input => {
+      const { threadId, projectId } = await aifModeTarget(input);
+      return aifModeView(threadId, projectId, getMode(projectId));
+    },
+    setAifMode: input => serial(`aif-mode:${input.projectId ?? input.threadId}`, async () => {
+      const { threadId, projectId } = await aifModeTarget(input);
+      setMode(projectId, input.on);
+      if (threadId) {
+        if (input.on) {
+          const turns = await bb.sdk.threads.events.list({ threadId, order: 'desc', limit: '1', types: ['client/turn/requested'] }).catch(() => []);
+          if (turns.length) await bb.storage.kv.set(`aif-pill:${threadId}`, true);
+        } else await bb.storage.kv.delete(`aif-pill:${threadId}`);
+      }
+      bb.log.info(`aif-chat: aif-mode set projectId=${projectId} on=${input.on}`);
+      bb.realtime.publish('changed', { threadId: threadId ?? null, projectId });
+      return aifModeView(threadId, projectId, input.on);
+    }),
+    ackAifPill: async input => {
+      await bb.storage.kv.delete(`aif-pill:${input.threadId}`);
+      return { ok: true as const };
+    },
   });
   bb.agents.registerTool({
     name: 'aif_chat_status',
@@ -456,7 +532,29 @@ export default async function plugin(bb: BbPluginApi) {
         checks: result.snapshot.checks, diagnostics: result.snapshot.diagnostics });
     },
   });
-  bb.agents.configure(() => enabled ? ({ tools: ["aif_chat_status"], skills: ["aif-chat"], instructions: 'For AI Factory/AIFHub work, use aif_chat_status at workflow boundaries or explicit status requests and emit its previewDirective exactly once on its own line. The directive renders real workflow buttons and read-only plan/check progress. Do not wrap it in code. Report the phase actually reached, preserve exact owner handoffs and gate blocks. Never add a directive after a required final aif-gate-result or inside an exact-handoff-only response. Do not call for unrelated tasks or repeat unchanged cards. Buttons are optional navigation, not required questions. No workflow action runs until the user clicks or has already authorized it. Plugin phase is a declaration; file reports are not proof of current PASS.' }) : ({ tools: [], skills: [], instructions: '' }));
+  bb.agents.configure(ctx => {
+    if (!enabled) return { tools: [], skills: [], instructions: '' };
+    let modeOn = false;
+    try { modeOn = getMode(ctx.project.id); } catch (error) { bb.log.warn(`aif-chat: aif-mode read failed projectId=${ctx.project.id}: ${error instanceof Error ? error.message : String(error)}`); }
+    const mode = shouldContribute({ enabled, modeOn, parentThreadId: ctx.thread.parentThreadId }) ? '\n\n' + aifModeInstructions() : '';
+    return { tools: ["aif_chat_status"], skills: ["aif-chat"], instructions: 'For AI Factory/AIFHub work, use aif_chat_status at workflow boundaries or explicit status requests and emit its previewDirective exactly once on its own line. The directive renders real workflow buttons and read-only plan/check progress. Do not wrap it in code. Report the phase actually reached, preserve exact owner handoffs and gate blocks. Never add a directive after a required final aif-gate-result or inside an exact-handoff-only response. Do not call for unrelated tasks or repeat unchanged cards. Buttons are optional navigation, not required questions. No workflow action runs until the user clicks or has already authorized it. Plugin phase is a declaration; file reports are not proof of current PASS.' + mode };
+  });
+  bb.ui.registerMentionProvider({
+    id: AIF_MENTION.provider,
+    label: 'AI Factory',
+    search: ({ query }) => {
+      if (!enabled) return [];
+      const q = query.trim().toLowerCase();
+      return !q || ['ai factory', 'aif', 'factory', 'фабрика', 'режим'].some(term => term.startsWith(q))
+        ? [{ id: AIF_MENTION.id, title: 'AI Factory — режим работы', subtitle: 'Вести задачу через /aif-plan → /aif-implement → /aif-verify', icon: 'Workflow' }]
+        : [];
+    },
+    resolve: itemId => {
+      if (itemId !== AIF_MENTION.id) throw new Error('Неизвестное упоминание AI Factory.');
+      bb.log.info('aif-chat: aif-mode mention resolved');
+      return { context: aifModeInstructions() };
+    },
+  });
   bb.cli.register({
     name: 'aif-chat', summary: 'AI Factory versions, live workflow card and read-only plan/check progress',
     commands: ['status', 'show', 'check-updates', 'reset', 'reset-dispatch'].map(name => ({ name, summary: name === 'show' ? 'Show a live chat card' : name, usage: `bb plugin run aif-chat ${name} [--thread <id>] [--target <path>] [--phase <phase>] [--json]` })),
@@ -540,6 +638,26 @@ export default async function plugin(bb: BbPluginApi) {
     await bb.storage.kv.delete(`selection:${thread.id}`); await bb.storage.kv.delete(`deliveries:${thread.id}`);
     await bb.storage.kv.delete(`suggestions-dismissed:${thread.id}`);
     await bb.storage.kv.delete(`updating-versions:${thread.id}`); versionScopes.delete(thread.id);
+  });
+  bb.events.on('experimental_thread.events', async ({ thread, sequence }) => {
+    try {
+      if (!enabled || thread.parentThreadId !== null || !getMode(thread.projectId)) return;
+      await serial(`aif-events:${thread.id}`, async () => {
+        const cursorKey = `aif-events-cursor:${thread.id}`;
+        const cursor = await bb.storage.kv.get<number>(cursorKey);
+        if (cursor === undefined) { await bb.storage.kv.set(cursorKey, sequence); return; }
+        if (sequence <= cursor) return;
+        const rows = await bb.sdk.threads.events.list({ threadId: thread.id, order: 'asc', afterSeq: String(cursor), limit: '100', types: ['thread/compacted'] });
+        await bb.storage.kv.set(cursorKey, sequence);
+        if (rows.some(row => row.type === 'thread/compacted' && row.seq > cursor)) {
+          await bb.storage.kv.set(`aif-pill:${thread.id}`, true);
+          bb.realtime.publish('changed', { threadId: thread.id });
+          bb.log.info(`aif-chat: compaction seen threadId=${thread.id}`);
+        }
+      });
+    } catch (error) {
+      bb.log.warn(`aif-chat: compaction watch failed threadId=${thread.id}: ${error instanceof Error ? error.message : String(error)}`);
+    }
   });
   bb.onDispose(() => { disposed = true; cache.dispose(); histories.clear(); historyLoads.clear(); historyEpochs.clear(); watchers.clear(); versionScopes.clear(); queues.clear(); });
 }

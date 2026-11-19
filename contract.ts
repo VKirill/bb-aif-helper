@@ -5,10 +5,14 @@ import { requestSchema, runSchema, snapshotSchema, hostInputSchema, suggestionRe
 import { SKIPPABLE_STEPS } from './readiness.ts';
 export const delegationViewSchema = delegationStateSchema.extend({
   providers: z.array(z.object({ id: z.string(), name: z.string() })),
-  children: z.array(z.object({ id: z.string(), title: z.string().nullable(), status: z.string(), providerId: z.string().nullable(), updatedAt: z.string() })),
+  children: z.array(z.object({ id: z.string(), title: z.string().nullable(), status: z.string(), providerId: z.string().nullable(), updatedAt: z.string(),
+    execution: z.object({ model: z.string(), reasoning: z.string().nullable() }).nullable(),
+    fallback: z.object({ from: z.string(), to: z.string(), reason: z.string() }).nullable(),
+    mismatch: z.string().nullable() })),
   defaults: delegationDefaultsSchema.nullable(),
   appliedDefaults: z.string().nullable(),
 });
+export const aifModeViewSchema = z.object({ projectId: z.string(), on: z.boolean(), configured: z.boolean().nullable(), pill: z.boolean() });
 export type DelegationView = z.infer<typeof delegationViewSchema>;
 export const hostContract = defineRpcContract({
   collect: { input: hostInputSchema, output: snapshotSchema, experimental_retryable: true },
@@ -27,4 +31,7 @@ export const rpcContract = defineRpcContract({
   runSuggestion: { input: suggestionActionSchema.extend({ fingerprint: z.string().length(64), requestId: z.string().uuid() }), output: z.object({ sent: z.boolean(), stale: z.boolean().optional(), message: z.string(),
     command: z.string().optional(),
     data: z.object({ source: z.literal('aif-chat'), sourceKey: z.string(), commandId: z.string(), fingerprint: z.string(), gate: gateResultSchema.nullable() }).optional() }) },
+  aifMode: { input: z.object({ threadId: z.string().min(1).max(200).optional(), projectId: z.string().min(1).max(200).optional() }).strict(), output: aifModeViewSchema, experimental_retryable: true },
+  setAifMode: { input: z.object({ threadId: z.string().min(1).max(200).optional(), projectId: z.string().min(1).max(200).optional(), on: z.boolean() }).strict(), output: aifModeViewSchema },
+  ackAifPill: { input: z.object({ threadId: z.string().min(1).max(200) }).strict(), output: z.object({ ok: z.literal(true) }) },
 });
