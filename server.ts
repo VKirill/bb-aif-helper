@@ -642,7 +642,10 @@ export default async function plugin(bb: BbPluginApi) {
       return { ok: true as const };
     },
   });
-  const liveRoots = new Map<string, { hostId: string; root: string; refs: number; retried: boolean }>();
+  const liveRoots = new Map<string, { hostId: string; root: string; refs: number; retriedAt: number }>();
+  // A loss within this window of the last retry counts as consecutive: give up instead of looping.
+  const RETRY_WINDOW_MS = 60_000;
+  const mayRetry = (live: { retriedAt: number }) => !live.retriedAt || Date.now() - live.retriedAt >= RETRY_WINDOW_MS;
   const liveKey = (hostId: string, root: string) => `${hostId}:${root}`;
   const errMessage = (error: unknown) => (error instanceof Error ? error.message : String(error)).slice(0, 500);
   const invalidateRoot = (hostId: string, root: string) => {
@@ -669,8 +672,8 @@ export default async function plugin(bb: BbPluginApi) {
     invalidateRoot(hostId, payload.root);
     const live = [...liveRoots.values()].find(entry => entry.root === payload.root);
     if (!live) return;
-    if (live.retried) { bb.log.warn(`aif-chat: watch lost again root=${payload.root}; staying unwatched`); return; }
-    live.retried = true;
+    if (!mayRetry(live)) { bb.log.warn(`aif-chat: watch lost again root=${payload.root}; staying unwatched`); return; }
+    live.retriedAt = Date.now();
     rewatch(live.hostId, payload.root);
   });
   const offWorkerExit = host.experimental_onWorkerExit(({ hostId }) => {
@@ -678,8 +681,8 @@ export default async function plugin(bb: BbPluginApi) {
     for (const live of liveRoots.values()) {
       // Same hostId caveat as invalidateRoot; a redundant watch call is a no-op on a healthy host.
       invalidateRoot(hostId, live.root);
-      if (live.retried) continue;
-      live.retried = true;
+      if (!mayRetry(live)) continue;
+      live.retriedAt = Date.now();
       rewatch(hostId, live.root);
     }
   });
@@ -696,12 +699,12 @@ export default async function plugin(bb: BbPluginApi) {
       const hostId = environment.hostId;
       const key = liveKey(hostId, root);
       let live = liveRoots.get(key);
-      if (!live) { live = { hostId, root, refs: 0, retried: false }; liveRoots.set(key, live); }
+      if (!live) { live = { hostId, root, refs: 0, retriedAt: 0 }; liveRoots.set(key, live); }
       live.refs += 1;
       if (live.refs === 1) {
         try {
           await host.call('watch', { root }, { hostId });
-          live.retried = false;
+          live.retriedAt = 0;
           bb.log.debug(`aif-chat: watch on root=${root} hostId=${hostId} refs=${live.refs}`);
         } catch (error) {
           bb.log.warn(`aif-chat: watch failed root=${root}: ${errMessage(error)}`);

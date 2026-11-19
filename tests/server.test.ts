@@ -730,3 +730,20 @@ test('watchLost retries the host watch once, then warns and stays unwatched', as
     stop();
   } finally { await h.harness.lifecycle.dispose(); }
 });
+
+test('a watch loss long after a successful retry gets its own retry', async (t) => {
+  let now = 1_000_000;
+  t.mock.method(Date, 'now', () => now);
+  const h = await setup(); try {
+    const stop = h.harness.behavior.experimental_watchRpc('status', { input: { threadId: 'thr_test' } });
+    await tick();
+    await h.harness.behavior.experimental_emitHostSignal('host_test', 'watchLost', { root: '/project', reason: 'fsnotify died' });
+    await tick();
+    assert.equal(hostCallsOf(h.hostCalls, 'watch').length, 2);
+    now += 10 * 60_000;
+    await h.harness.behavior.experimental_emitHostSignal('host_test', 'watchLost', { root: '/project', reason: 'died again later' });
+    await tick();
+    assert.equal(hostCallsOf(h.hostCalls, 'watch').length, 3);
+    stop();
+  } finally { await h.harness.lifecycle.dispose(); }
+});
