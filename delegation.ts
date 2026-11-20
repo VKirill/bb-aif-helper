@@ -248,23 +248,27 @@ The owner allowed up to ${n} workers at once. You run the plan as AI Factory's \
 
 ### Layers
 
-1. Read the whole plan. For each \`[ ]\` task take its number, phase (\`### Phase N\`) and its \`(depends on X, Y)\`. Tasks of the same phase without explicit dependencies are independent; a later phase depends on every earlier phase unless its tasks say otherwise. Keep apart, in different layers, tasks you can see will change the same file (from their \`Files:\` hints or text). Commit tasks (\`<!-- aif:task-kind:commit -->\`), commit checkpoints from \`## Commit Plan\`, and push or deploy steps are yours alone: never give them to a worker.
-2. Before the first worker, write \`<!-- parallel: tasks N, M -->\` on its own line above each group of independent tasks in the plan, once.
+1. Read the whole plan. Open tasks are \`[ ]\` and \`[~]\` (an interrupted run left it in progress: redo it); \`[!]\` failed earlier and counts as not done. For each task take its number, phase (\`### Phase N\`) and its dependencies in whatever form the plan writes them (\`(depends on X, Y)\`, \`Depends on X\`, a dependency line under the task); when you are unsure whether one task needs another, treat it as dependent. Tasks of the same phase without explicit dependencies are independent; a later phase depends on every earlier phase unless its tasks say otherwise. Keep apart, in different layers, tasks you can see will change the same file (from their \`Files:\` hints or text). Commit tasks (\`<!-- aif:task-kind:commit -->\`), commit checkpoints from \`## Commit Plan\`, and push or deploy steps are yours alone: never give them to a worker.
+2. Before the first worker, write \`<!-- parallel: tasks N, M -->\` on its own line above each group of independent tasks in the plan, once. Note the current commit (\`git rev-parse HEAD\`) as the plan base: the checkpoints below are scaffolding, see Commits.
 3. The layer loop. \`ready\` = open tasks whose dependencies are all done. If none is ready while tasks remain, stop and report the circular or missing dependency. Check each ready task against the requirements as the skill's requirement-consistency step says. One ready task: the one-worker flow. Several: up to ${n} per layer, the rest in the next batch.
 4. Mark the layer's tasks \`- [~] Task N: … <!-- in-progress -->\` in the plan, then run the steps below. A task is \`[x]\` only after its changes are brought back and verified; then remove the \`in-progress\` comment.
 
 ### One layer
 
-1. Checkpoint: \`bb plugin run aif-chat checkpoint --target "<plan path>" --group <N> --json\`. It lists every changed file of the repository (\`{ files: [{ status, path }], plugin, token }\`). \`plugin\` lists BB AIF Helper's own instruction files: they are never committed here. If every listed file is your own change from earlier tasks of this plan, run it again with \`--token <token>\`: the plugin commits exactly those files locally (no push) and refuses if anything changed since the list — then list again. If the answer has \`extra\`, a pre-commit hook added those files: tell the owner. If a file is not yours, stop and ask the owner; never commit it. The copies are built from the last commit and would not see uncommitted work.
+1. Checkpoint: \`bb plugin run aif-chat checkpoint --target "<plan path>" --group <N> --json\`. It lists every changed file of the repository (\`{ files: [{ status, path }], plugin, token }\`). \`plugin\` lists BB AIF Helper's own instruction files: they are never committed here. Your own changes are the plan file with your marks and the results of earlier tasks of this plan. If every listed file is your own change, run it again with \`--token <token>\`: the plugin commits exactly those files locally (no push) and refuses if anything changed since the list — then list again. If the answer has \`extra\`, a pre-commit hook added those files: tell the owner. If a file is not yours, stop and ask the owner; never commit it. The copies are built from the last commit and would not see uncommitted work.
 2. For each task write its brief to a temporary file in UTF-8. It starts with the worker contract below, then the plan path, the task number and full text (for an ultra bundle the whole \`## Task N\` section of its phase file), the relevant files and project rules, the verification commands and what done means. Start the worker: \`bb plugin run aif-chat spawn-worker --target "<plan path>" --task <taskId> --brief "<absolute brief path>" --json\` → \`{ id }\`. The plugin starts it with the owner's model on a fresh copy made from the checkpoint commit, as a child of this chat; a folder inside a larger repository works too. Every launch gets its own copy.
 3. Wait for every worker: \`bb thread wait <id> --status idle --timeout 8m\`, repeating while it still works. The report is \`bb thread output <id>\`.
 4. Bring the results back one worker at a time: \`bb plugin run aif-chat bring-back --worker <id> --json\`. It moves everything the worker changed (new, changed, renamed and deleted files; ignored files stay out) into this workspace. Answers:
    - \`{ applied: true, files }\`: compare \`files\` with the worker's report and the task, review the diff and run the task's verification.
-   - \`{ applied: false, empty: true }\`: the worker changed nothing; the task is not done.
+   - \`{ applied: false, empty: true }\`: the worker changed nothing. That is right for a task that only checks something: if its report shows the check passed and you rerun it with the same result, the task is done. Otherwise the task is not done.
    - \`{ applied: false, error }\`: the changes do not fit, and nothing was changed; the results of earlier tasks are intact. Do not run \`git apply\`, \`git checkout\`, \`git reset\` or \`git stash\` yourself: there is nothing to undo. Usually another task of the layer changed the same lines (see Failures). If writing failed half way (a locked or read-only file), the plugin put back what it wrote; once the cause is fixed, run the same \`bring-back\` again.
    - \`{ applied: false, partial: true, files, error }\`: those files could not be put back. Stop and report them to the owner.
    \`bring-back\` takes only what changed since the worker's last bring-back, so a worker asked to fix its work is brought back again with just the fix.
-5. After the whole layer is back, verify the merged result once (build and tests the plan names), then archive the layer's workers (\`bb thread archive <id>\`; BB removes its copy five minutes later). Commit only at the plan's commit tasks or checkpoints, as the plan says; you alone commit, and you never push without the owner.
+5. After the whole layer is back, verify the merged result once (build and tests the plan names), then archive the layer's workers (\`bb thread archive <id>\`; BB removes its copy five minutes later). Then continue with the next layer.
+
+### Commits
+
+You alone commit, and you never push without the owner. The checkpoint commits only let the next layer's copies see earlier work; the history the plan describes is yours to make. At each commit the plan prescribes (its commit tasks, its \`## Commit Plan\`, or the one final commit of \`single-commit\`), first run \`git reset --soft <plan base or your previous plan commit>\`: that folds the checkpoint commits back into staged changes and keeps every file. Then make that commit with the plan's message. If the plan prescribes no commit, leave the checkpoint commits as they are and tell the owner.
 
 ### The worker contract — the mandatory start of every brief (replace \`<thread-id>\` with your own \`BB_THREAD_ID\`)
 
@@ -279,7 +283,7 @@ Finish with a report: what changed; the list of files you modified; the checks y
 ### Failures
 
 Find the cause before you act; never repeat the same step unchanged.
-- A check failed or the work has a gap: fix a small one yourself, or send the exact error with \`bb thread tell <id> '<what to fix>'\`, wait, and bring the worker back again.
+- A check failed or the work has a gap: fix a small one yourself, or write the exact error to a temporary UTF-8 file and send it with \`bb thread tell <id> --message-file "<file>"\` (never inside quotes on the command line: an apostrophe or \`$\` in the error breaks the shell), wait, and bring the worker back again.
 - Two workers changed the same lines (\`bring-back\` error): keep what is already back, then redo that task after the layer with a fresh worker on a new checkpoint, so it sees the other task's changes.
 - BB failed (\`spawn-worker\` error, a host that is not connected, a worker that stopped without a report): retry once, then do that task yourself with the one-worker flow.
 - A task fails for the same cause three times: mark it \`- [!] Task N: … <!-- failed: <reason> -->\`, finish the tasks that do not depend on it, and ask the owner, naming the cause and the assumption you doubt.
@@ -323,7 +327,7 @@ bb thread spawn --project "$BB_PROJECT_ID" --environment "$BB_ENVIRONMENT_ID" --
 \`\`\`
 
 4. Wait: \`bb thread wait <id> --status idle --timeout 8m\`, repeating while the thread still works. The report is \`bb thread output <id>\`.
-5. Review \`git diff\` and run the task's verification yourself. Fix a small gap yourself, or send \`bb thread tell <id> '<what to fix>'\` and wait again (step 4).
+5. Review \`git diff\` and run the task's verification yourself. Fix a small gap yourself, or write what to fix to a temporary UTF-8 file and send \`bb thread tell <id> --message-file "<file>"\` (an apostrophe or \`$\` inside command-line quotes breaks the shell), then wait again (step 4).
 6. Only after that mark the task done in the plan and move to the next task. One worker at a time: workers share this workspace.
 
 If \`bb thread spawn\` returns an error, report it and implement that task yourself; do not repeat the same error. Use no \`node\` commands in this flow. In PowerShell the BB variables are \`$env:BB_PROJECT_ID\`, \`$env:BB_THREAD_ID\` and \`$env:BB_ENVIRONMENT_ID\`, not \`$BB_PROJECT_ID\`.`;

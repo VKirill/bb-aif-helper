@@ -86,3 +86,13 @@ test('bring-back takes only a worker of this chat, in an AI Factory copy on the 
     assert.match(foreign.stderr ?? '', /не исполнитель этого чата/);
   } finally { await h.harness.lifecycle.dispose(); }
 });
+
+test('a coordinator with the old block calling groups gets an error and falls back to one worker', async () => {
+  const { h, calls } = await setup();
+  try {
+    const result = await h.harness.behavior.runCli(['groups', '--thread', 'thr_test', '--target', '.ai-factory/plans/demo.md', '--max', '2', '--json']);
+    assert.equal(result.exitCode, 0, result.stderr);
+    assert.match(JSON.parse(result.stdout!).error, /groups удалена/);
+    assert.equal(calls.length, 0, 'nothing is read or changed on the machine');
+  } finally { await h.harness.lifecycle.dispose(); }
+});

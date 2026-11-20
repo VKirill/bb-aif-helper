@@ -43,11 +43,17 @@ test('contextBlock with parallel spawns workers on BB-made copies and keeps prov
   // Every git and spawn step is a plugin command: no path, JSON or `git status` output passes through the shell.
   // The plugin no longer parses plans: the coordinator model reads the plan, as in AI Factory.
   assert.ok(!text.includes('aif-chat groups'));
+  assert.ok(!text.includes("bb thread tell <id> '"), 'no error text inside shell quotes');
   for (const absent of ['git worktree add', 'git worktree remove', 'git apply --check', 'git apply "', 'git status', 'git add', 'git commit', '--environment-inputs', '--3way', 'commit -am', 'git checkout --']) assert.ok(!text.includes(absent), absent);
   for (const part of [
     'Parallel mode', 'up to 3 workers', "AI Factory's `implement-coordinator`", '(depends on X, Y)', 'Tasks of the same phase without explicit dependencies are independent',
     '<!-- parallel: tasks N, M -->', '- [~] Task N: … <!-- in-progress -->', '- [!] Task N: … <!-- failed: <reason> -->', 'handoff_outcome: blocked_external',
     'the list of files you modified', 'same cause three times', 'Status: complete',
+    // Review of aa0cdb6: resume of [~], old dependency forms, plan marks before the checkpoint, check-only tasks,
+    // the plan's commit strategy over checkpoint commits, and no error text inside shell quotes.
+    'Open tasks are `[ ]` and `[~]`', '`Depends on X`', 'treat it as dependent', 'the plan file with your marks',
+    'a task that only checks something', 'git reset --soft <plan base or your previous plan commit>', 'single-commit',
+    'bb thread tell <id> --message-file "<file>"',
     'bb plugin run aif-chat checkpoint --target "<plan path>" --group <N> --json', '--token <token>', 'If a file is not yours, stop and ask the owner; never commit it',
     'bb plugin run aif-chat spawn-worker --target "<plan path>" --task <taskId> --brief "<absolute brief path>" --json',
     'bb plugin run aif-chat bring-back --worker <id> --json', 'nothing was changed', 'there is nothing to undo', '{ applied: false, empty: true }',

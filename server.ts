@@ -1054,7 +1054,7 @@ export default async function plugin(bb: BbPluginApi) {
         const options: Record<string, string> = {}; let json = false;
         for (let i = 0; i < args.length; i++) {
           if (args[i] === '--json') { json = true; continue; }
-          if (!['--thread', '--target', '--phase', '--group', '--token', '--task', '--brief', '--worker'].includes(args[i]) || !args[i + 1] || args[i + 1].startsWith('--')) throw new Error('Неизвестный аргумент или отсутствует значение.');
+          if (!['--thread', '--target', '--phase', '--max', '--group', '--token', '--task', '--brief', '--worker'].includes(args[i]) || !args[i + 1] || args[i + 1].startsWith('--')) throw new Error('Неизвестный аргумент или отсутствует значение.');
           if (args[i] in options) throw new Error('Повторяющийся аргумент.');
           const name = args[i]; options[name] = args[++i];
         }
@@ -1094,6 +1094,11 @@ export default async function plugin(bb: BbPluginApi) {
           await bb.storage.kv.delete(`${command === 'reset' ? 'selection' : 'deliveries'}:${input.threadId}`);
           if (command === 'reset') await bb.storage.kv.delete(`chat-plan:${input.threadId}`);
           cache.invalidate(key => !!watchers.get(key)?.has(input.threadId)); return { exitCode: 0, stdout: 'Состояние интерфейса сброшено; проект не изменён.' };
+        }
+        // `groups` was removed; a coordinator still holding the old managed block falls back to the one-worker flow.
+        if (command === 'groups') {
+          const error = 'Команда groups удалена: перечитайте блок параллельного режима в .ai-factory/skill-context/aif-implement/SKILL.md (откройте вкладку AI Factory), а до этого работайте одним исполнителем.';
+          return json ? { exitCode: 0, stdout: JSON.stringify({ error }) } : { exitCode: 1, stderr: error };
         }
         if (command === 'checkpoint' || command === 'spawn-worker' || command === 'bring-back') {
           const result = await parallelCommand(command, input.threadId, input.target, options);
