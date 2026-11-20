@@ -125,13 +125,6 @@ export async function bringBack(input: { root: string; copy: string }) {
       return { applied: false as const, empty: false as const, files,
         error: `Исполнитель переименовал или удалил папку ${mine.prefix}, в которой работает этот чат: перенесите это вручную, после остальных задач.` };
   }
-  // On a disk that ignores case (Windows, macOS) `git apply` cannot rename a file only by case: it sees the new name
-  // as already there. Said plainly instead of a raw git error.
-  if ((await git(mine.top, ['config', '--type=bool', 'core.ignorecase']).catch(() => '')).trim() === 'true') {
-    const lower = new Map<string, string>();
-    for (const f of files) { const k = f.toLowerCase(), seen = lower.get(k); if (seen && seen !== f) return { applied: false as const, empty: false as const, files,
-      error: `Исполнитель переименовал файл только регистром (${seen} ↔ ${f}): на этом диске git так не переносит. Перенесите это переименование вручную.` }; lower.set(k, f); }
-  }
   // The receipt is written after the apply; a copy where it cannot be written is refused before anything changes.
   await writeFile(mark, last ? `${last}\n` : '').catch((cause: Error) => { throw new Error(`Копия исполнителя недоступна для записи: ${cause.message}`); });
   const patch = path.join(dir, `${randomUUID()}.patch`);
@@ -155,6 +148,9 @@ export async function bringBack(input: { root: string; copy: string }) {
     catch (cause) { return undo((cause as Error).message); }
     if (folder) await chmod(path.resolve(input.root), folder.mode & 0o7777).catch(() => undefined);
     await writeFile(mark, `${tree}\n`);
+    // The copy's index becomes the brought-back tree: git keeps every object an index names, so `git gc` never prunes
+    // the baseline of a worker's next fix. Its files are not touched.
+    await git(theirs.top, ['read-tree', tree]);
     return { applied: true as const, files };
   }
   } finally { await removePath(dir).catch(() => undefined); }

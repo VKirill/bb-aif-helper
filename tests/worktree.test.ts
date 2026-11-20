@@ -449,7 +449,7 @@ test('review of e497ba0: an ignore rule, a force-added file, a submodule the cop
   await removeWorktree({ basePath: top, root: copy.root });
 });
 
-test('review of 9f6867b and 8fa0a42: case-only renames, and a lost seed is refused instead of echoed back', async () => {
+test('review of 9f6867b, 8fa0a42 and af77a9d: a coordinator\'s case-only rename, gc between bring-backs, a lost seed is refused', async () => {
   const top = path.join(sandbox, 'seed-review-2');
   const sh = (cwd: string, ...args: string[]) => execFileSync('git', ['-C', cwd, '-c', 'user.email=t@t', '-c', 'user.name=t', ...args], { encoding: 'utf8' }).trim();
   mkdirSync(top, { recursive: true });
@@ -463,16 +463,14 @@ test('review of 9f6867b and 8fa0a42: case-only renames, and a lost seed is refus
   const copy = await createWorktree({ basePath: top, name: 'seed-review-2', seed: true });
   if (folds) assert.ok(readdirSync(copy.path).includes('hello.txt'), 'the coordinator\'s case-only rename reaches the copy');
   writeFileSync(path.join(copy.path, 'other.txt'), 'o\n');
-  if (folds) {
-    // The worker renamed a file only by case: git apply cannot carry that on this disk, so the plugin says so.
-    renameSync(path.join(copy.path, 'Keep.txt'), path.join(copy.path, 'keep.txt'));
-    const refused = await bringBack({ root: top, copy: copy.path });
-    assert.match(refused.error ?? '', /только регистром/);
-    assert.ok(readdirSync(top).includes('Keep.txt'), 'nothing changed');
-    renameSync(path.join(copy.path, 'keep.txt'), path.join(copy.path, 'Keep.txt'));
-  }
   const back = await bringBack({ root: top, copy: copy.path });
   assert.deepEqual([back.error, back.applied, back.files], [undefined, true, ['other.txt']]);
+  // gc in the coordinator's folder between two bring-backs keeps the baseline of the worker's fix.
+  writeFileSync(path.join(copy.path, 'other.txt'), 'o fixed\n');
+  sh(top, 'gc', '-q', '--prune=now');
+  const fix = await bringBack({ root: top, copy: copy.path });
+  assert.deepEqual([fix.error, fix.applied, fix.files], [undefined, true, ['other.txt']]);
+  assert.equal(text(path.join(top, 'other.txt')), 'o fixed\n');
   // A receipt naming a tree git no longer has: refused, the coordinator's own work is not sent back as the worker's.
   const mark = sh(copy.root, 'rev-parse', '--path-format=absolute', '--git-path', 'aif-brought-back');
   writeFileSync(mark, 'f'.repeat(40) + '\n');
