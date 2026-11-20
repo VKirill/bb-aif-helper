@@ -1,10 +1,10 @@
 import { execFile } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
-import { lstat, mkdir, mkdtemp, readFile, readlink, rm, stat, symlink, writeFile } from 'node:fs/promises';
+import { lstat, mkdir, mkdtemp, readFile, readlink, stat, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { withoutManagedBlocks } from './delegation.ts';
-import { worktreesRoot } from './worktree.ts';
+import { removePath, worktreesRoot } from './worktree.ts';
 
 // Git steps of parallel /aif-implement that the coordinator used to type by hand. Paths never pass through a shell or
 // an agent's copy and paste: git prints them NUL-separated and reads them back NUL-separated, so spaces, Cyrillic,
@@ -114,7 +114,7 @@ export async function checkpoint(input: { root: string; token: string; message: 
     if (missing.length) await git(c.top, ['--literal-pathspecs', 'rm', '-q', '--cached', '--ignore-unmatch', '-r', ...FROM_STDIN], nul(missing), env);
     if (present.length) await git(c.top, ['--literal-pathspecs', 'add', '-A', ...FROM_STDIN], nul(present), env);
     await git(c.top, ['commit', '-q', '-m', input.message], undefined, env);
-  } finally { await rm(index, { force: true }); }
+  } finally { await removePath(index).catch(() => undefined); }
   const sha = line(await git(c.top, ['rev-parse', 'HEAD']));
   // The real index catches up for these paths only: they now match HEAD.
   await git(c.top, ['--literal-pathspecs', 'reset', '-q', ...FROM_STDIN], nul(c.files.map(f => f.path))).catch((cause: Error) => {
@@ -144,7 +144,7 @@ const same = (a: Saved, b: Saved) => a.link === b.link && a.mode === b.mode
 async function restore(top: string, s: Saved) {
   if (same(s, await save(top, s.file))) return; // untouched by the failed apply
   const full = path.join(top, s.file);
-  await rm(full, { force: true });
+  await removePath(full);
   if (s.link !== null) { await mkdir(path.dirname(full), { recursive: true }); await symlink(s.link, full); }
   else if (s.data !== null) { await mkdir(path.dirname(full), { recursive: true }); await writeFile(full, s.data, { mode: s.mode }); }
 }
@@ -190,7 +190,7 @@ export async function bringBack(input: { root: string; copy: string }) {
     }
     await writeFile(mark, `${tree}\n`);
     return { applied: true as const, files };
-  } finally { await rm(dir, { recursive: true, force: true }); }
+  } finally { await removePath(dir).catch(() => undefined); }
 }
 
 /**

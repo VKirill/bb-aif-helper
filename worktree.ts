@@ -1,6 +1,6 @@
 import { execFile } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { mkdir, rm, stat } from 'node:fs/promises';
+import { lstat, mkdir, readdir, rm, rmdir, stat, unlink } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
@@ -12,6 +12,29 @@ import { promisify } from 'node:util';
 const run = promisify(execFile);
 const git = async (cwd: string, args: string[]) => (await run('git', ['-C', cwd, ...args], { timeout: 120_000, maxBuffer: 4 << 20 })).stdout.trim();
 const exists = (p: string) => stat(p).then(() => true, () => false);
+const present = (p: string) => lstat(p).then(() => true, () => false);
+
+/**
+ * Deletes a file or folder and checks it is gone. On Windows Node's `rm` can return without an error and leave a
+ * file whose path has non-ASCII characters (`раздел\a.txt`); `unlink` and `rmdir` delete it. A file another process
+ * holds open stays visible for a moment, so the check waits up to about two seconds.
+ */
+export async function removePath(p: string): Promise<void> {
+  await rm(p, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 }).catch(() => undefined);
+  const walk = async (q: string): Promise<void> => {
+    const info = await lstat(q).catch(() => null);
+    if (!info) return;
+    if (info.isDirectory()) {
+      for (const entry of await readdir(q).catch(() => [] as string[])) await walk(path.join(q, entry));
+      await rmdir(q).catch(() => undefined);
+    } else await unlink(q).catch(() => undefined);
+  };
+  for (let i = 0; i < 10 && await present(p); i++) {
+    await walk(p);
+    if (await present(p)) await new Promise(resolve => setTimeout(resolve, 200));
+  }
+  if (await present(p)) throw new Error(`Не удалось удалить ${p}: его держит другой процесс`);
+}
 
 /** Every copy lives here, so removal never touches a folder this plugin did not make. */
 export const worktreesRoot = () => path.join(homedir(), '.bb-aif-helper', 'worktrees');
@@ -48,7 +71,7 @@ export async function createWorktree(input: { basePath: string; name: string; re
   // nothing else would ever remove it, and the next try with the same name would say it already exists.
   const discard = async () => {
     await git(top, ['worktree', 'remove', '--force', root]).catch(() => '');
-    await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
+    await removePath(root).catch(() => undefined);
     await git(top, ['worktree', 'prune']).catch(() => '');
   };
   try {
@@ -83,6 +106,6 @@ export async function removeWorktree(input: { basePath: string; root: string }):
       if (await git(root, ['rev-parse', '--git-dir']).then(() => true, () => false)) throw cause;
     });
   } else await git(input.basePath, ['worktree', 'remove', '--force', root]).catch(() => '');
-  await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
+  await removePath(root);
   return { removed: true };
 }

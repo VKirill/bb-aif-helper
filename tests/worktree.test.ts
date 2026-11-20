@@ -1,7 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, realpathSync, renameSync, rmSync } from 'node:fs';
+// On Windows rmSync can silently keep a file whose path has Cyrillic in it; tests delete files with unlinkSync.
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, realpathSync, renameSync, rmSync, unlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { createWorktree, removeWorktree, worktreesRoot } from '../worktree.ts';
@@ -136,7 +137,7 @@ test('bring-back carries renames, deletions and awkward names, and refuses a fol
   const base = path.join(top, 'раздел');
   const copy = await createWorktree({ basePath: base, name: 'names-1' });
   sh(copy.path, 'mv', 'old.txt', 'new name.txt');
-  rmSync(path.join(copy.path, 'gone.txt'));
+  unlinkSync(path.join(copy.path, 'gone.txt'));
   writeFileSync(path.join(copy.path, 'todo[1].txt'), 'bracket\n');
   // `"` cannot be in a Windows file name; a `'` and Cyrillic can.
   const quoted = process.platform === 'win32' ? "it's тест.txt" : "it's \"quoted\" тест.txt";
@@ -165,7 +166,7 @@ test('checkpoint lists each file, commits exactly the listed ones and refuses af
   sh(top, 'config', 'user.email', 't@t'); sh(top, 'config', 'user.name', 't');
   const root = path.join(top, 'sec');
   sh(top, 'mv', 'sec/old.txt', 'sec/renamed.txt');
-  rmSync(path.join(root, 'gone.txt'));
+  unlinkSync(path.join(root, 'gone.txt'));
   mkdirSync(path.join(root, 'new dir'));
   writeFileSync(path.join(root, 'new dir', 'тест.txt'), 'mine\n');
   writeFileSync(path.join(root, 'todo[1].txt'), 'mine\n');
@@ -179,7 +180,7 @@ test('checkpoint lists each file, commits exactly the listed ones and refuses af
   assert.deepEqual(listed.plugin.map(f => f.path), ['sec/.ai-factory/skill-context/own.md']);
   writeFileSync(path.join(root, 'todo[1].txt'), 'edited after the list\n');
   await assert.rejects(checkpoint({ root, token: listed.token, message: 'cp' }), /поменялись после проверки/);
-  rmSync(path.join(root, 'todo1.txt'));
+  unlinkSync(path.join(root, 'todo1.txt'));
   const again = await listChanges({ root });
   const done = await checkpoint({ root, token: again.token, message: 'chore(aif): plan · before group 2' });
   assert.equal(done.committed, true);
@@ -200,7 +201,7 @@ test('checkpoint: a file replaced by a folder, a staged version kept on a reject
   writeFileSync(path.join(top, 'run.sh'), 'echo 1\n');
   sh(top, 'init', '-q'); sh(top, 'config', 'user.email', 't@t'); sh(top, 'config', 'user.name', 't'); sh(top, 'config', 'core.autocrlf', 'false');
   sh(top, 'add', '-A'); sh(top, 'commit', '-qm', 'init');
-  rmSync(path.join(top, 'config'));
+  unlinkSync(path.join(top, 'config'));
   mkdirSync(path.join(top, 'config'));
   writeFileSync(path.join(top, 'config', 'index.ts'), 'export {}\n');
   const done = await checkpoint({ root: top, token: (await listChanges({ root: top })).token, message: 'cp' });
@@ -316,11 +317,11 @@ test('checkpoint refuses states that would lose work, keeps real edits of instru
   const lock = path.join(top, '.git', 'index.lock');
   writeFileSync(lock, '');
   await assert.rejects(checkpoint({ root: top, token: (await listChanges({ root: top })).token, message: 'cp' }), /index\.lock/);
-  rmSync(lock);
+  unlinkSync(lock);
   // An unfinished merge is never finalized by a checkpoint.
   writeFileSync(path.join(top, '.git', 'MERGE_HEAD'), sh(top, 'rev-parse', 'HEAD'));
   await assert.rejects(checkpoint({ root: top, token: (await listChanges({ root: top })).token, message: 'cp' }), /слияние/);
-  rmSync(path.join(top, '.git', 'MERGE_HEAD'));
+  unlinkSync(path.join(top, '.git', 'MERGE_HEAD'));
   if (process.platform !== 'win32') {
     const { symlinkSync } = await import('node:fs');
     symlinkSync('missing-target', path.join(top, 'link'));
@@ -345,4 +346,17 @@ test('bring-back ignores the project diff.context setting', async () => {
   assert.equal(result.applied, true, JSON.stringify(result));
   assert.equal(text(path.join(top, 'three.txt')), 'one\nTWO\nthree\n');
   await removeWorktree({ basePath: top, root: copy.root });
+});
+
+test('removePath deletes files and folders with Cyrillic and spaces in the path, and says when it cannot', async () => {
+  const { removePath } = await import('../worktree.ts');
+  const dir = path.join(sandbox, 'удаление ё', 'раздел');
+  mkdirSync(path.join(dir, 'вложенная папка'), { recursive: true });
+  writeFileSync(path.join(dir, 'файл.txt'), 'x');
+  writeFileSync(path.join(dir, 'вложенная папка', 'ещё.txt'), 'y');
+  await removePath(path.join(dir, 'файл.txt'));
+  assert.equal(existsSync(path.join(dir, 'файл.txt')), false);
+  await removePath(dir);
+  assert.equal(existsSync(dir), false);
+  await removePath(dir); // already gone is fine
 });
