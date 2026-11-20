@@ -82,7 +82,8 @@ test('a copy survives a failing checkout hook cleanly, and is removed even after
   assert.equal(won.length, 1, JSON.stringify(results.map(r => r.status === "rejected" ? String(r.reason) : "ok")));
   assert.equal(existsSync(path.join(won[0].value.path, 'a.txt')), true);
   // A copy deleted without git, while its base folder was renamed, does not block the next launch with that name.
-  rmSync(won[0].value.root, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
+  const { removePath } = await import('../worktree.ts');
+  await removePath(won[0].value.root);
   // Windows may finish a delete a while after rmSync returns, while a scanner or indexer still holds a handle.
   for (let i = 0; i < 300 && existsSync(won[0].value.root); i++) await new Promise(resolve => setTimeout(resolve, 100));
   const again = await createWorktree({ basePath: path.join(odd, 'sec-renamed'), name: 'race' });
@@ -359,4 +360,92 @@ test('removePath deletes files and folders with Cyrillic and spaces in the path,
   await removePath(dir);
   assert.equal(existsSync(dir), false);
   await removePath(dir); // already gone is fine
+});
+
+test('checkpoint keeps what is only staged, names files a hook added, and sees a submodule move', async () => {
+  const top = path.join(sandbox, 'staged repo');
+  const sh = (cwd: string, ...args: string[]) => execFileSync('git', ['-C', cwd, '-c', 'protocol.file.allow=always', ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+  mkdirSync(top, { recursive: true });
+  writeFileSync(path.join(top, 'config.txt'), 'secret\n');
+  writeFileSync(path.join(top, 'script.sh'), 'echo\n');
+  writeFileSync(path.join(top, 'a.txt'), 'a\n');
+  sh(top, 'init', '-q'); sh(top, 'config', 'user.email', 't@t'); sh(top, 'config', 'user.name', 't'); sh(top, 'config', 'core.autocrlf', 'false');
+  sh(top, 'add', '-A'); sh(top, 'commit', '-qm', 'init');
+  // Untracked on purpose: ignored and removed from the index only. The disk cannot show that; the index can.
+  writeFileSync(path.join(top, '.gitignore'), 'config.txt\n');
+  sh(top, 'rm', '-q', '--cached', 'config.txt');
+  sh(top, 'config', 'core.filemode', 'false');
+  sh(top, 'add', '--chmod=+x', 'script.sh');
+  writeFileSync(path.join(top, 'a.txt'), 'A\n');
+  let listed = await listChanges({ root: top });
+  assert.deepEqual(listed.files.map(f => f.path), ['.gitignore', 'a.txt', 'config.txt', 'script.sh']);
+  const done = await checkpoint({ root: top, token: listed.token, message: 'cp' });
+  assert.equal(done.committed, true);
+  assert.equal(sh(top, 'ls-tree', 'HEAD', 'config.txt'), '', 'the staged deletion is committed');
+  assert.equal(existsSync(path.join(top, 'config.txt')), true, 'the file itself stays on disk');
+  assert.equal(sh(top, 'ls-tree', 'HEAD', 'script.sh').split(' ')[0], '100755', 'the staged executable bit is committed');
+  assert.equal(sh(top, 'status', '--porcelain'), '');
+  // A pre-commit hook that stages another file: the answer names it.
+  const hooks = path.join(sandbox, 'adding-hooks'); mkdirSync(hooks, { recursive: true });
+  writeFileSync(path.join(hooks, 'pre-commit'), '#!/bin/sh\necho generated > b.txt\ngit add b.txt\n', { mode: 0o755 });
+  sh(top, 'config', 'core.hooksPath', hooks);
+  writeFileSync(path.join(top, 'a.txt'), 'A2\n');
+  listed = await listChanges({ root: top });
+  const hooked = await checkpoint({ root: top, token: listed.token, message: 'cp' });
+  assert.deepEqual((hooked as { extra?: string[] }).extra, ['b.txt']);
+  sh(top, 'config', '--unset', 'core.hooksPath');
+  // A submodule moved to another commit after the list: the token no longer matches.
+  const sub = path.join(sandbox, 'sub repo');
+  mkdirSync(sub, { recursive: true });
+  sh(sub, 'init', '-q'); sh(sub, 'config', 'user.email', 't@t'); sh(sub, 'config', 'user.name', 't');
+  for (const n of ['A', 'B', 'C']) { writeFileSync(path.join(sub, 'f.txt'), n); sh(sub, 'add', '-A'); sh(sub, 'commit', '-qm', n); }
+  sh(top, 'submodule', 'add', '-q', sub, 'mod'); sh(top, 'commit', '-qm', 'submodule');
+  sh(path.join(top, 'mod'), 'checkout', '-q', 'HEAD~1');
+  const token = (await listChanges({ root: top })).token;
+  sh(path.join(top, 'mod'), 'checkout', '-q', 'HEAD~1');
+  await assert.rejects(checkpoint({ root: top, token, message: 'cp' }), /поменялись после проверки/);
+});
+
+test('bring-back: a submodule move is refused, a renamed section still comes back, whitespace and an unwritable receipt', async () => {
+  const top = path.join(sandbox, 'moves repo');
+  const sh = (cwd: string, ...args: string[]) => execFileSync('git', ['-C', cwd, '-c', 'user.email=t@t', '-c', 'user.name=t', '-c', 'protocol.file.allow=always', ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
+  mkdirSync(path.join(top, 'sec'), { recursive: true });
+  writeFileSync(path.join(top, 'sec', 'a.md'), 'line\n');
+  sh(top, 'init', '-q'); sh(top, 'config', 'core.autocrlf', 'false'); sh(top, 'config', 'apply.whitespace', 'fix');
+  sh(top, 'add', '-A'); sh(top, 'commit', '-qm', 'init');
+  const base = path.join(top, 'sec');
+  // The worker renames its own section and adds a Markdown hard line break (two trailing spaces).
+  const one = await createWorktree({ basePath: base, name: 'moves-1' });
+  writeFileSync(path.join(one.path, 'a.md'), 'line  \nnext\n');
+  renameSync(one.path, path.join(one.root, 'moved'));
+  const moved = await bringBack({ root: base, copy: one.path });
+  assert.equal(moved.applied, true, JSON.stringify(moved));
+  assert.equal(text(path.join(top, 'moved', 'a.md')), 'line  \nnext\n', 'the trailing spaces survive apply.whitespace=fix');
+  assert.equal(existsSync(path.join(top, 'sec', 'a.md')), false);
+  await removeWorktree({ basePath: top, root: one.root });
+  sh(top, 'add', '-A'); sh(top, 'commit', '-qm', 'moved');
+  // A submodule in the worker's copy moved to another commit: refused with a reason.
+  const sub = path.join(sandbox, 'moves sub');
+  mkdirSync(sub, { recursive: true });
+  sh(sub, 'init', '-q');
+  for (const n of ['A', 'B']) { writeFileSync(path.join(sub, 'f.txt'), n); sh(sub, 'add', '-A'); sh(sub, 'commit', '-qm', n); }
+  sh(top, 'submodule', 'add', '-q', sub, 'mod'); sh(top, 'commit', '-qm', 'submodule');
+  const two = await createWorktree({ basePath: top, name: 'moves-2' });
+  sh(two.path, 'submodule', 'update', '-q', '--init');
+  sh(path.join(two.path, 'mod'), 'checkout', '-q', 'HEAD~1');
+  const refused = await bringBack({ root: top, copy: two.path });
+  assert.equal(refused.applied, false);
+  assert.match(refused.error ?? '', /подмодуль: mod/);
+  await removeWorktree({ basePath: top, root: two.root });
+  if (process.platform !== 'win32' && process.getuid?.() !== 0) {
+    const { chmodSync } = await import('node:fs');
+    const three = await createWorktree({ basePath: top, name: 'moves-3' });
+    writeFileSync(path.join(three.path, 'moved', 'a.md'), 'changed\n');
+    const mark = sh(three.path, 'rev-parse', '--path-format=absolute', '--git-path', 'aif-brought-back');
+    writeFileSync(mark, ''); chmodSync(mark, 0o444);
+    try { await assert.rejects(bringBack({ root: top, copy: three.path }), /недоступна для записи/); }
+    finally { chmodSync(mark, 0o644); }
+    assert.equal(text(path.join(top, 'moved', 'a.md')), 'line  \nnext\n', 'nothing changed before the refusal');
+    await removeWorktree({ basePath: top, root: three.root });
+  }
 });

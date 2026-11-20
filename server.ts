@@ -999,7 +999,8 @@ export default async function plugin(bb: BbPluginApi) {
       }
       const result = await host.call('checkpoint', { root, token, message: `chore(aif): ${planName} · before group ${group}` }, { hostId });
       bb.log.info(`aif-chat: checkpoint threadId=${threadId} committed=${result.committed} files=${result.files.length}`);
-      return { ok: true, data: result, text: result.committed ? `Контрольная точка ${result.sha!.slice(0, 12)}: ${result.files.length} файлов.` : 'Изменений нет, коммит не нужен.' };
+      const extra = result.extra?.length ? `\nХук pre-commit добавил в коммит файлы не из списка: ${result.extra.join(', ')}` : '';
+      return { ok: true, data: result, text: (result.committed ? `Контрольная точка ${result.sha!.slice(0, 12)}: ${result.files.length} файлов.` : 'Изменений нет, коммит не нужен.') + extra };
     }
     if (command === 'spawn-worker') {
       const task = options['--task'], brief = options['--brief'];

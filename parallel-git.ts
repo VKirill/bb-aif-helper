@@ -1,6 +1,6 @@
 import { execFile } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
-import { lstat, mkdir, mkdtemp, readFile, readlink, stat, symlink, writeFile } from 'node:fs/promises';
+import { copyFile, lstat, mkdir, mkdtemp, readFile, readlink, stat, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { withoutManagedBlocks } from './delegation.ts';
@@ -46,7 +46,11 @@ const exists = (p: string) => lstat(p).then(() => true, () => false); // a dangl
 async function onlyBlockRefresh(top: string, file: string): Promise<boolean> {
   const now = await readFile(path.join(top, file), 'utf8').catch(() => null);
   const before = await git(top, ['show', `HEAD:${file}`]).catch(() => null);
-  return now !== null && before !== null && withoutManagedBlocks(now) === withoutManagedBlocks(before);
+  if (now === null || before === null || withoutManagedBlocks(now) !== withoutManagedBlocks(before)) return false;
+  // A changed executable bit is an edit too.
+  const headMode = (await git(top, ['ls-tree', 'HEAD', '--', file]).catch(() => '')).split(' ')[0];
+  const exec = await stat(path.join(top, file)).then(s => (s.mode & 0o111) !== 0, () => false);
+  return process.platform === 'win32' || (headMode === '100755') === exec;
 }
 
 /**
@@ -64,9 +68,13 @@ async function changes(root: string) {
   const hash = createHash('sha256').update(line(await git(r.top, ['rev-parse', '--verify', 'HEAD^{commit}']).catch(() => 'none')));
   for (const c of files) {
     const full = path.join(r.top, c.path);
-    const mode = await lstat(full).then(s => s.isSymbolicLink() ? 'l' : s.mode & 0o111 ? 'x' : '-', () => 'deleted');
+    const mode = await lstat(full).then(s => s.isSymbolicLink() ? 'l' : s.isDirectory() ? 'd' : s.mode & 0o111 ? 'x' : '-', () => 'deleted');
     hash.update(`\0${c.status}\0${c.path}\0${mode}\0`);
-    hash.update((await (mode === 'l' ? readlink(full).then(t => Buffer.from(t)) : readFile(full)).catch(() => null)) ?? '');
+    // A folder in the list is a submodule: its checked-out commit and its dirt are what gets committed.
+    const content = mode === 'l' ? readlink(full).then(t => Buffer.from(t))
+      : mode === 'd' ? git(full, ['rev-parse', 'HEAD']).then(async head => Buffer.from(head + await git(full, ['status', '--porcelain'])))
+      : readFile(full);
+    hash.update((await content.catch(() => null)) ?? '');
   }
   return { ...r, files, plugin, token: hash.digest('hex').slice(0, 32) };
 }
@@ -103,24 +111,34 @@ export async function checkpoint(input: { root: string; token: string; message: 
   if (c.token !== input.token) throw new Error('Изменения в репозитории поменялись после проверки. Запустите checkpoint без --token и проверьте список заново.');
   if (!c.files.length) return { committed: false as const, files: [] as string[] };
   await refuseUnsafe(c.top, c.files);
+  // Only a working-tree change is staged from the disk. What is already staged (a `git rm --cached`, an
+  // `add --chmod=+x`) is taken as staged: the disk cannot always show it.
+  const fromDisk = c.files.filter(f => f.status[1] !== ' ');
   const present: string[] = [], missing: string[] = [];
-  for (const f of c.files) (await exists(path.join(c.top, f.path)) ? present : missing).push(f.path);
+  for (const f of fromDisk) (await exists(path.join(c.top, f.path)) ? present : missing).push(f.path);
   const gitDir = line(await git(c.top, ['rev-parse', '--path-format=absolute', '--git-dir']));
   const index = path.join(gitDir, `aif-checkpoint-${randomUUID()}.index`);
+  const real = line(await git(c.top, ['rev-parse', '--path-format=absolute', '--git-path', 'index']));
   const env = { GIT_INDEX_FILE: index };
+  const hasHead = await git(c.top, ['rev-parse', '--verify', '-q', 'HEAD^{commit}']).then(() => true, () => false);
   try {
-    const hasHead = await git(c.top, ['rev-parse', '--verify', '-q', 'HEAD^{commit}']).then(() => true, () => false);
-    await git(c.top, hasHead ? ['read-tree', 'HEAD'] : ['read-tree', '--empty'], undefined, env);
+    // Start from the real index (every staged entry is in the reviewed list), so the commit is exactly the list.
+    if (await exists(real)) await copyFile(real, index);
+    else await git(c.top, ['read-tree', '--empty'], undefined, env);
     if (missing.length) await git(c.top, ['--literal-pathspecs', 'rm', '-q', '--cached', '--ignore-unmatch', '-r', ...FROM_STDIN], nul(missing), env);
-    if (present.length) await git(c.top, ['--literal-pathspecs', 'add', '-A', ...FROM_STDIN], nul(present), env);
+    if (present.length) await git(c.top, ['--literal-pathspecs', 'add', '-A', '-f', ...FROM_STDIN], nul(present), env);
     await git(c.top, ['commit', '-q', '-m', input.message], undefined, env);
   } finally { await removePath(index).catch(() => undefined); }
   const sha = line(await git(c.top, ['rev-parse', 'HEAD']));
+  // A pre-commit hook may stage more files: they are named, not hidden.
+  const committed = (await git(c.top, ['diff-tree', '--no-commit-id', '--name-only', '-r', '-z', '--no-renames', ...(hasHead ? [] : ['--root']), 'HEAD'])).split('\0').filter(Boolean);
+  const listed = new Set(c.files.map(f => f.path));
+  const extra = committed.filter(f => !listed.has(f));
   // The real index catches up for these paths only: they now match HEAD.
   await git(c.top, ['--literal-pathspecs', 'reset', '-q', ...FROM_STDIN], nul(c.files.map(f => f.path))).catch((cause: Error) => {
     throw new Error(`Коммит ${sha.slice(0, 12)} создан, но индекс не обновился (${cause.message.slice(0, 300)}). Выполните git reset -q -- <эти файлы>, затем продолжайте.`);
   });
-  return { committed: true as const, sha, files: c.files.map(f => f.path) };
+  return { committed: true as const, sha, files: c.files.map(f => f.path), ...(extra.length ? { extra } : {}) };
 }
 
 export async function headCommit(input: { root: string }) {
@@ -161,7 +179,10 @@ export async function bringBack(input: { root: string; copy: string }) {
   const inside = path.relative(worktreesRoot(), copy);
   if (!inside || inside === '..' || inside.startsWith('..' + path.sep) || path.isAbsolute(inside)) throw new Error(`${copy} не копия AI Factory`);
   const mine = await repo(input.root);
-  const theirs = await repo(copy);
+  // The worker may have renamed its own section: git still works from the nearest folder of the copy that exists.
+  let probe = copy;
+  while (!(await exists(probe)) && path.relative(worktreesRoot(), path.dirname(probe)).split(path.sep).length >= 2) probe = path.dirname(probe);
+  const theirs = await repo(probe);
   const common = async (dir: string) => path.resolve(line(await git(dir, ['rev-parse', '--path-format=absolute', '--git-common-dir'])));
   if (await common(mine.top) !== await common(theirs.top)) throw new Error(`${copy} — копия другого репозитория`);
   // The copy's own git folder (one per worktree) remembers the tree that was brought back last.
@@ -172,14 +193,22 @@ export async function bringBack(input: { root: string; copy: string }) {
   const tree = line(await git(theirs.top, ['write-tree']));
   const files = (await git(theirs.top, ['diff', '--cached', '--name-only', '-z', '--no-relative', '--no-renames', base])).split('\0').filter(Boolean);
   if (!files.length) return { applied: false as const, empty: true as const, files };
+  // `git apply` without --index cannot move a submodule: say so instead of reporting a transfer that did not happen.
+  const raw = await git(theirs.top, ['diff', '--cached', '--raw', '-z', '--no-renames', '--no-abbrev', base]);
+  const tokens = raw.split('\0'), gitlinks: string[] = [];
+  for (let i = 0; i + 1 < tokens.length; i += 2) if (/^:(160000 \S+|\S+ 160000) /.test(tokens[i])) gitlinks.push(tokens[i + 1]);
+  if (gitlinks.length) return { applied: false as const, empty: false as const, files, error: `Исполнитель изменил подмодуль: ${gitlinks.join(', ')}. Его не перенести патчем — перенесите вручную.` };
+  // The receipt is written after the apply; a copy where it cannot be written is refused before anything changes.
+  await writeFile(mark, last ? `${last}\n` : '').catch((cause: Error) => { throw new Error(`Копия исполнителя недоступна для записи: ${cause.message}`); });
   const dir = await mkdtemp(path.join(tmpdir(), 'aif-patch-'));
   const patch = path.join(dir, `${randomUUID()}.patch`);
   try {
     await git(theirs.top, [...DIFF, base, `--output=${patch}`]);
-    try { await git(mine.top, ['apply', '--check', patch]); }
+    try { await git(mine.top, ['apply', '--check', '--whitespace=nowarn', patch]); }
     catch (cause) { return { applied: false as const, empty: false as const, files, error: (cause as Error).message }; }
     const saved = await Promise.all(files.map(f => save(mine.top, f)));
-    try { await git(mine.top, ['apply', patch]); }
+    // --whitespace=nowarn: `apply.whitespace=fix` in the project would strip the trailing spaces of a Markdown line break.
+    try { await git(mine.top, ['apply', '--whitespace=nowarn', patch]); }
     catch (cause) {
       const lost: string[] = [];
       for (const s of saved) await restore(mine.top, s).catch(() => lost.push(s.file));
