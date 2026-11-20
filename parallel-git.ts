@@ -1,6 +1,6 @@
 import { execFile } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
-import { copyFile, lstat, mkdir, mkdtemp, readFile, readlink, stat, symlink, writeFile } from 'node:fs/promises';
+import { lstat, mkdir, mkdtemp, readFile, readlink, stat, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { withoutManagedBlocks } from './delegation.ts';
@@ -50,7 +50,8 @@ async function onlyBlockRefresh(top: string, file: string): Promise<boolean> {
   // A changed executable bit is an edit too.
   const headMode = (await git(top, ['ls-tree', 'HEAD', '--', file]).catch(() => '')).split(' ')[0];
   const exec = await stat(path.join(top, file)).then(s => (s.mode & 0o111) !== 0, () => false);
-  return process.platform === 'win32' || (headMode === '100755') === exec;
+  const filemode = (await git(top, ['config', '--type=bool', 'core.filemode']).catch(() => 'true')).trim() !== 'false';
+  return !filemode || (headMode === '100755') === exec;
 }
 
 /**
@@ -85,7 +86,7 @@ export async function listChanges(input: { root: string }) {
 }
 
 /** States in which a commit would not be the coordinator's checkpoint, or would silently drop someone's work. */
-async function refuseUnsafe(top: string, files: Change[]) {
+async function refuseUnsafe(top: string, files: Change[], plugin: Change[]) {
   for (const name of ['MERGE_HEAD', 'CHERRY_PICK_HEAD', 'REVERT_HEAD', 'REBASE_HEAD', 'rebase-merge', 'rebase-apply']) {
     if (await exists(line(await git(top, ['rev-parse', '--path-format=absolute', '--git-path', name]))))
       throw new Error('В репозитории не завершено слияние, rebase или cherry-pick: завершите его, потом снова checkpoint.');
@@ -94,9 +95,10 @@ async function refuseUnsafe(top: string, files: Change[]) {
     throw new Error('Индекс занят другим процессом git (index.lock). Дождитесь его завершения и повторите checkpoint.');
   const conflict = files.find(f => f.status.includes('U') || f.status === 'AA' || f.status === 'DD');
   if (conflict) throw new Error(`В файле ${conflict.path} не разрешён конфликт слияния.`);
-  // Staged and working versions differ: committing either one would silently lose the other.
-  const both = files.find(f => f.status[0] !== ' ' && f.status[0] !== '?' && f.status[1] !== ' ');
-  if (both) throw new Error(`Файл ${both.path} изменён и в индексе, и в рабочей папке по-разному: решите, какая версия нужна (git add или git restore --staged), потом снова checkpoint.`);
+  // Something staged by hand (a `git rm --cached`, an `add --chmod`, a partial `add -p`) is a decision the disk does
+  // not show; the checkpoint does not guess it. The owner or the coordinator commits or unstages it first.
+  const staged = [...files, ...plugin].filter(f => f.status[0] !== ' ' && f.status[0] !== '?').map(f => f.path);
+  if (staged.length) throw new Error(`В индексе уже есть изменения (${staged.slice(0, 5).join(', ')}${staged.length > 5 ? ', …' : ''}): закоммитьте их или уберите из индекса (git restore --staged), потом снова checkpoint.`);
 }
 
 /**
@@ -110,23 +112,20 @@ export async function checkpoint(input: { root: string; token: string; message: 
   const c = await changes(input.root);
   if (c.token !== input.token) throw new Error('Изменения в репозитории поменялись после проверки. Запустите checkpoint без --token и проверьте список заново.');
   if (!c.files.length) return { committed: false as const, files: [] as string[] };
-  await refuseUnsafe(c.top, c.files);
-  // Only a working-tree change is staged from the disk. What is already staged (a `git rm --cached`, an
-  // `add --chmod=+x`) is taken as staged: the disk cannot always show it.
-  const fromDisk = c.files.filter(f => f.status[1] !== ' ');
+  await refuseUnsafe(c.top, c.files, c.plugin);
+  // Nothing is staged (refuseUnsafe), so HEAD plus the listed working-tree changes is exactly the list. A path git
+  // reports deleted is deleted even if a folder of that name appeared (its files are listed on their own), and
+  // nothing is added with -f: an ignored file is never committed.
   const present: string[] = [], missing: string[] = [];
-  for (const f of fromDisk) (await exists(path.join(c.top, f.path)) ? present : missing).push(f.path);
+  for (const f of c.files) (f.status[1] === 'D' || !(await exists(path.join(c.top, f.path))) ? missing : present).push(f.path);
   const gitDir = line(await git(c.top, ['rev-parse', '--path-format=absolute', '--git-dir']));
   const index = path.join(gitDir, `aif-checkpoint-${randomUUID()}.index`);
-  const real = line(await git(c.top, ['rev-parse', '--path-format=absolute', '--git-path', 'index']));
   const env = { GIT_INDEX_FILE: index };
   const hasHead = await git(c.top, ['rev-parse', '--verify', '-q', 'HEAD^{commit}']).then(() => true, () => false);
   try {
-    // Start from the real index (every staged entry is in the reviewed list), so the commit is exactly the list.
-    if (await exists(real)) await copyFile(real, index);
-    else await git(c.top, ['read-tree', '--empty'], undefined, env);
+    await git(c.top, hasHead ? ['read-tree', 'HEAD'] : ['read-tree', '--empty'], undefined, env);
     if (missing.length) await git(c.top, ['--literal-pathspecs', 'rm', '-q', '--cached', '--ignore-unmatch', '-r', ...FROM_STDIN], nul(missing), env);
-    if (present.length) await git(c.top, ['--literal-pathspecs', 'add', '-A', '-f', ...FROM_STDIN], nul(present), env);
+    if (present.length) await git(c.top, ['--literal-pathspecs', 'add', '-A', ...FROM_STDIN], nul(present), env);
     await git(c.top, ['commit', '-q', '-m', input.message], undefined, env);
   } finally { await removePath(index).catch(() => undefined); }
   const sha = line(await git(c.top, ['rev-parse', 'HEAD']));
@@ -134,8 +133,8 @@ export async function checkpoint(input: { root: string; token: string; message: 
   const committed = (await git(c.top, ['diff-tree', '--no-commit-id', '--name-only', '-r', '-z', '--no-renames', ...(hasHead ? [] : ['--root']), 'HEAD'])).split('\0').filter(Boolean);
   const listed = new Set(c.files.map(f => f.path));
   const extra = committed.filter(f => !listed.has(f));
-  // The real index catches up for these paths only: they now match HEAD.
-  await git(c.top, ['--literal-pathspecs', 'reset', '-q', ...FROM_STDIN], nul(c.files.map(f => f.path))).catch((cause: Error) => {
+  // The real index catches up for these paths only (and for what a hook added): they now match HEAD.
+  await git(c.top, ['--literal-pathspecs', 'reset', '-q', ...FROM_STDIN], nul([...c.files.map(f => f.path), ...extra])).catch((cause: Error) => {
     throw new Error(`Коммит ${sha.slice(0, 12)} создан, но индекс не обновился (${cause.message.slice(0, 300)}). Выполните git reset -q -- <эти файлы>, затем продолжайте.`);
   });
   return { committed: true as const, sha, files: c.files.map(f => f.path), ...(extra.length ? { extra } : {}) };
@@ -191,13 +190,21 @@ export async function bringBack(input: { root: string; copy: string }) {
   const base = /^[0-9a-f]{40,64}$/.test(last) && await git(theirs.top, ['cat-file', '-e', `${last}^{tree}`]).then(() => true, () => false) ? last : 'HEAD';
   await git(theirs.top, ['add', '-A']);
   const tree = line(await git(theirs.top, ['write-tree']));
-  const files = (await git(theirs.top, ['diff', '--cached', '--name-only', '-z', '--no-relative', '--no-renames', base])).split('\0').filter(Boolean);
+  const files = (await git(theirs.top, ['diff', '--cached', '--name-only', '-z', '--no-relative', '--no-renames', '--ignore-submodules=none', base])).split('\0').filter(Boolean);
   if (!files.length) return { applied: false as const, empty: true as const, files };
   // `git apply` without --index cannot move a submodule: say so instead of reporting a transfer that did not happen.
-  const raw = await git(theirs.top, ['diff', '--cached', '--raw', '-z', '--no-renames', '--no-abbrev', base]);
+  const raw = await git(theirs.top, ['diff', '--cached', '--raw', '-z', '--no-renames', '--no-abbrev', '--ignore-submodules=none', base]);
   const tokens = raw.split('\0'), gitlinks: string[] = [];
   for (let i = 0; i + 1 < tokens.length; i += 2) if (/^:(160000 \S+|\S+ 160000) /.test(tokens[i])) gitlinks.push(tokens[i + 1]);
   if (gitlinks.length) return { applied: false as const, empty: false as const, files, error: `Исполнитель изменил подмодуль: ${gitlinks.join(', ')}. Его не перенести патчем — перенесите вручную.` };
+  // Bringing back a removal of the coordinator's own folder would leave it working in a folder that no longer exists.
+  if (mine.prefix) {
+    const status = (want: RegExp) => new Set(tokens.flatMap((t, i) => i % 2 === 0 && want.test(t) ? [tokens[i + 1]] : []));
+    const deleted = status(/ D$/), added = [...status(/ [AM]$/)].filter(f => f.startsWith(mine.prefix));
+    const own = (await git(mine.top, ['ls-files', '-z', '--', mine.prefix])).split('\0').filter(Boolean);
+    if (own.length && own.every(f => deleted.has(f)) && !added.length) return { applied: false as const, empty: false as const, files,
+      error: `Исполнитель переименовал или удалил папку ${mine.prefix}, в которой работает этот чат: перенесите это вручную, после остальных задач.` };
+  }
   // The receipt is written after the apply; a copy where it cannot be written is refused before anything changes.
   await writeFile(mark, last ? `${last}\n` : '').catch((cause: Error) => { throw new Error(`Копия исполнителя недоступна для записи: ${cause.message}`); });
   const dir = await mkdtemp(path.join(tmpdir(), 'aif-patch-'));
