@@ -422,7 +422,7 @@ test('a seeded copy works for a section that exists only as uncommitted files; w
   await removeWorktree({ basePath: base, root: copy.root });
 });
 
-test('review of e497ba0: an ignore rule, a force-added file, a submodule the copy never checked out, and gc', async () => {
+test('review of e497ba0: an ignore rule, a force-added file, a submodule the copy never checked out', async () => {
   const top = path.join(sandbox, 'seed-review');
   const sh = (cwd: string, ...args: string[]) => execFileSync('git', ['-C', cwd, '-c', 'user.email=t@t', '-c', 'user.name=t', '-c', 'protocol.file.allow=always', ...args], { encoding: 'utf8' }).trim();
   const lib = path.join(sandbox, 'seed-review-lib');
@@ -443,18 +443,16 @@ test('review of e497ba0: an ignore rule, a force-added file, a submodule the cop
   // The worker ignores the coordinator's file and adds its own: only its own file comes back.
   writeFileSync(path.join(copy.path, '.gitignore'), '*.env\nlocal.txt\n');
   writeFileSync(path.join(copy.path, 'worker.txt'), 'w\n');
-  sh(copy.root, 'gc', '-q', '--prune=now');
   const back = await bringBack({ root: top, copy: copy.path });
   assert.deepEqual([back.error, back.applied, [...back.files].sort()], [undefined, true, ['.gitignore', 'worker.txt']]);
   assert.equal(text(path.join(top, 'local.txt')), 'mine\n', 'the coordinator\'s file survives');
   await removeWorktree({ basePath: top, root: copy.root });
 });
 
-test('review of 9f6867b: a worker\'s add -f comes back, gc from the coordinator keeps the seed, case-only renames', async () => {
+test('review of 9f6867b and 8fa0a42: case-only renames, and a lost seed is refused instead of echoed back', async () => {
   const top = path.join(sandbox, 'seed-review-2');
   const sh = (cwd: string, ...args: string[]) => execFileSync('git', ['-C', cwd, '-c', 'user.email=t@t', '-c', 'user.name=t', ...args], { encoding: 'utf8' }).trim();
   mkdirSync(top, { recursive: true });
-  writeFileSync(path.join(top, '.gitignore'), '*.ignore\n');
   writeFileSync(path.join(top, 'Hello.txt'), 'h\n');
   writeFileSync(path.join(top, 'Keep.txt'), 'k\n');
   sh(top, 'init', '-q'); sh(top, 'add', '-A'); sh(top, 'commit', '-qm', 'init');
@@ -464,15 +462,22 @@ test('review of 9f6867b: a worker\'s add -f comes back, gc from the coordinator 
   if (folds) sh(top, 'mv', 'Hello.txt', 'hello.txt');
   const copy = await createWorktree({ basePath: top, name: 'seed-review-2', seed: true });
   if (folds) assert.ok(readdirSync(copy.path).includes('hello.txt'), 'the coordinator\'s case-only rename reaches the copy');
-  sh(top, 'gc', '-q', '--prune=now');
-  writeFileSync(path.join(copy.path, 'required.ignore'), 'r\n'); sh(copy.root, 'add', '-f', 'required.ignore');
   writeFileSync(path.join(copy.path, 'other.txt'), 'o\n');
-  if (folds) sh(copy.root, 'mv', 'Keep.txt', 'keep.txt');
+  if (folds) {
+    // The worker renamed a file only by case: git apply cannot carry that on this disk, so the plugin says so.
+    renameSync(path.join(copy.path, 'Keep.txt'), path.join(copy.path, 'keep.txt'));
+    const refused = await bringBack({ root: top, copy: copy.path });
+    assert.match(refused.error ?? '', /только регистром/);
+    assert.ok(readdirSync(top).includes('Keep.txt'), 'nothing changed');
+    renameSync(path.join(copy.path, 'keep.txt'), path.join(copy.path, 'Keep.txt'));
+  }
   const back = await bringBack({ root: top, copy: copy.path });
-  assert.deepEqual([back.error, back.applied, [...back.files].sort()],
-    [undefined, true, folds ? ['Keep.txt', 'keep.txt', 'other.txt', 'required.ignore'] : ['other.txt', 'required.ignore']]);
-  assert.equal(text(path.join(top, 'required.ignore')), 'r\n');
-  if (folds) assert.ok(readdirSync(top).includes('keep.txt') && !readdirSync(top).includes('Keep.txt'), 'the worker\'s case-only rename comes back');
+  assert.deepEqual([back.error, back.applied, back.files], [undefined, true, ['other.txt']]);
+  // A receipt naming a tree git no longer has: refused, the coordinator's own work is not sent back as the worker's.
+  const mark = sh(copy.root, 'rev-parse', '--path-format=absolute', '--git-path', 'aif-brought-back');
+  writeFileSync(mark, 'f'.repeat(40) + '\n');
+  writeFileSync(path.join(copy.path, 'more.txt'), 'm\n');
+  assert.match((await bringBack({ root: top, copy: copy.path })).error ?? '', /Базовое состояние копии исполнителя потеряно/);
+  assert.equal(existsSync(path.join(top, 'more.txt')), false);
   await removeWorktree({ basePath: top, root: copy.root });
-  assert.equal(sh(top, 'for-each-ref', 'refs/aif-worktrees/'), '', 'the gc ref goes with the copy');
 });

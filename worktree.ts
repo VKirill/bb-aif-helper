@@ -1,6 +1,6 @@
 import { execFile } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { copyFile, lstat, mkdir, mkdtemp, readdir, rm, rmdir, stat, unlink, writeFile } from 'node:fs/promises';
+import { copyFile, lstat, mkdir, mkdtemp, readdir, rm, rmdir, stat, unlink, utimes, writeFile } from 'node:fs/promises';
 import { homedir, tmpdir } from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
@@ -50,10 +50,14 @@ export type CreatedWorktree = { root: string; path: string; sha: string };
 /** In a copy's own git folder: the tree of its last bring-back, or of the coordinator's work it was seeded with. */
 export const BROUGHT_BACK = 'aif-brought-back';
 
-/** The shared ref that keeps a copy's baseline tree out of `git gc`, also one run from the coordinator's folder. */
-const keepRef = (root: string) => `refs/aif-worktrees/${path.basename(root)}`;
-export async function keepTree(copyTop: string, tree: string) {
-  await git(copyTop, ['update-ref', keepRef(copyTop), tree]).catch(() => '');
+/**
+ * A git index copied to a temporary file keeps its modification time: git trusts a file's cached stat only when the
+ * file is older than the index, so a fresh time would hide an edit made in the same second that kept the size.
+ */
+export async function copyIndex(from: string, to: string) {
+  const info = await stat(from);
+  await copyFile(from, to);
+  await utimes(to, info.atime, info.mtime);
 }
 
 /**
@@ -71,14 +75,13 @@ async function seed(top: string, root: string, sha: string) {
     // The temporary index starts as a copy of the coordinator's own: what it staged by hand (a force-added ignored
     // file, a case-only rename, a removal from the index) is part of its work too.
     const index = await git(top, ['rev-parse', '--path-format=absolute', '--git-path', 'index']);
-    await copyFile(index, env.GIT_INDEX_FILE).catch(() => inTemp(['read-tree', sha]));
+    await copyIndex(index, env.GIT_INDEX_FILE).catch(() => inTemp(['read-tree', sha]));
     await inTemp(['-c', 'core.fsmonitor=false', 'add', '-A']);
     const tree = (await inTemp(['write-tree'])).stdout.trim();
     // --reset, not a two-tree merge: the fresh copy has nothing to keep, and a merge refuses a case-only rename on a
     // case-insensitive disk (`hello.txt` "would be overwritten" by itself).
     await git(root, ['read-tree', '--reset', '-u', tree]);
     await writeFile(await git(root, ['rev-parse', '--path-format=absolute', '--git-path', BROUGHT_BACK]), `${tree}\n`);
-    await keepTree(root, tree);
   } finally { await removePath(dir).catch(() => undefined); }
 }
 
@@ -144,7 +147,6 @@ export async function removeWorktree(input: { basePath: string; root: string }):
       if (await git(root, ['rev-parse', '--git-dir']).then(() => true, () => false)) throw cause;
     });
   } else await git(input.basePath, ['worktree', 'remove', '--force', root]).catch(() => '');
-  if (common) await run('git', ['--git-dir', common, 'update-ref', '-d', keepRef(root)], { timeout: 120_000 }).catch(() => '');
   await removePath(root);
   return { removed: true };
 }

@@ -1,9 +1,9 @@
 import { execFile } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { chmod, copyFile, lstat, mkdir, mkdtemp, readdir, readFile, readlink, stat, symlink, writeFile } from 'node:fs/promises';
+import { chmod, lstat, mkdir, mkdtemp, readdir, readFile, readlink, stat, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { BROUGHT_BACK, keepTree, removePath, worktreesRoot } from './worktree.ts';
+import { BROUGHT_BACK, copyIndex, removePath, worktreesRoot } from './worktree.ts';
 
 // Git steps of parallel /aif-implement that the coordinator used to type by hand. Paths never pass through a shell or
 // an agent's copy and paste: git prints them NUL-separated and reads them back NUL-separated, so spaces, Cyrillic,
@@ -80,7 +80,11 @@ export async function bringBack(input: { root: string; copy: string }) {
   // work the copy was seeded with: only the worker's own changes come back.
   const mark = line(await git(theirs.top, ['rev-parse', '--path-format=absolute', '--git-path', BROUGHT_BACK]));
   const last = (await readFile(mark, 'utf8').catch(() => '')).trim();
-  const base = /^[0-9a-f]{40,64}$/.test(last) && await git(theirs.top, ['cat-file', '-e', `${last}^{tree}`]).then(() => true, () => false) ? last : 'HEAD';
+  // No receipt: a copy made without a seed, whose base is its commit. A receipt whose tree git no longer has (pruned)
+  // is refused: diffing from HEAD would send the coordinator's own work back as the worker's.
+  if (last && !(/^[0-9a-f]{40,64}$/.test(last) && await git(theirs.top, ['cat-file', '-e', `${last}^{tree}`]).then(() => true, () => false)))
+    return { applied: false as const, empty: false as const, files: [], error: 'Базовое состояние копии исполнителя потеряно: перезапустите задачу новым исполнителем.' };
+  const base = last || 'HEAD';
   // The worker's state is staged in a temporary index that starts as a copy of the copy's own index (the seed tree
   // plus whatever the worker staged: `add -f`, a case-only `git mv`): a file of the base stays tracked even if the
   // worker's .gitignore now matches it, and a submodule the copy never checked out keeps its commit, so neither reads
@@ -90,7 +94,7 @@ export async function bringBack(input: { root: string; copy: string }) {
   const env = { GIT_INDEX_FILE: path.join(dir, 'index') };
   const inCopy = (args: string[]) => git(theirs.top, args, undefined, env);
   const index = line(await git(theirs.top, ['rev-parse', '--path-format=absolute', '--git-path', 'index']));
-  await copyFile(index, env.GIT_INDEX_FILE).catch(() => inCopy(['read-tree', base]));
+  await copyIndex(index, env.GIT_INDEX_FILE).catch(() => inCopy(['read-tree', base]));
   await inCopy(['-c', 'core.fsmonitor=false', 'add', '-A']);
   const tree = line(await inCopy(['write-tree']));
   const files = (await inCopy(['diff', '--cached', '--name-only', '-z', '--no-relative', '--no-renames', '--ignore-submodules=none', base])).split('\0').filter(Boolean);
@@ -121,6 +125,13 @@ export async function bringBack(input: { root: string; copy: string }) {
       return { applied: false as const, empty: false as const, files,
         error: `Исполнитель переименовал или удалил папку ${mine.prefix}, в которой работает этот чат: перенесите это вручную, после остальных задач.` };
   }
+  // On a disk that ignores case (Windows, macOS) `git apply` cannot rename a file only by case: it sees the new name
+  // as already there. Said plainly instead of a raw git error.
+  if ((await git(mine.top, ['config', '--type=bool', 'core.ignorecase']).catch(() => '')).trim() === 'true') {
+    const lower = new Map<string, string>();
+    for (const f of files) { const k = f.toLowerCase(), seen = lower.get(k); if (seen && seen !== f) return { applied: false as const, empty: false as const, files,
+      error: `Исполнитель переименовал файл только регистром (${seen} ↔ ${f}): на этом диске git так не переносит. Перенесите это переименование вручную.` }; lower.set(k, f); }
+  }
   // The receipt is written after the apply; a copy where it cannot be written is refused before anything changes.
   await writeFile(mark, last ? `${last}\n` : '').catch((cause: Error) => { throw new Error(`Копия исполнителя недоступна для записи: ${cause.message}`); });
   const patch = path.join(dir, `${randomUUID()}.patch`);
@@ -144,7 +155,6 @@ export async function bringBack(input: { root: string; copy: string }) {
     catch (cause) { return undo((cause as Error).message); }
     if (folder) await chmod(path.resolve(input.root), folder.mode & 0o7777).catch(() => undefined);
     await writeFile(mark, `${tree}\n`);
-    await keepTree(theirs.top, tree);
     return { applied: true as const, files };
   }
   } finally { await removePath(dir).catch(() => undefined); }

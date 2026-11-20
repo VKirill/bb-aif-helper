@@ -48,7 +48,7 @@ test('spawn-worker starts the owner model on a fresh copy seeded with the coordi
     assert.equal(args.environment.inputs.basePath, ROOT, 'a Windows path with a space and Cyrillic arrives as is');
     assert.equal(args.environment.inputs.ref, 'c'.repeat(40));
     assert.equal(args.environment.inputs.seed, true, 'the copy gets the uncommitted work of earlier tasks');
-    assert.match(args.prompt, /never revert, stash or reset it/);
+    assert.match(args.prompt, /Change files only: do not run git commands that change the index/);
     assert.match(args.environment.inputs.name, /^demo-2-[0-9a-f]{8}$/);
     assert.deepEqual(args.environment.machine, { type: 'existing', hostId: 'host_win' });
     assert.deepEqual([args.providerId, args.model, args.reasoningLevel, args.serviceTier], ['codex', 'gpt-6.2-sol', 'high', 'fast']);

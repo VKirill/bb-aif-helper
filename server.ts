@@ -994,7 +994,7 @@ export default async function plugin(bb: BbPluginApi) {
       const { sha } = await host.call('headCommit', { root }, { hostId });
       // A fresh suffix per launch: a retry never collides with a copy BB has not removed yet.
       const name = `${planName}-${task}-${randomUUID().slice(0, 8)}`;
-      const prompt = `${text.trim()}\n\nYou work in your own copy of the project: the folder BB opened this thread in. Before any change run \`git rev-parse --show-toplevel\`; if it fails, \`cd\` into that folder first. The copy already holds the coordinator's uncommitted work from earlier tasks: \`git status\` shows it as changes. Keep it; never revert, stash or reset it. If dependencies are missing, install them first. Do not commit.`;
+      const prompt = `${text.trim()}\n\nYou work in your own copy of the project: the folder BB opened this thread in. Before any change run \`git rev-parse --show-toplevel\`; if it fails, \`cd\` into that folder first. The copy already holds the coordinator's uncommitted work from earlier tasks: \`git status\` shows it as changes. Keep it. Change files only: do not run git commands that change the index or the history (\`git add\`, \`rm\`, \`mv\`, \`stash\`, \`reset\`, \`checkout\`, \`restore\`, \`commit\`); the coordinator takes your changes from the files. If dependencies are missing, install them first. Do not commit.`;
       const spawned = await bb.sdk.threads.spawn({
         projectId: thread.projectId, origin: 'plugin', title: `AIF · ${planName} · ${task}`, prompt,
         environment: { type: 'provider', environmentProviderId: WORKTREE_PROVIDER_ID, inputs: { basePath: root, name, ref: sha, seed: true }, machine: { type: 'existing', hostId } },
