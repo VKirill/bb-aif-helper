@@ -195,7 +195,7 @@ function WorkflowCard({ threadId, initialTarget = '', phase = 'unknown', openFil
   const primaryId = snapshot && (snapshot.actions.find(a => a.group === 'next' && a.available)
     ?? snapshot.actions.find(a => a.group === 'maintenance' && a.available && !updateInVersionDetails(snapshot, a.id) && !contextSetupInDetails(snapshot, a.id) && !(delegation && readinessActionIds.has(a.id))))?.id;
   const renderAction = (a: Action) => <Hint key={a.id} text={`${a.reason}\n${a.command}`}><Button type="button" size="sm" variant={a.id === primaryId ? 'default' : 'outline'}
-    disabled={sending || busy || !a.available} onClick={() => {
+    className="h-auto min-h-8 max-w-full whitespace-normal py-1.5 text-left" disabled={sending || busy || !a.available} onClick={() => {
       if (a.id === 'basic-explore') { setResearchOpen(true); setError(''); setNotice(''); } else void run(a);
     }}>
     <ActionIcon id={a.id} command={a.command} />{a.label}{!a.available && unavailableSuffix(a)}</Button></Hint>;
@@ -727,18 +727,18 @@ function ReadinessSection({ snapshot, run, busy, sending, setReadinessSkip }: {
         ? <Button type="button" size="sm" variant="ghost" className={cn(small, 'shrink-0 text-muted-foreground')} aria-label={`Пропустить: ${s.label}`} disabled={pendingSkip !== null} onClick={() => void toggleSkip(s, true)}>Пропустить</Button>
         : null;
     return <li key={s.id} className="flex min-h-11 flex-col justify-center py-2">
-      <div className="flex items-center gap-2">
+      <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
         <Icon name={iconFor(s)} aria-label={stateLabel(s)} className={cn('size-4 shrink-0', s.state === 'done' ? 'text-primary' : 'text-muted-foreground')} />
-        <span className="min-w-0 flex-1 text-sm">
+        <span className="min-w-[9rem] flex-1 text-sm">
           <button type="button" aria-expanded={help === s.id} onClick={toggleHelp}
             className={cn('cursor-pointer text-left [overflow-wrap:normal] break-words', s.state === 'todo' ? 'font-medium' : 'text-muted-foreground')}>
             <span className="mr-1.5 text-xs tabular-nums text-muted-foreground">{n}.</span>{s.label}
           </button>
           {readinessHelp[s.id] && <HelpMark label={`Что делает шаг «${s.label}»`} open={help === s.id} onToggle={toggleHelp} />}
         </span>
-        {skip}
+        {(skip || action) && <span className="ml-auto flex shrink-0 items-center gap-1">{skip}
         {action && <Hint text={`${action.reason}\n${action.command}`}><Button type="button" size="sm" variant={isNext ? 'default' : 'outline'} className={cn(small, 'shrink-0')}
-          aria-label={`Запустить: ${s.label}`} disabled={sending || busy || !action.available} onClick={() => void run(action)}>Запустить</Button></Hint>}
+          aria-label={`Запустить: ${s.label}`} disabled={sending || busy || !action.available} onClick={() => void run(action)}>Запустить</Button></Hint>}</span>}
       </div>
       {help === s.id && <div className="ml-6 rounded-md bg-muted px-3 py-2 text-xs">
         <p className="m-0">{readinessHelp[s.id]}</p>
@@ -784,7 +784,7 @@ function CardVisibility({ cardId, threadId, initialTarget, phase, openFile, onSu
   return state === 'current' ? <WorkflowCard threadId={threadId} initialTarget={initialTarget} phase={phase} openFile={openFile} inline /> : null;
 }
 function ContextCard({ threadId }: ExperimentalThreadContextCardProps) { return <WorkflowCard threadId={threadId} compact />; }
-function WorkflowPanel({ threadId, environment }: ExperimentalThreadTabProps) { return <SurfaceProvider value="panel"><div className="aif-panel h-full min-h-0 overflow-y-auto overscroll-contain bg-muted/40 @container/aif px-3 pt-3 pb-[max(1rem,env(safe-area-inset-bottom))]"><WorkflowCard key={threadId} threadId={threadId} environmentId={environment?.id ?? null} compact delegation /></div></SurfaceProvider>; }
+function WorkflowPanel({ threadId, environment }: ExperimentalThreadTabProps) { return <SurfaceProvider value="panel"><div className="aif-panel h-full min-h-0 overflow-y-auto overflow-x-hidden overscroll-contain bg-muted/40 @container/aif px-3 pt-3 pb-[max(1rem,env(safe-area-inset-bottom))]"><WorkflowCard key={threadId} threadId={threadId} environmentId={environment?.id ?? null} compact delegation /></div></SurfaceProvider>; }
 function SuggestedCommands() {
   const composer = useComposer();
   return composer.scope.kind === 'thread' ? <SuggestionBar key={composer.scope.threadId} threadId={composer.scope.threadId} composer={composer} composerBusy={composer.isRunning || composer.isSubmitting} /> : null;

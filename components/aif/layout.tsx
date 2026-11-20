@@ -60,7 +60,7 @@ export function Callout({ tone = 'info', role, children }: { tone?: 'info' | 'er
 export function Hint({ text, children }: { text?: string; children: ReactElement }) {
   if (!text) return children;
   return <TooltipProvider delayDuration={300}><Tooltip>
-    <TooltipTrigger asChild><span className="inline-flex">{children}</span></TooltipTrigger>
+    <TooltipTrigger asChild><span className="inline-flex max-w-full">{children}</span></TooltipTrigger>
     <TooltipContent className="whitespace-pre-line">{text}</TooltipContent>
   </Tooltip></TooltipProvider>;
 }
