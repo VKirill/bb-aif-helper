@@ -670,7 +670,7 @@ test('AIFHub context button is analyze and obeys busy-state disabling', async ()
 function suggestedData() { return { sourceKey: 'c'.repeat(64), fingerprint: 'a'.repeat(64), threadState: 'idle', items: ['aif-architecture', 'aif-roadmap'].map(id => ({ id, command: `$${id}`, available: true, reason: 'Из последнего ответа' })) }; }
 const banner = app.composerCustomizations.find(c => c.id === 'suggested-commands')!.banners![0];
 
-test('apply-all can answer an improve confirmation while ordinary navigation stays disabled and draft remains intact', { skip: 'Task 11' }, async () => {
+test('apply-all can answer an improve confirmation while ordinary navigation stays disabled and draft remains intact', async () => {
   let dismissed = false; let sends = 0;
   const proposal = { id: 'apply-improvements', label: 'Применить всё', kind: 'improve-approval', command: 'Применить предложенные улучшения плана demo.', available: true, reason: 'Только предложенный diff' };
   const slot = renderSlot(banner, {}, { composer: { scope: { kind: 'thread', threadId: 'thr_test' }, text: 'Мой черновик' }, rpc: {
@@ -843,7 +843,7 @@ test('string blocker gates render valid collapsed JSON and show both blocking fi
   } finally { slot.lifecycle.unmount(); }
 });
 
-test('disabled suggestions show the missing skill visibly on mobile while sync remains clickable', { skip: 'Task 11' }, async () => {
+test('disabled suggestions show the missing skill visibly on mobile while sync remains clickable', async () => {
   const reason = 'Команда aif-commit не установлена для codex. Добавьте этот skill в установку AI Factory проекта.';
   let sends = 0;
   const slot = renderSlot(banner, {}, { composer: { scope: { kind: 'thread', threadId: 'thr_test' } }, rpc: {
@@ -862,7 +862,7 @@ test('disabled suggestions show the missing skill visibly on mobile while sync r
   } finally { slot.lifecycle.unmount(); }
 });
 
-test('a valid FAIL with trailing summary shows a format note, both blockers and fix without an invalid-gate alert', { skip: 'Task 11' }, async () => {
+test('a valid FAIL with trailing summary shows a format note, both blockers and fix without an invalid-gate alert', async () => {
   const gate = { schema_version: 1, gate: 'review', status: 'fail', blocking: true,
     blockers: [{ id: 'windows-project-path-prefix', severity: 'error', summary: 'Windows paths do not match.' },
       { id: 'worker-failure-aborts-run-burns-attempts', severity: 'error', summary: 'Sibling attempts are consumed.' }],

@@ -53,3 +53,6 @@
 /* Plan document typography (upstream) */
 .aif-plan-markdown{font-size:14px;line-height:1.65}.aif-plan-markdown h1{font-size:22px;line-height:1.3}.aif-plan-markdown h2{font-size:17px;border-top:1px solid var(--border);padding-top:16px;margin-top:24px}.aif-plan-markdown pre{overflow:auto;max-width:100%}
 @media(max-width:600px){.aif-plan-document{padding:14px}.aif-plan-markdown{font-size:13px}.aif-plan-markdown h1{font-size:19px}}
+.aif-suggestion-entry{max-width:100%}
+.aif-suggestion-reason{font-size:11px;line-height:15px;margin:4px 0 0;color:var(--muted-foreground);max-width:36rem}
+.aif-suggestion-run svg{flex-shrink:0;width:14px;height:14px}

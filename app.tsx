@@ -822,13 +822,14 @@ function SuggestionBar({ threadId, composer, composerBusy }: { threadId: string;
   if (!data?.items.length && !data?.gate && !data?.gateError && !error && !notice) return null;
   return <section className="aif-suggestions" aria-label="Команды из последнего ответа агента">
     {(data?.gate || data?.gateError) && <div className={`aif-message-gate${data.gate?.blocking || data.gateError ? ' aif-message-gate-blocking' : ''}`} role="group" aria-label="Gate из последнего ответа">
-      {data.gate && <><div className="aif-message-gate-heading"><strong>{data.gate.gate} · {data.gate.status.toUpperCase()} в ответе</strong><span>{data.gate.blocking ? 'Блокирует следующий этап' : 'Не блокирует'}</span></div>
+      {data.gate && <><div className="aif-message-gate-heading"><strong>{data.gate.gate} · {data.gate.status.toUpperCase()} в ответе</strong><span>{data.gate.blocking ? 'Блокирует следующий этап' : data.gateWarning ? 'Переход не подтверждён' : 'Не блокирует'}</span></div>
         <p className="aif-muted aif-small">Заявленный результат из чата. Актуальность отчёта для текущих файлов проверяет владелец workflow.</p>
         {data.gate.blockers.length ? <details open><summary>Блокирующие проблемы · {data.gate.blockers.length}</summary><ul>{data.gate.blockers.map((b, i) => <li key={`${b.id}-${i}`}><strong>{b.id}</strong> <span className="aif-muted">· {b.severity}</span><p>{b.summary}</p>{b.file && <code>{b.file}</code>}</li>)}</ul></details> : <p className="aif-small">Блокирующих проблем нет.</p>}
         {data.gate.suggested_next?.reason && <p className="aif-small"><strong>{data.gate.suggested_next.command ? 'Следующий шаг: ' : 'Пояснение: '}</strong>{data.gate.suggested_next.reason}</p>}
         {!!data.gate.affected_files.length && <details><summary>Затронутые файлы · {data.gate.affected_files.length}</summary><ul>{data.gate.affected_files.map((file, i) => <li key={i}><code>{file}</code></li>)}</ul></details>}
       </>}
       {data.gateError && <p className="aif-error" role="alert">Некорректный gate: {data.gateError}</p>}
+      {data.gateWarning && <p className="aif-muted aif-small" role="note">Формат ответа: {data.gateWarning}</p>}
     </div>}
     {!!data?.items.length && (() => {
       const scored = data.items.some(i => typeof i.probability === 'number');
@@ -836,14 +837,20 @@ function SuggestionBar({ threadId, composer, composerBusy }: { threadId: string;
       const topId = scored ? items[0].id : null;
       return <><span className="aif-suggestions-label">{data.origin === 'plan' ? 'Следующий шаг по плану' : 'Из ответа агента'}</span><div className="aif-suggestion-list">{items.map(item => {
         const pct = typeof item.probability === 'number' ? chipPercent(item.probability) : null;
-        const label = `${pct ? `${pct} ` : ''}${item.command}`;
-        return <div className={cn('aif-suggestion', item.id === topId && 'aif-suggestion-top')} key={item.id}>
-          <button type="button" className="aif-suggestion-run" disabled={working || busy || !item.available}
-            title={busy ? 'Дождитесь завершения текущей работы' : composer.isEmpty ? `${item.command}\n${item.reason}` : `${item.command} + ваш текст из поля`}
-            aria-label={composer.isEmpty ? (pct ? label : undefined) : `${label} + ваш текст из поля`}
-            onClick={() => void act(item.id, false)}>{pct && <span className="aif-suggestion-score">{pct}</span>}<span className="aif-suggestion-command">{item.command}</span></button>
-          <button type="button" className="aif-suggestion-dismiss" disabled={working} aria-label={`Удалить предложение ${item.command}`} title="Убрать из предложений этого ответа" onClick={() => void act(item.id, true)}>×</button>
-        </div>;
+        const text = item.label ?? item.command;
+        const label = `${pct ? `${pct} ` : ''}${text}`;
+        // "Применить всё" answers the agent's own question: it may run while the thread waits for input, and the server sends it.
+        const approval = item.kind === 'improve-approval';
+        const enabled = !working && item.available && (approval ? !composerBusy && data.threadState === 'awaiting_input' : !busy);
+        // Only a chip that can run takes the draft along; the server-sent approval never touches it.
+        const takesDraft = enabled && !approval && !composer.isEmpty;
+        return <div className="aif-suggestion-entry" key={item.id}><div className={cn('aif-suggestion', item.id === topId && 'aif-suggestion-top')}>
+          <button type="button" className="aif-suggestion-run" disabled={!enabled}
+            title={approval ? item.reason : busy ? 'Дождитесь завершения текущей работы' : takesDraft ? `${item.command} + ваш текст из поля` : `${item.command}\n${item.reason}`}
+            aria-label={takesDraft ? `${label} + ваш текст из поля` : pct ? label : undefined}
+            onClick={() => void act(item.id, false)}><ActionIcon id={approval ? 'apply-improvements' : item.id} command={item.command} />{pct && <span className="aif-suggestion-score">{pct}</span>}<span className="aif-suggestion-command">{text}</span></button>
+          <button type="button" className="aif-suggestion-dismiss" disabled={working} aria-label={`Удалить предложение ${text}`} title="Убрать из предложений этого ответа" onClick={() => void act(item.id, true)}>×</button>
+        </div>{!item.available && <p className="aif-suggestion-reason" role="note">{item.reason}</p>}</div>;
       })}</div></>;
     })()}
     {error && <p className="aif-error" role="alert">{error}</p>}
