@@ -18,8 +18,10 @@ export type PlanTask = {
 
 const TASK_LINE = /^\s*- \[([ xX])\] Task (\d+):\s*(.*)$/;
 const COMMIT_MARKER = '<!-- aif:task-kind:commit -->';
-const DEPLOY_PREFIXES = ['выкатка', 'выкатить', 'отправить', 'deploy', 'publish', 'release', 'push'];
-const FILES_END = /Depends on|Логи:|Logs:/;
+const DEPLOY_PREFIXES = ['выкатка', 'выкатить', 'deploy', 'publish', 'release', 'push'];
+// A rollout named anywhere in the title ("Отправить ветку в `origin` и выкатить"), not only at its start.
+const DEPLOY_WORDS = /выкат|\bdeploy|\bgit push\b|в `?origin`?/i;
+const FILES_END = /depends on|Логи:|Logs:/i;
 const FILE_RANGE = /(\d+)\s*[-–]\s*(\d+)/g;
 const FILE_SINGLE = /\d+/g;
 const FILE_TOKEN = /`([^`]+)`/g;
@@ -30,7 +32,9 @@ type DependsHint = { ids: number[]; ranges: [number, number][] } | 'none' | null
 function parseDependsOn(line: string): DependsHint {
   // The hint is the last occurrence: a task description may mention `Depends on` earlier.
   // AI Factory writes `(depends on 1, 2)` in the task line; hand-written plans use `Depends on: Task 3` below it.
-  const all = [...line.matchAll(/depends on\s*:?\s*([^.;`\n]*)/gi)];
+  // Only a list of task numbers, `none`/`нет` or a dash counts: prose such as "depends on the new model" or
+  // "(depends on 1) for Node 22" must not add or erase dependencies.
+  const all = [...line.matchAll(/depends on\s*:?\s*((?:tasks?\s*)?\d+(?:\s*(?:,|[-–]|and|&)\s*(?:tasks?\s*)?\d+)*|none\b|нет\b|[—–-](?!\s*\d))/gi)];
   const m = all[all.length - 1];
   if (!m) return null;
   const cap = m[1].trim();
@@ -65,17 +69,30 @@ function resolveDependsOn(hint: DependsHint, known: ReadonlySet<number>): PlanTa
 }
 
 function parseFiles(text: string): string[] | null {
-  // The hint is the last `Files:` line: a task description may mention `Files:` earlier.
-  const at = text.lastIndexOf('Files:');
-  if (at === -1) return null;
-  let sub = text.slice(at + 'Files:'.length).split('\n')[0];
+  // The hint is the last `Files:` in the task line, or the last line under the task that starts with `Files:`
+  // (`  - Files: …`). A `Files:` inside a sentence of the description is prose, not the list.
+  const [head, ...rest] = text.split('\n');
+  let sub: string | null = null;
+  const at = head.lastIndexOf('Files:');
+  if (at !== -1) sub = head.slice(at + 'Files:'.length);
+  for (const l of rest) {
+    const m = /^\s*(?:[-*]\s+)?Files:(.*)$/.exec(l);
+    if (m) sub = m[1];
+  }
+  if (sub === null) return null;
   const end = sub.search(FILES_END);
   if (end !== -1) sub = sub.slice(0, end);
-  // A note after a file (`(delete)`, `(секция \`name\`)`) is not a file.
-  sub = sub.replace(/\([^()]*\)/g, ' ');
   const quoted = sub.includes('`');
-  const tokens = quoted ? [...sub.matchAll(FILE_TOKEN)].map(m => m[1])
-    : sub.split(',').map(t => t.trim().replace(/[.;]$/, '')).filter(Boolean);
+  let tokens: string[];
+  if (quoted) {
+    tokens = [...sub.matchAll(FILE_TOKEN)].map(m => m[1]);
+    // Plain paths next to quoted ones would be dropped: the list is then unknown, and the task runs alone.
+    const outside = sub.replace(FILE_TOKEN, ' ').replace(/\([^()]*\)/g, ' ');
+    if (/[\w-]+[./\\][\w./\\-]+/.test(outside)) return null;
+  } else {
+    // A note after a file (`(delete)`, `(new)`) is not a file.
+    tokens = sub.replace(/\([^()]*\)/g, ' ').split(',').map(t => t.trim().replace(/[.;]$/, '')).filter(Boolean);
+  }
   const files: string[] = [];
   for (const token of tokens) {
     if (BAD_FILE.test(token)) return null;
@@ -121,16 +138,19 @@ export function parsePlanTasks(text: string): PlanTask[] {
     if (m) {
       const title = m[3];
       const kind: PlanTaskKind = prev.trim() === COMMIT_MARKER ? 'commit'
-        : DEPLOY_PREFIXES.some(p => title.toLowerCase().startsWith(p)) ? 'deploy' : 'code';
+        : DEPLOY_PREFIXES.some(p => title.toLowerCase().startsWith(p)) || DEPLOY_WORDS.test(title) ? 'deploy' : 'code';
       tasks.push({ id: Number(m[2]), done: m[1].toLowerCase() === 'x', title, files: null, dependsOn: null,
         phase: Math.max(1, headings), order: tasks.length, kind });
       bodies.push(line);
       open = true;
+    } else if (line.trimStart().startsWith('#')) {
+      // A heading, indented or not, closes the task; `###` starts a phase.
+      open = false;
+      if (line.trimStart().startsWith('### ')) headings++;
     } else if (open && /^\s/.test(line)) {
       bodies[bodies.length - 1] += `\n${line}`;
     } else {
       open = false;
-      if (line.trimStart().startsWith('### ')) headings++;
     }
     prev = line;
   }

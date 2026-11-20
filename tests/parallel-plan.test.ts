@@ -186,7 +186,7 @@ test('the AI Factory plan format: (depends on …) in the task line, Files: on a
     '- [ ] Task 6: Hand-written',
     '  - Files: `src/six.ts`',
     '  - Depends on: Task 3',
-    '- [ ] Task 7: Отправить релиз в origin (depends on 6)',
+    '- [ ] Task 7: Выкатить релиз в origin (depends on 6)',
     'Not indented: closes the task. Files: `src/not-a-task-file.ts`',
   ].join('\n');
   const t = parsePlanTasks(plan);
@@ -198,4 +198,29 @@ test('the AI Factory plan format: (depends on …) in the task line, Files: on a
   const groups = parallelGroups(plan, 4);
   assert.ok(!('error' in groups));
   assert.deepEqual(groups.groups[0], [1, 2], 'tasks 1 and 2 run together');
+});
+
+test('prose under a task never changes its files or dependencies; headings and mixed lists are safe', () => {
+  const groups = (plan: string) => { const g = parallelGroups(plan, 4); assert.ok(!('error' in g), JSON.stringify(g)); return g.groups; };
+  // "depends on" in a verification sentence does not erase the declared dependency.
+  assert.deepEqual(groups(['## Tasks', '- [ ] Task 1: Model. Files: `a.ts`.', '- [ ] Task 2: Service. Files: `b.ts`. Depends on 1.',
+    '  - Verify that the service depends on the new model.'].join('\n')), [[1], [2]]);
+  // `Files:` inside a sentence is not the list: both tasks still share src/list.ts.
+  assert.deepEqual(groups(['## Tasks', '- [ ] Task 1: List', '  - Files: `src/list.ts`',
+    '  - Verify the output starts with "Files:" in `tests/list.test.ts`', '- [ ] Task 2: Other', '  - Files: `src/list.ts`'].join('\n')), [[1], [2]]);
+  // Words after the dependency are not task ids.
+  assert.deepEqual(groups(['## Tasks', '- [ ] Task 1: Base. Files: `a.ts`.', '- [ ] Task 2: Add the adapter (depends on 1) for Node 22. Files: `b.ts`.'].join('\n')), [[1], [2]]);
+  // An ordinary task that sends an e-mail is code, not a deployment.
+  const mail = parallelGroups(['## Tasks', '- [ ] Task 1: Отправить письмо после регистрации. Files: `mail.ts`.', '- [ ] Task 2: Форма. Files: `form.ts`.'].join('\n'), 4);
+  assert.ok(!('error' in mail)); assert.deepEqual(mail.coordinatorOnly, []); assert.deepEqual(mail.groups, [[1, 2]]);
+  // A rollout named later in the title is still the coordinator's.
+  assert.equal(parsePlanTasks('## Tasks\n- [ ] Task 1: Отправить ветку в `origin` и безопасно выкатить')[0].kind, 'deploy');
+  // Plain paths next to backticked ones: the list is unknown, so the task runs alone.
+  assert.deepEqual(groups(['## Tasks', '- [ ] Task 1: Mixed', '  - Files: src/shared.ts, `src/backend.ts`', '- [ ] Task 2: Shared', '  - Files: `src/shared.ts`'].join('\n')), [[1], [2]]);
+  // An indented phase heading still starts a phase: Task 2 waits for Task 1.
+  assert.deepEqual(groups(['## Tasks', '### Phase 1', '- [ ] Task 1: One', '  - Files: `a.ts`', ' ### Phase 2', '- [ ] Task 2: Two', '  - Files: `b.ts`'].join('\n')), [[1], [2]]);
+  // Parentheses inside a backticked path are part of the path.
+  assert.deepEqual(parsePlanTasks(['## Tasks', '- [ ] Task 1: Page', '  - Files: `app/(account)/settings/page.tsx`'].join('\n'))[0].files, ['app/(account)/settings/page.tsx']);
+  // A lowercase "depends on: —" after a plain list ends the list.
+  assert.deepEqual(groups(['## Tasks', '- [ ] Task 1: A. Files: src/a.ts. depends on: —', '- [ ] Task 2: B. Files: src/b.ts. depends on: —'].join('\n')), [[1, 2]]);
 });
