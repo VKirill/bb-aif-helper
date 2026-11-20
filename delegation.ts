@@ -87,7 +87,22 @@ export function parseResearch(text: string): ResearchSlots {
   return slots;
 }
 
-export async function readDelegation(root: string): Promise<DelegationState> {
+// Panel reads, status refreshes and saves of one project write the same files; one at a time per folder,
+// so a refresh started before a save never puts the old model back after it.
+const queues = new Map<string, Promise<unknown>>();
+export function serialByRoot<T>(root: string, job: () => Promise<T>): Promise<T> {
+  const next = (queues.get(root) ?? Promise.resolve()).then(job, job);
+  const tail = next.catch(() => undefined);
+  queues.set(root, tail);
+  void tail.then(() => { if (queues.get(root) === tail) queues.delete(root); });
+  return next;
+}
+
+export function readDelegation(root: string): Promise<DelegationState> {
+  return serialByRoot(root, () => readDelegationNow(root));
+}
+
+async function readDelegationNow(root: string): Promise<DelegationState> {
   let research = selfSlots();
   try { research = parseResearch(await readText(join(root, RESEARCH_PATH))); } catch { /* unreadable context: research stays self */ }
   const base = await readImplement(root);
@@ -198,7 +213,7 @@ bb thread spawn --project "$BB_PROJECT_ID" --environment "$BB_ENVIRONMENT_ID" --
 3. Wait for each: \`bb thread wait <id> --status idle --timeout 8m\`, repeating while it still works. The report is \`bb thread output <id>\`.
 4. Use the reports exactly as the skill uses its subagent results and continue the skill. Its rules on artifacts, questions and approvals do not change.
 
-If \`bb thread spawn\` fails, say so and do that research yourself; do not repeat the same error. Use no \`node\` commands in this flow.`;
+If \`bb thread spawn\` fails, say so and do that research yourself; do not repeat the same error. Use no \`node\` commands in this flow. In PowerShell the BB variables are \`$env:BB_PROJECT_ID\`, \`$env:BB_THREAD_ID\` and \`$env:BB_ENVIRONMENT_ID\`, not \`$BB_PROJECT_ID\`.`;
 }
 
 function parallelSection(n: number, flags: string): string {
@@ -206,20 +221,20 @@ function parallelSection(n: number, flags: string): string {
 
 The owner allowed up to ${n} workers at once. Run independent plan tasks in parallel, each worker in its own git worktree copy of the project:
 
-1. Get the groups: \`bb plugin run aif-chat groups --target <plan path> --max ${n} --json\`. It answers \`{ groups, coordinatorOnly }\` — groups of task ids in execution order — or \`{ error }\`. On \`error\`, or for a fix plan, ultra bundle or OpenSpec change, use the one-worker flow above. Tasks in \`coordinatorOnly\` (commit and deploy tasks) you do yourself, as the plan says. A group with one task also uses the one-worker flow.
+1. Get the groups: \`bb plugin run aif-chat groups --target "<plan path>" --max ${n} --json\`. It answers \`{ groups, coordinatorOnly }\` — groups of task ids in execution order — or \`{ error }\`. On \`error\`, or for a fix plan, ultra bundle or OpenSpec change, use the one-worker flow above. Tasks in \`coordinatorOnly\` (commit and deploy tasks) you do yourself, as the plan says. A group with one task also uses the one-worker flow.
 2. Before each group with two or more tasks, \`git status --porcelain\` must show only your own changes from earlier tasks of this plan. If it shows changes you did not make, stop and ask the owner; never commit them.
 3. Checkpoint: if there are changes from earlier tasks, commit exactly those files locally (no push): \`git --literal-pathspecs add -- <files>\`, then \`git --literal-pathspecs commit -m 'chore(aif): <plan> · before group N' -- <files>\` (\`--literal-pathspecs\`: a name like \`todo[1].txt\` is a file, not a pattern that also matches \`todo1.txt\`). Never \`git commit -a\`: it would also take a file someone changed after step 2. The copies are built from a commit and would not see uncommitted work.
-4. For each task of the group spawn its worker on a fresh copy that BB makes from that commit (\`<base>\` = this workspace folder as an absolute path; \`<sha>\` = \`git rev-parse HEAD\`). \`<base>\` goes inside a JSON string: write it with forward slashes (\`C:/Users/me/repo\`, \`//server/share/repo\`), never with backslashes, and escape a \`"\` as \`\\"\`; the JSON is in single quotes, so a \`'\` in the path is written as \`'\\''\`. Quote \`<brief>\` too: \`--prompt-file "<brief>"\`. The folder may be a section inside a larger repository: the copy is of the whole repository, and the worker starts in the same subfolder.
+4. For each task of the group spawn its worker on a fresh copy that BB makes from that commit (\`<base>\` = this workspace folder as an absolute path; \`<sha>\` = \`git rev-parse HEAD\`). \`<base>\` goes inside a JSON string: write it with forward slashes (\`C:/Users/me/repo\`, \`//server/share/repo\`), never with backslashes, and escape a \`"\` as \`\\"\`; the JSON is in single quotes, so a \`'\` in the path is written as \`'\\''\`. Quote \`<brief>\` too: \`--prompt-file "<brief>"\`. \`<try>\` is 1 for the first worker of a task and the next number for every retry: BB removes an archived worker's copy only after five minutes, and a name still in use is refused. The folder may be a section inside a larger repository: the copy is of the whole repository, and the worker starts in the same subfolder.
 
 \`\`\`bash
-bb thread spawn --project "$BB_PROJECT_ID" --environment-provider aif-chat-worktree --environment-inputs '{"basePath":"<base>","name":"<plan>-<taskId>","ref":"<sha>"}' --parent-self --lifecycle-owner-thread "$BB_THREAD_ID" --parent-notifications off ${flags} --title 'AIF · <plan> · <taskId>' --prompt-file "<brief>" --json
+bb thread spawn --project "$BB_PROJECT_ID" --environment-provider aif-chat-worktree --environment-inputs '{"basePath":"<base>","name":"<plan>-<taskId>-<try>","ref":"<sha>"}' --parent-self --lifecycle-owner-thread "$BB_THREAD_ID" --parent-notifications off ${flags} --title 'AIF · <plan> · <taskId>' --prompt-file "<brief>" --json
 \`\`\`
 
    Add to each brief, after the worker rules: "You work in your own copy of the project: the folder BB opened this thread in. Before any change run \`git rev-parse --show-toplevel\`; if it fails, \`cd\` into that folder first. If dependencies are missing, install them first (\`<install command from the project's command catalog>\`). Do not commit."
 5. Wait for all workers of the group (step 4 of the one-worker flow for each id).
-6. Bring the results back one worker at a time. \`<copy>\` is \`environment.path\` from \`bb thread show <id> --json\`; \`<top>\` is \`git rev-parse --show-toplevel\` of this workspace; \`<patch>\` is the absolute path of a new file in your temporary folder, such as \`<tmp>/task-<taskId>.patch\` (\`-C\` changes the folder, so a relative path would point elsewhere). Run exactly these commands, in this order, each as its own command, keeping the double quotes around every path (paths may contain spaces). git writes the patch itself, so no shell redirection changes its encoding, and the diff flags keep the project's git settings (\`diff.relative\`, \`diff.noprefix\`, external diff tools, text conversion) out of the patch:
+6. Bring the results back one worker at a time. \`<copy>\` is \`environment.path\` from \`bb thread show <id> --json\`; \`<top>\` is \`git rev-parse --show-toplevel\` of this workspace; \`<patch>\` is the absolute path of a new file in your temporary folder, such as \`<tmp>/task-<taskId>.patch\` (\`-C\` changes the folder, so a relative path would point elsewhere). Run exactly these commands, in this order, each as its own command, keeping the double quotes around every path (paths may contain spaces). git writes the patch itself, so no shell redirection changes its encoding, and the diff flags keep the project's git settings (\`diff.relative\`, \`diff.noprefix\`, \`color.diff\`, external diff tools, text conversion) out of the patch:
    - \`git -C "<copy>" add -A\`
-   - \`git -C "<copy>" diff --cached --binary --no-relative --no-ext-diff --no-textconv --src-prefix=a/ --dst-prefix=b/ HEAD --output="<patch>"\`
+   - \`git -C "<copy>" diff --cached --binary --no-color --no-relative --no-ext-diff --no-textconv --src-prefix=a/ --dst-prefix=b/ HEAD --output="<patch>"\`
    - \`git -C "<top>" apply --check "<patch>"\`
    - \`git -C "<top>" apply "<patch>"\`
 
@@ -268,12 +283,16 @@ bb thread spawn --project "$BB_PROJECT_ID" --environment "$BB_ENVIRONMENT_ID" --
 5. Review \`git diff\` and run the task's verification yourself. Fix a small gap yourself, or send \`bb thread tell <id> '<what to fix>'\` and wait again (step 4).
 6. Only after that mark the task done in the plan and move to the next task. One worker at a time: workers share this workspace.
 
-If \`bb thread spawn\` returns an error, report it and implement that task yourself; do not repeat the same error. Use no \`node\` commands in this flow.`;
+If \`bb thread spawn\` returns an error, report it and implement that task yourself; do not repeat the same error. Use no \`node\` commands in this flow. In PowerShell the BB variables are \`$env:BB_PROJECT_ID\`, \`$env:BB_THREAD_ID\` and \`$env:BB_ENVIRONMENT_ID\`, not \`$BB_PROJECT_ID\`.`;
   if (!c.parallel) return base;
   return base.replace('One worker at a time: workers share this workspace.', 'Outside parallel groups (below), run one worker at a time: workers in this workspace share it.') + '\n\n' + parallelSection(c.parallel, flags);
 }
 
-export async function writeDelegation(root: string, choice: DelegationChoice, role: DelegationRole = 'implement'): Promise<DelegationState> {
+export function writeDelegation(root: string, choice: DelegationChoice, role: DelegationRole = 'implement'): Promise<DelegationState> {
+  return serialByRoot(root, () => writeDelegationNow(root, choice, role));
+}
+
+async function writeDelegationNow(root: string, choice: DelegationChoice, role: DelegationRole): Promise<DelegationState> {
   const config = await readConfig(root);
   if (!config) throw new Error('В проекте нет .ai-factory.json: сначала установите AI Factory.');
   if (role !== 'implement') {
@@ -282,7 +301,7 @@ export async function writeDelegation(root: string, choice: DelegationChoice, ro
     const picked = choice.mode === 'bb' ? stripParallel(choice) : choice;
     const next = mergeContextBlock(text, researchBlock({ ...parseResearch(text), [role]: picked }), RESEARCH_START, RESEARCH_END);
     if (next) await writeAtomic(file, next); else await rm(file, { force: true });
-    return readDelegation(root);
+    return readDelegationNow(root);
   }
   const phases: Json = isObject(config.phases) ? { ...config.phases } : {};
   const agents: Json = isObject(config.dispatchAgents) ? { ...config.dispatchAgents } : {};
@@ -309,6 +328,6 @@ export async function writeDelegation(root: string, choice: DelegationChoice, ro
   try { await rm(join(root, '.ai-factory/bin/bb-aif-run.mjs')); removedLegacy = true; }
   catch (e) { if ((e as NodeJS.ErrnoException).code !== 'ENOENT') throw e; }
   await writeAtomic(join(root, '.ai-factory.json'), JSON.stringify(config, null, 2) + '\n');
-  const state = await readDelegation(root);
+  const state = await readDelegationNow(root);
   return removedLegacy ? { ...state, removedLegacy } : state;
 }

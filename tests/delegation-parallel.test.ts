@@ -9,7 +9,7 @@ import { snapshot } from './fixtures.ts';
 import { workflowActions } from '../workflow.ts';
 import {
   CONTEXT_PATH, PLAN_CONTEXT_PATH, RESEARCH_PATH, contextBlock, modelSpec, parseResearch, parseSpec,
-  readDelegation, writeDelegation,
+  readDelegation, serialByRoot, writeDelegation,
 } from '../delegation.ts';
 import type { DelegationChoice, DelegationRole, DelegationState } from '../delegation.ts';
 
@@ -44,7 +44,7 @@ test('contextBlock with parallel spawns workers on BB-made copies and keeps prov
   for (const part of [
     'Parallel mode', '--max 3', '--environment-provider aif-chat-worktree', '"basePath":"<base>"', '"ref":"<sha>"', 'git rev-parse HEAD',
     'environment.path', 'git rev-parse --show-toplevel', 'BB removes its copy',
-    'git status --porcelain', 'git -C "<top>" apply --check "<patch>"', '--output="<patch>"', '--no-relative', '--src-prefix=a/ --dst-prefix=b/', '--literal-pathspecs', '--prompt-file "<brief>"', 'C:/Users/me/repo',
+    'git status --porcelain', 'git -C "<top>" apply --check "<patch>"', '--output="<patch>"', '--no-relative', '--no-color', '"name":"<plan>-<taskId>-<try>"', '$env:BB_PROJECT_ID', '--target "<plan path>"', '--src-prefix=a/ --dst-prefix=b/', '--literal-pathspecs', '--prompt-file "<brief>"', 'C:/Users/me/repo',
     "git --literal-pathspecs commit -m 'chore(aif): <plan> · before group N' -- <files>", 'there is nothing to undo',
     "--provider 'codex'", "--model 'gpt-6.2-sol'", "--reasoning-level 'high'", "--service-tier 'fast'",
     'bb plugin run aif-chat groups', 'Do not commit',
@@ -144,4 +144,16 @@ test('a block saved by an older version is rewritten on read; the owner text and
   const again = await readFile(file, 'utf8');
   await readDelegation(root);
   assert.equal(await readFile(file, 'utf8'), again, 'a current block is not rewritten');
+});
+
+test('reads and saves of one project folder run one at a time; other folders do not wait', async () => {
+  const log: string[] = [];
+  const job = (name: string, ms: number) => () => new Promise<string>(resolve => {
+    log.push(`${name}:start`); setTimeout(() => { log.push(`${name}:end`); resolve(name); }, ms);
+  });
+  await Promise.all([serialByRoot('/p', job('refresh', 30)), serialByRoot('/p', job('save', 1)), serialByRoot('/q', job('other', 1))]);
+  assert.deepEqual(log.filter(e => !e.startsWith('other')), ['refresh:start', 'refresh:end', 'save:start', 'save:end']);
+  assert.ok(log.indexOf('other:end') < log.indexOf('refresh:end'), 'another folder is not queued behind this one');
+  await assert.rejects(serialByRoot('/p', async () => { throw new Error('boom'); }));
+  assert.equal(await serialByRoot('/p', async () => 'after a failure'), 'after a failure');
 });

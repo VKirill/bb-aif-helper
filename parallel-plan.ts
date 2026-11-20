@@ -1,3 +1,5 @@
+import path from 'node:path';
+
 // Parses `## Tasks` checklists from AI Factory plans and packs pending tasks
 // into parallel groups: explicit and phase-implied dependencies, file overlap
 // and solo tasks (commit/deploy markers, unclear file sets) decide the packing.
@@ -44,10 +46,9 @@ function parseDependsOn(line: string): DependsHint {
   return { ids, ranges };
 }
 
-function resolveDependsOn(hint: DependsHint, taskIds: number[]): PlanTask['dependsOn'] {
+function resolveDependsOn(hint: DependsHint, known: ReadonlySet<number>): PlanTask['dependsOn'] {
   if (hint === null || hint === 'none') return hint;
   const ids = new Set(hint.ids);
-  const known = new Set(taskIds);
   for (const [a, b] of hint.ranges) {
     // Walks up only while the ids exist and stops at the first gap, which stays in the list and fails the
     // reference check: `1-999999999` costs no more than the plan is long, and `1-3` without task 2 is an error.
@@ -73,7 +74,9 @@ function parseFiles(line: string): string[] | null {
   for (const m of sub.matchAll(FILE_TOKEN)) {
     const token = m[1];
     if (BAD_FILE.test(token)) return null;
-    let f = token.replace(/\\/g, '/').replace(/\/{2,}/g, '/');
+    // One spelling per file: `SRC\\a.ts`, `src//a.ts` and `src/x/../a.ts` all name `src/a.ts`.
+    let f = path.posix.normalize(token.replace(/\\/g, '/'));
+    if (f === '..' || f.startsWith('../')) return null;
     if (f.startsWith('./')) f = f.slice(2);
     if (f.endsWith('/')) f = f.slice(0, -1);
     files.push(f);
@@ -124,8 +127,8 @@ export function parsePlanTasks(text: string): PlanTask[] {
     }
     prev = line;
   }
-  const taskIds = tasks.map(t => t.id);
-  tasks.forEach((t, i) => { t.dependsOn = resolveDependsOn(hints[i], taskIds); });
+  const known = new Set(tasks.map(t => t.id));
+  tasks.forEach((t, i) => { t.dependsOn = resolveDependsOn(hints[i], known); });
   return tasks;
 }
 
@@ -151,6 +154,11 @@ export function parallelGroups(text: string, max: number): ParallelGroups {
   const huge = tasks.flatMap(t => [t.id, ...(Array.isArray(t.dependsOn) ? t.dependsOn : [])]).find(id => !Number.isSafeInteger(id));
   if (huge !== undefined) return { error: `Слишком большой номер задачи: ${huge}.` };
   const byId = new Map(tasks.map(t => [t.id, t]));
+  if (byId.size !== tasks.length) {
+    const seen = new Set<number>();
+    const twice = tasks.find(t => seen.size === seen.add(t.id).size)!;
+    return { error: `Номер задачи ${twice.id} встречается дважды (например, Task ${twice.id} и Task 0${twice.id}).` };
+  }
   for (const t of tasks) {
     if (!Array.isArray(t.dependsOn)) continue;
     for (const d of t.dependsOn) {

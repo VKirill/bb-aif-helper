@@ -82,6 +82,8 @@ test('a copy survives a failing checkout hook cleanly, and is removed even after
   assert.equal(existsSync(path.join(won[0].value.path, 'a.txt')), true);
   // A copy deleted without git, while its base folder was renamed, does not block the next launch with that name.
   rmSync(won[0].value.root, { recursive: true, force: true });
+  // Windows may finish a delete a moment after rmSync returns.
+  for (let i = 0; i < 50 && existsSync(won[0].value.root); i++) await new Promise(resolve => setTimeout(resolve, 100));
   const again = await createWorktree({ basePath: path.join(odd, 'sec-renamed'), name: 'race' });
   await removeWorktree({ basePath: path.join(odd, 'sec-renamed'), root: again.root });
 });
