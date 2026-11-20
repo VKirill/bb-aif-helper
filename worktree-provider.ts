@@ -8,9 +8,11 @@ export const WORKTREE_PROVIDER_ID = 'aif-chat-worktree';
  * larger repository. `name` is `<plan>-<taskId>`, `ref` the checkpoint commit the copy starts from (default HEAD).
  */
 export const worktreeInputs = z.object({
-  basePath: z.string().startsWith('/').max(4096),
+  // Absolute on the folder's machine, which may be Windows while BB runs elsewhere: `/x`, `C:\x`, `C:/x`, `\\server\share`.
+  // The machine checks the path again with its own rules before calling git.
+  basePath: z.string().max(4096).regex(/^(?:\/|[A-Za-z]:[\\/]|\\\\[^\\])/, 'An absolute path is required'),
   name: z.string().regex(/^[A-Za-z0-9._-]{1,120}$/),
-  ref: z.string().max(200).optional(),
+  ref: z.string().max(200).regex(/^[^-]/, 'A ref may not start with "-"').optional(),
 }).strict();
 const resourceSchema = z.object({ basePath: z.string(), root: z.string() });
 

@@ -132,3 +132,16 @@ test('the real mobile-panel-smart-chips plan groups as the manual layout did', (
   assert.deepEqual(result.groups, [[1, 5, 7], [2, 6], [3, 8], [4, 9], [14], [10], [11], [12], [13]]);
   assert.deepEqual(result.coordinatorOnly, [13]);
 });
+
+test('Depends on ranges expand over the plan tasks only, so a huge range is cheap and still checked', () => {
+  const plan = (deps: string) => ['## Tasks', '- [ ] Task 1: A. Files: `a.ts`. Depends on —', '- [ ] Task 2: B. Files: `b.ts`. Depends on —',
+    '- [ ] Task 5: C. Files: `c.ts`. Depends on —', `- [ ] Task 7: D. Files: \`d.ts\`. Depends on ${deps}`].join('\n');
+  assert.deepEqual(parsePlanTasks(plan('1-5'))[3].dependsOn, [1, 2, 5]);
+  assert.deepEqual(parsePlanTasks(plan('5-1'))[3].dependsOn, [1, 2, 5]);
+  const started = Date.now();
+  assert.deepEqual(parsePlanTasks(plan('1-999999999999'))[3].dependsOn, [1, 2, 5, 7, 999999999999]);
+  assert.deepEqual(parallelGroups(plan('1-999999999999'), 4), { error: 'Задача 7 зависит от несуществующей задачи 999999999999.' });
+  assert.deepEqual(parallelGroups(plan('3-5'), 4), { error: 'Задача 7 зависит от несуществующей задачи 3.' });
+  assert.ok(Date.now() - started < 1000, 'ranges are not enumerated number by number');
+  assert.deepEqual(parallelGroups(plan('1-5'), 4), { groups: [[1, 2, 5], [7]], coordinatorOnly: [] });
+});

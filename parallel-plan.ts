@@ -23,19 +23,35 @@ const FILE_SINGLE = /\d+/g;
 const FILE_TOKEN = /`([^`]+)`/g;
 const BAD_FILE = /[*?\s]/;
 
-function parseDependsOn(line: string): number[] | 'none' | null {
+type DependsHint = { ids: number[]; ranges: [number, number][] } | 'none' | null;
+
+function parseDependsOn(line: string): DependsHint {
   // The hint is the last occurrence: a task description may mention `Depends on` earlier.
   const all = [...line.matchAll(/Depends on\s+([^.;`]*)/g)];
   const m = all[all.length - 1];
   if (!m) return null;
   const cap = m[1].trim();
   if (/^(none|нет)$/i.test(cap) || /^[—–-](?!\d)/.test(cap)) return 'none';
-  const ids = new Set<number>();
+  // A range is kept as its two ends: it is expanded later over the plan's real task ids, so `1-999999999`
+  // costs no more than the plan is long, and an end that is not a task still fails the reference check.
+  const ranges: [number, number][] = [];
+  const ids: number[] = [];
   const rest = cap.replace(FILE_RANGE, (_all, a: string, b: string) => {
-    for (let i = Number(a); i <= Number(b); i++) ids.add(i);
+    ranges.push([Number(a), Number(b)]);
+    ids.push(Number(a), Number(b));
     return ' ';
   });
-  for (const s of rest.matchAll(FILE_SINGLE)) ids.add(Number(s[0]));
+  for (const s of rest.matchAll(FILE_SINGLE)) ids.push(Number(s[0]));
+  return { ids, ranges };
+}
+
+function resolveDependsOn(hint: DependsHint, taskIds: number[]): PlanTask['dependsOn'] {
+  if (hint === null || hint === 'none') return hint;
+  const ids = new Set(hint.ids);
+  for (const [a, b] of hint.ranges) {
+    const lo = Math.min(a, b), hi = Math.max(a, b);
+    for (const id of taskIds) if (id >= lo && id <= hi) ids.add(id);
+  }
   return [...ids].sort((x, y) => x - y);
 }
 
@@ -73,6 +89,7 @@ export function parsePlanTasks(text: string): PlanTask[] {
   }
   const scan = start === -1 ? lines : lines.slice(start, end);
   const tasks: PlanTask[] = [];
+  const hints: DependsHint[] = [];
   let headings = 0;
   let prev = '';
   for (const line of scan) {
@@ -90,15 +107,18 @@ export function parsePlanTasks(text: string): PlanTask[] {
           done: m[1].toLowerCase() === 'x',
           title,
           files: parseFiles(line),
-          dependsOn: parseDependsOn(line),
+          dependsOn: null,
           phase: Math.max(1, headings),
           order: tasks.length,
           kind,
         });
+        hints.push(parseDependsOn(line));
       }
     }
     prev = line;
   }
+  const taskIds = tasks.map(t => t.id);
+  tasks.forEach((t, i) => { t.dependsOn = resolveDependsOn(hints[i], taskIds); });
   return tasks;
 }
 

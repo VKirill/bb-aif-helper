@@ -21,6 +21,8 @@ export type CreatedWorktree = { root: string; path: string; sha: string };
 
 export async function createWorktree(input: { basePath: string; name: string; ref?: string }): Promise<CreatedWorktree> {
   if (!WORKTREE_NAME.test(input.name)) throw new Error(`Недопустимое имя копии: ${input.name}`);
+  if (!path.isAbsolute(input.basePath)) throw new Error(`Нужен абсолютный путь: ${input.basePath}`);
+  if (input.ref?.startsWith('-')) throw new Error(`Недопустимая ссылка: ${input.ref}`);
   const top = await git(input.basePath, ['rev-parse', '--show-toplevel']).catch(() => {
     throw new Error(`${input.basePath} не в git-репозитории`);
   });
@@ -31,14 +33,17 @@ export async function createWorktree(input: { basePath: string; name: string; re
   if (await exists(root)) throw new Error(`Копия ${root} уже существует`);
   await mkdir(path.dirname(root), { recursive: true });
   await git(top, ['worktree', 'add', '--detach', root, sha]);
-  return { root, path: prefix ? path.join(root, prefix).replace(/\/+$/, '') : root, sha };
+  // git prints the prefix with `/` and a trailing slash; resolve gives the machine's own separators without it.
+  return { root, path: path.resolve(root, prefix), sha };
 }
 
 /** Removes a copy made by createWorktree; a copy that is already gone counts as removed. */
 export async function removeWorktree(input: { basePath: string; root: string }): Promise<{ removed: true }> {
   const root = path.resolve(input.root);
-  if (!root.startsWith(worktreesRoot() + path.sep)) throw new Error(`${root} не копия AI Factory`);
-  if (await exists(root)) await git(root, ['worktree', 'remove', '--force', root]);
+  const inside = path.relative(worktreesRoot(), root);
+  if (!inside || inside.startsWith('..') || path.isAbsolute(inside)) throw new Error(`${root} не копия AI Factory`);
+  // git runs from the main repository: on Windows a git started inside the copy cannot delete it (Permission denied).
+  if (await exists(root)) await git(input.basePath, ['worktree', 'remove', '--force', root]);
   else await git(input.basePath, ['worktree', 'prune']).catch(() => '');
   return { removed: true };
 }

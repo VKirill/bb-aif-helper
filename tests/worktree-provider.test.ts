@@ -19,7 +19,12 @@ test('the provider makes the copy on the folder machine and removes it by the re
   const provider = box.provider!;
   assert.equal(provider.id, WORKTREE_PROVIDER_ID);
   assert.deepEqual(provider.requires, { projectCheckout: true });
-  assert.equal(provider.inputs.safeParse({ basePath: 'relative', name: 'x' }).success, false);
+  // The folder's machine may be Windows while BB runs on Linux: its absolute paths pass, relative ones do not.
+  for (const basePath of ['/repo', 'C:\\Users\\me\\repo', 'C:/Users/me/repo', 'd:\\repo', '\\\\server\\share\\repo'])
+    assert.equal(provider.inputs.safeParse({ basePath, name: 'x' }).success, true, basePath);
+  for (const basePath of ['relative', 'C:repo', '\\repo', '\\\\', ''])
+    assert.equal(provider.inputs.safeParse({ basePath, name: 'x' }).success, false, basePath);
+  assert.equal(provider.inputs.safeParse({ basePath: '/repo', name: 'x', ref: '--output=y' }).success, false);
   const inputs = { basePath: '/repo/plugins/s', name: 'plan-1', ref: 'abc' };
   const made = await provider.create({ inputs, host: { id: 'host_1' }, signal, report: { step() {} } });
   assert.deepEqual(made, { status: 'created', path: '/h/.bb-aif-helper/worktrees/r/plan-1/plugins/s', ownsPath: true,

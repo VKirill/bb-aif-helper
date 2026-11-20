@@ -195,7 +195,13 @@ bb thread spawn --project "$BB_PROJECT_ID" --environment-provider aif-chat-workt
 
    Add to each brief, after the worker rules: "You work in your own copy of the project: the folder BB opened this thread in. Before any change run \`git rev-parse --show-toplevel\`; if it fails, \`cd\` into that folder first. If dependencies are missing, install them first (\`<install command from the project's command catalog>\`). Do not commit."
 5. Wait for all workers of the group (step 4 of the one-worker flow for each id).
-6. Bring the results back one worker at a time. \`<copy>\` is \`environment.path\` from \`bb thread show <id> --json\`. In \`<copy>\` run \`git add -A\` and \`git diff --cached --binary HEAD > <tmp>/task-<taskId>.patch\` (exclude \`node_modules\`, \`dist\` and other ignored output). In the main workspace run \`git apply --3way <tmp>/task-<taskId>.patch\`, then review the diff and run that task's verification as in step 5 of the one-worker flow. If \`git apply\` fails or leaves conflicts, undo it (\`git checkout -- <files>\` for that patch only), stop, and report the task and the conflicting files to the owner.
+6. Bring the results back one worker at a time. \`<copy>\` is \`environment.path\` from \`bb thread show <id> --json\`; \`<top>\` is \`git rev-parse --show-toplevel\` of this workspace; \`<patch>\` is the absolute path of a new file in your temporary folder, such as \`<tmp>/task-<taskId>.patch\` (\`-C\` changes the folder, so a relative path would point elsewhere). Run exactly these commands, in this order, each as its own command (git writes the patch itself, so no shell redirection changes its encoding):
+   - \`git -C <copy> add -A\`
+   - \`git -C <copy> diff --cached --binary HEAD --output=<patch>\`
+   - \`git -C <top> apply --check <patch>\`
+   - \`git -C <top> apply <patch>\`
+
+   Ignored files such as \`node_modules\` and \`dist\` stay out of the patch. An empty patch means the worker changed nothing: skip both apply commands and treat the task as not done. Without \`--3way\`, \`git apply\` changes all files of the patch or none, and never touches the index, so a refused patch leaves this workspace and the results of earlier tasks as they were. If \`apply --check\` or \`apply\` fails, apply nothing more for this group: do not retry with \`--3way\`, and do not run \`git checkout\`, \`git reset\` or \`git stash\` — there is nothing to undo. Stop and report the task and the files named in the error to the owner. After a successful apply, review the diff and run that task's verification as in step 5 of the one-worker flow.
 7. Mark each task done only after its patch is applied and verified. Then archive its worker (\`bb thread archive <id>\`); BB removes its copy five minutes later.
 8. Continue with the next group. The final commits stay as the plan describes; the local checkpoint commits are part of them and are never pushed without the owner's approval.
 

@@ -44,12 +44,14 @@ test('contextBlock with parallel spawns workers on BB-made copies and keeps prov
   for (const part of [
     'Parallel mode', '--max 3', '--environment-provider aif-chat-worktree', '"basePath":"<base>"', '"ref":"<sha>"', 'git rev-parse HEAD',
     'environment.path', 'git rev-parse --show-toplevel', 'BB removes its copy',
-    'git status --porcelain', 'git apply --3way',
+    'git status --porcelain', 'git -C <top> apply --check <patch>', '--output=<patch>', 'there is nothing to undo',
     "--provider 'codex'", "--model 'gpt-6.2-sol'", "--reasoning-level 'high'", "--service-tier 'fast'",
     'bb plugin run aif-chat groups', 'Do not commit',
     'stop and ask the owner; never commit them',
-    'git apply` fails or leaves conflicts, undo it', 'conflicting files',
+    'the files named in the error',
   ]) assert.ok(text.includes(part), part);
+  // A three-way apply leaves unmerged files that `git checkout` cannot undo; it must never be suggested.
+  for (const absent of ['--3way <', 'git checkout --', ' > <tmp>']) assert.ok(!text.includes(absent), absent);
 });
 
 test('writeDelegation stores parallel in phases.implement.model and manages the aif-plan block', async () => {
