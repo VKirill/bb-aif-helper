@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
-import { dirname, join } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { RESEARCH_ROLES } from './model.ts';
 import type { DelegationChoice, DelegationRole, DelegationState, ResearchRole } from './model.ts';
 export { DELEGATION_ROLES, RESEARCH_ROLES, delegationChoiceSchema, delegationDefaultsSchema, delegationRoleSchema, delegationStateSchema } from './model.ts';
@@ -91,10 +91,11 @@ export function parseResearch(text: string): ResearchSlots {
 // so a refresh started before a save never puts the old model back after it.
 const queues = new Map<string, Promise<unknown>>();
 export function serialByRoot<T>(root: string, job: () => Promise<T>): Promise<T> {
-  const next = (queues.get(root) ?? Promise.resolve()).then(job, job);
+  const key = resolve(root); // `/repo` and `/repo/` are one folder
+  const next = (queues.get(key) ?? Promise.resolve()).then(job, job);
   const tail = next.catch(() => undefined);
-  queues.set(root, tail);
-  void tail.then(() => { if (queues.get(root) === tail) queues.delete(root); });
+  queues.set(key, tail);
+  void tail.then(() => { if (queues.get(key) === tail) queues.delete(key); });
   return next;
 }
 
@@ -106,7 +107,8 @@ async function readDelegationNow(root: string): Promise<DelegationState> {
   let research = selfSlots();
   try { research = parseResearch(await readText(join(root, RESEARCH_PATH))); } catch { /* unreadable context: research stays self */ }
   const base = await readImplement(root);
-  if (base.choice.mode === 'bb') await refreshImplementBlocks(root, base.choice);
+  // Best effort: a folder that cannot be written (read-only checkout, permissions) still answers the read.
+  await refreshBlocks(root, base.choice, research).catch(() => undefined);
   return { ...base, ...research };
 }
 
@@ -115,9 +117,13 @@ async function readDelegationNow(root: string): Promise<DelegationState> {
  * they would keep the old commands (for example `git apply --3way`) until the next save, so every read rewrites a
  * block that differs from what this version generates. Text outside the markers is never touched.
  */
-async function refreshImplementBlocks(root: string, choice: Extract<DelegationChoice, { mode: 'bb' }>) {
-  await replaceBetweenMarkers(join(root, CONTEXT_PATH), contextBlock(choice), START, END);
-  if (choice.parallel) await replaceBetweenMarkers(join(root, PLAN_CONTEXT_PATH), planRuleBlock(), PLAN_START, PLAN_END);
+async function refreshBlocks(root: string, choice: DelegationChoice, research: ResearchSlots) {
+  if (choice.mode === 'bb') {
+    await replaceBetweenMarkers(join(root, CONTEXT_PATH), contextBlock(choice), START, END);
+    if (choice.parallel) await replaceBetweenMarkers(join(root, PLAN_CONTEXT_PATH), planRuleBlock(), PLAN_START, PLAN_END);
+  }
+  const researchText = researchBlock(research);
+  if (researchText) await replaceBetweenMarkers(join(root, RESEARCH_PATH), researchText, RESEARCH_START, RESEARCH_END);
 }
 
 /** Only the text between existing markers changes: a BOM, indentation and everything else of the owner stay byte for byte. */
@@ -126,7 +132,9 @@ async function replaceBetweenMarkers(file: string, block: string, start_: string
   const start = text.indexOf(start_);
   const end = text.indexOf(end_, start);
   if (start < 0 || end < 0) return;
-  const next = `${text.slice(0, start)}${start_}\n${block.trim()}\n${text.slice(end)}`;
+  // A file checked out with CRLF (core.autocrlf on Windows) gets the block in CRLF too, so git sees no change.
+  const eol = text.slice(start, end).includes('\r\n') ? '\r\n' : '\n';
+  const next = `${text.slice(0, start)}${start_}${eol}${block.trim().replace(/\r?\n/g, eol)}${eol}${text.slice(end)}`;
   if (next !== text) await writeAtomic(file, next);
 }
 
@@ -222,9 +230,9 @@ function parallelSection(n: number, flags: string): string {
 The owner allowed up to ${n} workers at once. Run independent plan tasks in parallel, each worker in its own git worktree copy of the project:
 
 1. Get the groups: \`bb plugin run aif-chat groups --target "<plan path>" --max ${n} --json\`. It answers \`{ groups, coordinatorOnly }\` — groups of task ids in execution order — or \`{ error }\`. On \`error\`, or for a fix plan, ultra bundle or OpenSpec change, use the one-worker flow above. Tasks in \`coordinatorOnly\` (commit and deploy tasks) you do yourself, as the plan says. A group with one task also uses the one-worker flow.
-2. Before each group with two or more tasks, \`git status --porcelain\` must show only your own changes from earlier tasks of this plan. If it shows changes you did not make, stop and ask the owner; never commit them.
-3. Checkpoint: if there are changes from earlier tasks, commit exactly those files locally (no push): \`git --literal-pathspecs add -- <files>\`, then \`git --literal-pathspecs commit -m 'chore(aif): <plan> · before group N' -- <files>\` (\`--literal-pathspecs\`: a name like \`todo[1].txt\` is a file, not a pattern that also matches \`todo1.txt\`). Never \`git commit -a\`: it would also take a file someone changed after step 2. The copies are built from a commit and would not see uncommitted work.
-4. For each task of the group spawn its worker on a fresh copy that BB makes from that commit (\`<base>\` = this workspace folder as an absolute path; \`<sha>\` = \`git rev-parse HEAD\`). \`<base>\` goes inside a JSON string: write it with forward slashes (\`C:/Users/me/repo\`, \`//server/share/repo\`), never with backslashes, and escape a \`"\` as \`\\"\`; the JSON is in single quotes, so a \`'\` in the path is written as \`'\\''\`. Quote \`<brief>\` too: \`--prompt-file "<brief>"\`. \`<try>\` is 1 for the first worker of a task and the next number for every retry: BB removes an archived worker's copy only after five minutes, and a name still in use is refused. The folder may be a section inside a larger repository: the copy is of the whole repository, and the worker starts in the same subfolder.
+2. Before each group with two or more tasks, \`git -C "<top>" status --porcelain\` (\`<top>\` = \`git rev-parse --show-toplevel\` of this workspace; the paths it prints are relative to \`<top>\`) must show only your own changes from earlier tasks of this plan. Changes in \`.ai-factory/skill-context/\` are BB AIF Helper refreshing its own instructions after an update: neither yours nor foreign — leave them out of every commit and continue. If it shows other changes you did not make, stop and ask the owner; never commit them.
+3. Checkpoint: if there are changes from earlier tasks, commit exactly those files locally (no push), with the paths as step 2 printed them: \`git -C "<top>" --literal-pathspecs add -- <files>\`, then \`git -C "<top>" --literal-pathspecs commit -m 'chore(aif): <plan> · before group N' -- <files>\` (\`--literal-pathspecs\`: a name like \`todo[1].txt\` is a file, not a pattern that also matches \`todo1.txt\`). Never \`git commit -a\`: it would also take a file someone changed after step 2. The copies are built from a commit and would not see uncommitted work.
+4. For each task of the group spawn its worker on a fresh copy that BB makes from that commit (\`<base>\` = this workspace folder as an absolute path; \`<sha>\` = \`git rev-parse HEAD\`). \`<base>\` goes inside a JSON string: write it with forward slashes (\`C:/Users/me/repo\`, \`//server/share/repo\`), never with backslashes, and escape a \`"\` as \`\\"\`; the JSON is in single quotes, so a \`'\` in the path is written as \`'\\''\` in bash and \`''\` in PowerShell. Windows PowerShell 5.1 (\`$PSVersionTable.PSVersion.Major\` is 5) drops the double quotes inside a native argument: there write every \`"\` of this JSON as \`\\"\`; PowerShell 7 and bash need no such escaping. Quote \`<brief>\` too: \`--prompt-file "<brief>"\`. \`<try>\` is 1 for the first worker of a task and the next number for every retry: BB removes an archived worker's copy only after five minutes, and a name still in use is refused. The folder may be a section inside a larger repository: the copy is of the whole repository, and the worker starts in the same subfolder.
 
 \`\`\`bash
 bb thread spawn --project "$BB_PROJECT_ID" --environment-provider aif-chat-worktree --environment-inputs '{"basePath":"<base>","name":"<plan>-<taskId>-<try>","ref":"<sha>"}' --parent-self --lifecycle-owner-thread "$BB_THREAD_ID" --parent-notifications off ${flags} --title 'AIF · <plan> · <taskId>' --prompt-file "<brief>" --json

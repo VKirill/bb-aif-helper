@@ -42,7 +42,7 @@ export async function createWorktree(input: { basePath: string; name: string; re
   // nothing else would ever remove it, and the next try with the same name would say it already exists.
   const discard = async () => {
     await git(top, ['worktree', 'remove', '--force', root]).catch(() => '');
-    await rm(root, { recursive: true, force: true });
+    await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
     await git(top, ['worktree', 'prune']).catch(() => '');
   };
   try {
@@ -77,6 +77,6 @@ export async function removeWorktree(input: { basePath: string; root: string }):
       if (await git(root, ['rev-parse', '--git-dir']).then(() => true, () => false)) throw cause;
     });
   } else await git(input.basePath, ['worktree', 'remove', '--force', root]).catch(() => '');
-  await rm(root, { recursive: true, force: true });
+  await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
   return { removed: true };
 }

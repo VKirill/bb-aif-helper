@@ -44,8 +44,8 @@ test('contextBlock with parallel spawns workers on BB-made copies and keeps prov
   for (const part of [
     'Parallel mode', '--max 3', '--environment-provider aif-chat-worktree', '"basePath":"<base>"', '"ref":"<sha>"', 'git rev-parse HEAD',
     'environment.path', 'git rev-parse --show-toplevel', 'BB removes its copy',
-    'git status --porcelain', 'git -C "<top>" apply --check "<patch>"', '--output="<patch>"', '--no-relative', '--no-color', '"name":"<plan>-<taskId>-<try>"', '$env:BB_PROJECT_ID', '--target "<plan path>"', '--src-prefix=a/ --dst-prefix=b/', '--literal-pathspecs', '--prompt-file "<brief>"', 'C:/Users/me/repo',
-    "git --literal-pathspecs commit -m 'chore(aif): <plan> · before group N' -- <files>", 'there is nothing to undo',
+    'git -C "<top>" apply --check "<patch>"', '--output="<patch>"', '--no-relative', 'git -C "<top>" status --porcelain', 'git -C "<top>" --literal-pathspecs add -- <files>', 'Changes in \`.ai-factory/skill-context/\`', 'Windows PowerShell 5.1', '--no-color', '"name":"<plan>-<taskId>-<try>"', '$env:BB_PROJECT_ID', '--target "<plan path>"', '--src-prefix=a/ --dst-prefix=b/', '--literal-pathspecs', '--prompt-file "<brief>"', 'C:/Users/me/repo',
+    "git -C \"<top>\" --literal-pathspecs commit -m 'chore(aif): <plan> · before group N' -- <files>", 'there is nothing to undo',
     "--provider 'codex'", "--model 'gpt-6.2-sol'", "--reasoning-level 'high'", "--service-tier 'fast'",
     'bb plugin run aif-chat groups', 'Do not commit',
     'stop and ask the owner; never commit them',
@@ -156,4 +156,30 @@ test('reads and saves of one project folder run one at a time; other folders do 
   assert.ok(log.indexOf('other:end') < log.indexOf('refresh:end'), 'another folder is not queued behind this one');
   await assert.rejects(serialByRoot('/p', async () => { throw new Error('boom'); }));
   assert.equal(await serialByRoot('/p', async () => 'after a failure'), 'after a failure');
+});
+
+test('the refresh keeps CRLF files CRLF, updates the research block, and never fails a read', async () => {
+  const root = await project();
+  await writeDelegation(root, { mode: 'bb', providerId: 'codex', model: 'm', parallel: 2 });
+  await writeDelegation(root, { mode: 'bb', providerId: 'codex', model: 'r' }, 'research');
+  const implement = join(root, CONTEXT_PATH), research = join(root, RESEARCH_PATH);
+  // A Windows checkout with core.autocrlf: every line ends in CRLF; a current block must stay byte for byte.
+  const crlf = (await readFile(implement, 'utf8')).replace(/\n/g, '\r\n');
+  await writeFile(implement, crlf);
+  await readDelegation(root);
+  assert.equal(await readFile(implement, 'utf8'), crlf, 'no change, so git sees none');
+  // An old research block with an unquoted prompt path is brought up to date.
+  const old = (await readFile(research, 'utf8')).replace('--prompt-file "<prompt>"', '--prompt-file <prompt>');
+  await writeFile(research, old);
+  await readDelegation(root + '/');
+  assert.ok((await readFile(research, 'utf8')).includes('--prompt-file "<prompt>"'));
+  if (process.platform !== 'win32') {
+    const { chmod } = await import('node:fs/promises');
+    await writeFile(research, old);
+    await chmod(join(root, '.ai-factory/skill-context'), 0o555);
+    try {
+      const state = await readDelegation(root);
+      assert.equal(state.research.mode, 'bb', 'a folder that cannot be written still answers the read');
+    } finally { await chmod(join(root, '.ai-factory/skill-context'), 0o755); }
+  }
 });
