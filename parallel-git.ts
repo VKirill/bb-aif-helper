@@ -1,6 +1,6 @@
 import { execFile } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
-import { lstat, mkdir, mkdtemp, readFile, readlink, stat, symlink, writeFile } from 'node:fs/promises';
+import { lstat, mkdir, mkdtemp, readdir, readFile, readlink, stat, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { withoutManagedBlocks } from './delegation.ts';
@@ -101,12 +101,8 @@ async function refuseUnsafe(top: string, files: Change[], plugin: Change[]) {
   // Something staged by hand (a `git rm --cached`, an `add --chmod`, a partial `add -p`) is a decision the disk does
   // not show; the checkpoint does not guess it. The owner or the coordinator commits or unstages it first.
   const staged = [...files, ...plugin].filter(f => f.status[0] !== ' ' && f.status[0] !== '?').map(f => f.path);
-  if (staged.length) {
-    const named = staged.slice(0, 5).map(f => `"${f}"`).join(' ') + (staged.length > 5 ? ' …' : '');
-    const hasHead = await git(top, ['rev-parse', '--verify', '-q', 'HEAD^{commit}']).then(() => true, () => false);
-    const unstage = hasHead ? `git restore --staged -- ${named}` : `git rm -q --cached -r -- ${named}`;
-    throw new Error(`В индексе уже есть изменения: ${named}. Закоммитьте их или уберите из индекса (${unstage}), потом снова checkpoint.`);
-  }
+  // No ready-made command: which version to keep is the owner's decision, and a pasted command could lose one.
+  if (staged.length) throw new Error(`В индексе уже есть изменения (пути от корня репозитория): ${staged.slice(0, 20).join(', ')}${staged.length > 20 ? ` и ещё ${staged.length - 20}` : ''}. Пусть владелец закоммитит их или уберёт из индекса, потом снова checkpoint.`);
 }
 
 /**
@@ -205,6 +201,25 @@ export async function bringBack(input: { root: string; copy: string }) {
   const tokens = raw.split('\0'), gitlinks: string[] = [];
   for (let i = 0; i + 1 < tokens.length; i += 2) if (/^:(160000 \S+|\S+ 160000) /.test(tokens[i])) gitlinks.push(tokens[i + 1]);
   if (gitlinks.length) return { applied: false as const, empty: false as const, files, error: `Исполнитель изменил подмодуль: ${gitlinks.join(', ')}. Его не перенести патчем — перенесите вручную.` };
+  // A patch that would empty the folder this chat works in (the worker renamed or removed it) is refused before
+  // anything changes: the folder survives if a file on disk stays in it or the patch adds one.
+  if (mine.prefix) {
+    const deleted = new Set<string>(), added: string[] = [];
+    for (let i = 0; i + 1 < tokens.length; i += 2) {
+      if (/ D$/.test(tokens[i])) deleted.add(tokens[i + 1]); else added.push(tokens[i + 1]);
+    }
+    const keeps = async (dir: string, rel: string): Promise<boolean> => {
+      for (const entry of await readdir(dir, { withFileTypes: true }).catch(() => [])) {
+        const r = rel + entry.name;
+        if (entry.isDirectory() && !entry.isSymbolicLink()) { if (await keeps(path.join(dir, entry.name), r + '/')) return true; }
+        else if (!deleted.has(r)) return true;
+      }
+      return false;
+    };
+    if (!added.some(f => f.startsWith(mine.prefix)) && !(await keeps(path.resolve(input.root), mine.prefix)))
+      return { applied: false as const, empty: false as const, files,
+        error: `Исполнитель переименовал или удалил папку ${mine.prefix}, в которой работает этот чат: перенесите это вручную, после остальных задач.` };
+  }
   // The receipt is written after the apply; a copy where it cannot be written is refused before anything changes.
   await writeFile(mark, last ? `${last}\n` : '').catch((cause: Error) => { throw new Error(`Копия исполнителя недоступна для записи: ${cause.message}`); });
   const dir = await mkdtemp(path.join(tmpdir(), 'aif-patch-'));
@@ -224,9 +239,6 @@ export async function bringBack(input: { root: string; copy: string }) {
     };
     try { await git(mine.top, ['apply', '--whitespace=nowarn', patch]); }
     catch (cause) { return undo((cause as Error).message); }
-    // The patch removed the folder this chat works in (the worker renamed or emptied it): put everything back.
-    if (!(await stat(path.resolve(input.root)).then(s => s.isDirectory(), () => false)))
-      return undo(`Исполнитель переименовал или удалил папку ${mine.prefix || '.'}, в которой работает этот чат: перенесите это вручную, после остальных задач.`);
     await writeFile(mark, `${tree}\n`);
     return { applied: true as const, files };
   } finally { await removePath(dir).catch(() => undefined); }

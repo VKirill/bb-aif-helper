@@ -380,7 +380,7 @@ test('checkpoint refuses what is only staged, never commits ignored files, names
   let listed = await listChanges({ root: top });
   assert.deepEqual(listed.files.map(f => f.path), ['.gitignore', 'a.txt', 'config.txt', 'script.sh']);
   const before = sh(top, 'rev-parse', 'HEAD');
-  await assert.rejects(checkpoint({ root: top, token: listed.token, message: 'cp' }), /В индексе уже есть изменения: "config\.txt" "script\.sh".*git restore --staged -- "config\.txt" "script\.sh"/);
+  await assert.rejects(checkpoint({ root: top, token: listed.token, message: 'cp' }), /В индексе уже есть изменения \(пути от корня репозитория\): config\.txt, script\.sh\. Пусть владелец/);
   assert.equal(sh(top, 'rev-parse', 'HEAD'), before, 'nothing is committed before the refusal');
   // The owner commits what they staged; then the checkpoint takes the rest.
   sh(top, 'commit', '-qm', 'owner');
@@ -496,12 +496,16 @@ test('bring-back keeps the chat folder: a later move out of it is undone, a dele
   const out = await bringBack({ root: base, copy: one.path });
   assert.equal(out.applied, false);
   assert.match(out.error ?? '', /переименовал или удалил папку sec\//);
-  assert.equal(text(path.join(base, 'b.txt')), 'b\n', 'everything is back');
+  assert.equal(text(path.join(base, 'b.txt')), 'b\n', 'nothing was touched');
   assert.equal(existsSync(path.join(top, 'b.txt')), false);
+  // An untracked file the owner keeps in the folder keeps it alive: then the move is fine.
+  writeFileSync(path.join(base, 'notes.local'), 'mine\n');
+  assert.equal((await bringBack({ root: base, copy: one.path })).applied, true);
+  assert.equal(existsSync(path.join(top, 'b.txt')), true);
   for (const made of [one, two]) await removeWorktree({ basePath: base, root: made.root });
 });
 
-test('checkpoint: a staged edit hidden behind a block refresh is refused; a repository without commits gets a working command', async () => {
+test('checkpoint: a staged edit hidden behind a block refresh is refused, and the message names files, not commands', async () => {
   const top = path.join(sandbox, 'hidden repo');
   const sh = (cwd: string, ...args: string[]) => execFileSync('git', ['-C', cwd, '-c', 'user.email=t@t', '-c', 'user.name=t', ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
   const skill = path.join(top, '.ai-factory', 'skill-context', 'aif-implement');
@@ -517,7 +521,7 @@ test('checkpoint: a staged edit hidden behind a block refresh is refused; a repo
   mkdirSync(fresh, { recursive: true });
   sh(fresh, 'init', '-q');
   writeFileSync(path.join(fresh, 'file.txt'), 'x\n'); sh(fresh, 'add', 'file.txt');
-  await assert.rejects(checkpoint({ root: fresh, token: (await listChanges({ root: fresh })).token, message: 'cp' }), /git rm -q --cached -r -- "file\.txt"/);
-  sh(fresh, 'rm', '-q', '--cached', '-r', '--', 'file.txt'); // the command from the message works
-  assert.equal(sh(fresh, 'status', '--porcelain').trim(), '?? file.txt');
+  // No shell command in the message: pasted, it could lose the staged version or expand `$name`.
+  await assert.rejects(checkpoint({ root: fresh, token: (await listChanges({ root: fresh })).token, message: 'cp' }),
+    (e: Error) => /file\.txt/.test(e.message) && !/git (restore|rm|reset)/.test(e.message));
 });
