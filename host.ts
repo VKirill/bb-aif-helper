@@ -69,7 +69,11 @@ export default experimental_defineHostEntry({
   contract: hostContract,
   experimental_signals: hostSignals,
   handlers: {
-    collect: (input, context) => collectSnapshot(input, context.signal),
+    collect: async (input, context) => {
+      // The agent reads the delegation blocks straight from skill-context; keep them current after a plugin update.
+      await readDelegation(input.root).catch(() => undefined);
+      return collectSnapshot(input, context.signal);
+    },
     delegation: input => readDelegation(input.root),
     setDelegation: input => writeDelegation(input.root, input.choice, input.role),
     planText: input => readPlanText(input.root, input.target),

@@ -136,12 +136,21 @@ test('the real mobile-panel-smart-chips plan groups as the manual layout did', (
 test('Depends on ranges expand over the plan tasks only, so a huge range is cheap and still checked', () => {
   const plan = (deps: string) => ['## Tasks', '- [ ] Task 1: A. Files: `a.ts`. Depends on —', '- [ ] Task 2: B. Files: `b.ts`. Depends on —',
     '- [ ] Task 5: C. Files: `c.ts`. Depends on —', `- [ ] Task 7: D. Files: \`d.ts\`. Depends on ${deps}`].join('\n');
-  assert.deepEqual(parsePlanTasks(plan('1-5'))[3].dependsOn, [1, 2, 5]);
-  assert.deepEqual(parsePlanTasks(plan('5-1'))[3].dependsOn, [1, 2, 5]);
+  assert.deepEqual(parsePlanTasks(plan('1-2'))[3].dependsOn, [1, 2]);
+  assert.deepEqual(parsePlanTasks(plan('2-1'))[3].dependsOn, [1, 2]);
+  assert.deepEqual(parallelGroups(plan('1-2'), 4), { groups: [[1, 2, 5], [7]], coordinatorOnly: [] });
+  // A gap inside a range is a missing task, as before ranges were bounded.
+  assert.deepEqual(parallelGroups(plan('1-5'), 4), { error: 'Задача 7 зависит от несуществующей задачи 3.' });
   const started = Date.now();
-  assert.deepEqual(parsePlanTasks(plan('1-999999999999'))[3].dependsOn, [1, 2, 5, 7, 999999999999]);
-  assert.deepEqual(parallelGroups(plan('1-999999999999'), 4), { error: 'Задача 7 зависит от несуществующей задачи 999999999999.' });
-  assert.deepEqual(parallelGroups(plan('3-5'), 4), { error: 'Задача 7 зависит от несуществующей задачи 3.' });
-  assert.ok(Date.now() - started < 1000, 'ranges are not enumerated number by number');
-  assert.deepEqual(parallelGroups(plan('1-5'), 4), { groups: [[1, 2, 5], [7]], coordinatorOnly: [] });
+  assert.deepEqual(parsePlanTasks(plan('1-999999999999'))[3].dependsOn, [1, 2, 3, 999999999999]);
+  assert.deepEqual(parallelGroups(plan('1-999999999999'), 4), { error: 'Задача 7 зависит от несуществующей задачи 3.' });
+  assert.ok(Date.now() - started < 1000, 'ranges stop at the first gap instead of counting to the end');
+  assert.deepEqual(parallelGroups(plan('9007199254740993-9007199254740993'), 4), { error: 'Слишком большой номер задачи: 9007199254740992.' });
+});
+
+test('files that differ only in case or slash direction are one file', () => {
+  assert.equal(filesOverlap(['src/Foo.ts'], ['SRC/foo.ts']), true);
+  const text = ['## Tasks', '- [ ] Task 1: A. Files: `src/Foo.ts`. Depends on —', '- [ ] Task 2: B. Files: `SRC\\foo.ts`. Depends on —'].join('\n');
+  assert.deepEqual(parsePlanTasks(text)[1].files, ['SRC/foo.ts']);
+  assert.deepEqual(parallelGroups(text, 4), { groups: [[1], [2]], coordinatorOnly: [] });
 });

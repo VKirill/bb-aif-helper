@@ -44,14 +44,15 @@ test('contextBlock with parallel spawns workers on BB-made copies and keeps prov
   for (const part of [
     'Parallel mode', '--max 3', '--environment-provider aif-chat-worktree', '"basePath":"<base>"', '"ref":"<sha>"', 'git rev-parse HEAD',
     'environment.path', 'git rev-parse --show-toplevel', 'BB removes its copy',
-    'git status --porcelain', 'git -C <top> apply --check <patch>', '--output=<patch>', 'there is nothing to undo',
+    'git status --porcelain', 'git -C "<top>" apply --check "<patch>"', '--output="<patch>"', '--no-relative', 'C:/Users/me/repo',
+    "git commit -m 'chore(aif): <plan> · before group N' -- <files>", 'there is nothing to undo',
     "--provider 'codex'", "--model 'gpt-6.2-sol'", "--reasoning-level 'high'", "--service-tier 'fast'",
     'bb plugin run aif-chat groups', 'Do not commit',
     'stop and ask the owner; never commit them',
     'the files named in the error',
   ]) assert.ok(text.includes(part), part);
   // A three-way apply leaves unmerged files that `git checkout` cannot undo; it must never be suggested.
-  for (const absent of ['--3way <', 'git checkout --', ' > <tmp>']) assert.ok(!text.includes(absent), absent);
+  for (const absent of ['--3way <', 'git checkout --', ' > <tmp>', 'commit -am']) assert.ok(!text.includes(absent), absent);
 });
 
 test('writeDelegation stores parallel in phases.implement.model and manages the aif-plan block', async () => {
@@ -124,4 +125,23 @@ test('delegation defaults keep parallel together with the model', async () => {
     const implement = writes.filter(c => (c.role ?? 'implement') === 'implement').at(-1)!;
     assert.deepEqual(implement.choice, { mode: 'bb', providerId: 'devin', model: 'swe-2-flash', parallel: 3 });
   } finally { await h.harness.lifecycle.dispose(); }
+});
+
+test('a block saved by an older version is rewritten on read; the owner text and an unchanged block stay as they are', async () => {
+  const root = await project();
+  const choice = { mode: 'bb' as const, providerId: 'codex', model: 'gpt-6.2-sol', reasoning: 'high', parallel: 2 };
+  await writeDelegation(root, choice);
+  const file = join(root, CONTEXT_PATH);
+  const current = await readFile(file, 'utf8');
+  // What a project saved before the update holds: the three-way apply that can leave an unmerged index.
+  const stale = '# Owner notes\n\n' + current.replace('git -C "<top>" apply --check "<patch>"', 'git apply --3way <tmp>/task-<taskId>.patch');
+  await writeFile(file, stale);
+  await readDelegation(root);
+  const refreshed = await readFile(file, 'utf8');
+  assert.ok(!refreshed.includes('--3way <tmp>'), 'the old command is gone');
+  assert.ok(refreshed.includes('git -C "<top>" apply --check "<patch>"'));
+  assert.ok(refreshed.startsWith('# Owner notes\n'), 'text outside the markers is kept');
+  const again = await readFile(file, 'utf8');
+  await readDelegation(root);
+  assert.equal(await readFile(file, 'utf8'), again, 'a current block is not rewritten');
 });

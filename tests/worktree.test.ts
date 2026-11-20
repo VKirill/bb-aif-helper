@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, realpathSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, realpathSync, renameSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { createWorktree, removeWorktree, worktreesRoot } from '../worktree.ts';
@@ -50,18 +50,48 @@ test('a repository root is copied at the requested commit; foreign folders and b
   await assert.rejects(removeWorktree({ basePath: repo, root: path.join(worktreesRoot(), '..', 'x') }), /не копия AI Factory/);
 });
 
+test('a copy survives a failing checkout hook cleanly, and is removed even after its base folder is renamed', async () => {
+  const sh = (cwd: string, ...args: string[]) => execFileSync('git', ['-C', cwd, '-c', 'user.email=t@t', '-c', 'user.name=t', ...args], { encoding: 'utf8' }).trim();
+  // A repository named `..odd`: its copies live in `..odd-<hash>`, which is still inside the copies folder.
+  const odd = path.join(sandbox, '..odd');
+  mkdirSync(path.join(odd, 'sec'), { recursive: true });
+  writeFileSync(path.join(odd, 'sec', 'a.txt'), 'A\n');
+  sh(odd, 'init', '-q'); sh(odd, 'add', '-A'); sh(odd, 'commit', '-qm', 'init');
+  const hooks = path.join(sandbox, 'hooks'); mkdirSync(hooks, { recursive: true });
+  writeFileSync(path.join(hooks, 'post-checkout'), '#!/bin/sh\nexit 1\n', { mode: 0o755 });
+  sh(odd, 'config', 'core.hooksPath', hooks);
+  await assert.rejects(createWorktree({ basePath: path.join(odd, 'sec'), name: 'hooked' }));
+  assert.equal(sh(odd, 'worktree', 'list', '--porcelain').split('\n').filter(l => l.startsWith('worktree ')).length, 1, 'no copy stays registered');
+  sh(odd, 'config', '--unset', 'core.hooksPath');
+  const made = await createWorktree({ basePath: path.join(odd, 'sec'), name: 'hooked' });
+  // A section that is not in the requested commit yet: no copy is left behind.
+  const first = sh(odd, 'rev-parse', 'HEAD');
+  mkdirSync(path.join(odd, 'later'));
+  writeFileSync(path.join(odd, 'later', 'b.txt'), 'B\n');
+  sh(odd, 'add', '-A'); sh(odd, 'commit', '-qm', 'later');
+  await assert.rejects(createWorktree({ basePath: path.join(odd, 'later'), name: 'early', ref: first }), /нет в коммите/);
+  assert.equal(sh(odd, 'worktree', 'list', '--porcelain').split('\n').filter(l => l.startsWith('worktree ')).length, 2);
+  renameSync(path.join(odd, 'sec'), path.join(odd, 'sec-renamed'));
+  await removeWorktree({ basePath: path.join(odd, 'sec'), root: made.root });
+  assert.equal(existsSync(made.root), false);
+});
+
 // Runs step 6 of the parallel instructions exactly as the coordinator reads them: the same commands, in order.
 test('bringing results back: a conflicting patch changes nothing and earlier results survive', async () => {
   const block = contextBlock({ mode: 'bb', providerId: 'codex', model: 'm', parallel: 2 });
   const step = block.slice(block.indexOf('\n6. '), block.indexOf('\n7. '));
-  const commands = [...step.matchAll(/^ {3}- `(git -C <(?:copy|top)> [^`]+)`$/gm)].map(m => m[1]);
-  assert.deepEqual(commands.map(c => c.split(' ').slice(3, 5).join(' ')), ['add -A', 'diff --cached', 'apply --check', 'apply <patch>']);
+  const commands = [...step.matchAll(/^ {3}- `(git -C "<(?:copy|top)>" [^`]+)`$/gm)].map(m => m[1]);
+  assert.deepEqual(commands.map(c => c.split(' ').slice(3, 5).join(' ')), ['add -A', 'diff --cached', 'apply --check', 'apply "<patch>"']);
+  // Every path placeholder is quoted, so a shell keeps a path with spaces as one argument.
+  for (const c of commands) assert.ok(!/(^|[^"])<(copy|top|patch)>/.test(c), c);
   const top = path.join(sandbox, 'apply-repo');
   const sh = (cwd: string, ...args: string[]) => execFileSync('git', ['-C', cwd, '-c', 'user.email=t@t', '-c', 'user.name=t', ...args], { encoding: 'utf8' }).trim();
   mkdirSync(path.join(top, 'sec'), { recursive: true });
   writeFileSync(path.join(top, 'sec', 'a.txt'), 'one\ntwo\nthree\n');
   writeFileSync(path.join(top, 'sec', 'b.txt'), 'b\n');
-  sh(top, 'init', '-q'); sh(top, 'add', '-A'); sh(top, 'commit', '-qm', 'init');
+  // Same contents at the root: with diff.relative a patch made in `sec/` would name the root file instead.
+  writeFileSync(path.join(top, 'a.txt'), 'one\ntwo\nthree\n');
+  sh(top, 'init', '-q'); sh(top, 'config', 'diff.relative', 'true'); sh(top, 'add', '-A'); sh(top, 'commit', '-qm', 'init');
   const base = path.join(top, 'sec');
   const sha = sh(top, 'rev-parse', 'HEAD');
   const [one, two] = [await createWorktree({ basePath: base, name: 'apply-1', ref: sha }), await createWorktree({ basePath: base, name: 'apply-2', ref: sha })];
@@ -73,13 +103,17 @@ test('bringing results back: a conflicting patch changes nothing and earlier res
   const bringBack = (copy: string, taskId: number) => {
     const patch = path.join(sandbox, `task-${taskId}.patch`);
     for (const command of commands) {
-      // Split the template first: a path with a space must stay one argument.
-      const args = command.split(' ').slice(1).map(arg => arg.replace('<copy>', copy).replace('<top>', top).replace('<patch>', patch));
+      // Like a shell: split the template on spaces outside double quotes, then put each path in as one value.
+      // A replacer function keeps `$&` and other `$` sequences in a path literal.
+      const values: Record<string, string> = { '<copy>': copy, '<top>': top, '<patch>': patch };
+      const args = command.match(/(?:[^\s"]+|"[^"]*")+/g)!.slice(1)
+        .map(arg => arg.replace(/"/g, '').replace(/<copy>|<top>|<patch>/g, key => values[key]));
       execFileSync('git', args, { encoding: 'utf8', stdio: 'pipe' });
     }
   };
   bringBack(one.path, 1);
   assert.equal(text(path.join(base, 'a.txt')), 'one\nTASK1\nthree\n');
+  assert.equal(text(path.join(top, 'a.txt')), 'one\ntwo\nthree\n', 'the root file with the same contents is untouched');
   assert.deepEqual([...readFileSync(path.join(base, 'logo.bin'))], [0, 255, 1, 254, 0]);
   const snapshot = () => [sh(top, 'status', '--porcelain=v1', '-uall'), sh(top, 'ls-files', '-s'), sh(top, 'diff', '--binary'),
     readFileSync(path.join(base, 'a.txt'), 'utf8'), readFileSync(path.join(base, 'b.txt'), 'utf8')];

@@ -32,8 +32,7 @@ function parseDependsOn(line: string): DependsHint {
   if (!m) return null;
   const cap = m[1].trim();
   if (/^(none|нет)$/i.test(cap) || /^[—–-](?!\d)/.test(cap)) return 'none';
-  // A range is kept as its two ends: it is expanded later over the plan's real task ids, so `1-999999999`
-  // costs no more than the plan is long, and an end that is not a task still fails the reference check.
+  // A range is kept as its two ends and expanded later against the plan's real task ids (resolveDependsOn).
   const ranges: [number, number][] = [];
   const ids: number[] = [];
   const rest = cap.replace(FILE_RANGE, (_all, a: string, b: string) => {
@@ -48,9 +47,15 @@ function parseDependsOn(line: string): DependsHint {
 function resolveDependsOn(hint: DependsHint, taskIds: number[]): PlanTask['dependsOn'] {
   if (hint === null || hint === 'none') return hint;
   const ids = new Set(hint.ids);
+  const known = new Set(taskIds);
   for (const [a, b] of hint.ranges) {
+    // Walks up only while the ids exist and stops at the first gap, which stays in the list and fails the
+    // reference check: `1-999999999` costs no more than the plan is long, and `1-3` without task 2 is an error.
     const lo = Math.min(a, b), hi = Math.max(a, b);
-    for (const id of taskIds) if (id >= lo && id <= hi) ids.add(id);
+    for (let id = lo; id <= hi; id++) {
+      ids.add(id);
+      if (!known.has(id)) break;
+    }
   }
   return [...ids].sort((x, y) => x - y);
 }
@@ -66,7 +71,7 @@ function parseFiles(line: string): string[] | null {
   for (const m of sub.matchAll(FILE_TOKEN)) {
     const token = m[1];
     if (BAD_FILE.test(token)) return null;
-    let f = token;
+    let f = token.replace(/\\/g, '/');
     if (f.startsWith('./')) f = f.slice(2);
     if (f.endsWith('/')) f = f.slice(0, -1);
     files.push(f);
@@ -122,8 +127,11 @@ export function parsePlanTasks(text: string): PlanTask[] {
   return tasks;
 }
 
+/** Case-insensitive: on Windows and macOS `src/Foo.ts` and `SRC/foo.ts` are one file, so tasks touching them never run together. */
 export function filesOverlap(a: string[], b: string[]): boolean {
-  return a.some(x => b.some(y => x === y || x.startsWith(y + '/') || y.startsWith(x + '/')));
+  const lower = (list: string[]) => list.map(f => f.toLowerCase());
+  const [la, lb] = [lower(a), lower(b)];
+  return la.some(x => lb.some(y => x === y || x.startsWith(y + '/') || y.startsWith(x + '/')));
 }
 
 export type ParallelGroups = { groups: number[][]; coordinatorOnly: number[] } | { error: string };
@@ -138,6 +146,8 @@ export function parallelGroups(text: string, max: number): ParallelGroups {
   if (!Number.isFinite(limit)) limit = 1;
   limit = Math.min(4, Math.max(1, limit));
 
+  const huge = tasks.flatMap(t => [t.id, ...(Array.isArray(t.dependsOn) ? t.dependsOn : [])]).find(id => !Number.isSafeInteger(id));
+  if (huge !== undefined) return { error: `Слишком большой номер задачи: ${huge}.` };
   const byId = new Map(tasks.map(t => [t.id, t]));
   for (const t of tasks) {
     if (!Array.isArray(t.dependsOn)) continue;

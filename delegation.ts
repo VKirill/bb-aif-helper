@@ -90,7 +90,24 @@ export async function readDelegation(root: string): Promise<DelegationState> {
   let research = selfSlots();
   try { research = parseResearch(await readText(join(root, RESEARCH_PATH))); } catch { /* unreadable context: research stays self */ }
   const base = await readImplement(root);
+  if (base.choice.mode === 'bb') await refreshImplementBlocks(root, base.choice);
   return { ...base, ...research };
+}
+
+/**
+ * The managed blocks are text the agent follows, written when the owner saved the choice. After a plugin update
+ * they would keep the old commands (for example `git apply --3way`) until the next save, so every read rewrites a
+ * block that differs from what this version generates. Text outside the markers is never touched.
+ */
+async function refreshImplementBlocks(root: string, choice: Extract<DelegationChoice, { mode: 'bb' }>) {
+  const contextFile = join(root, CONTEXT_PATH);
+  const context = await readText(contextFile);
+  const nextContext = mergeContextBlock(context, contextBlock(choice));
+  if (nextContext !== context) await writeAtomic(contextFile, nextContext);
+  const planFile = join(root, PLAN_CONTEXT_PATH);
+  const planText = await readText(planFile);
+  const nextPlan = mergeContextBlock(planText, choice.parallel ? planRuleBlock() : null, PLAN_START, PLAN_END);
+  if (nextPlan !== planText) { if (nextPlan) await writeAtomic(planFile, nextPlan); else await rm(planFile, { force: true }); }
 }
 
 async function readImplement(root: string): Promise<Omit<DelegationState, ResearchRole>> {
@@ -186,8 +203,8 @@ The owner allowed up to ${n} workers at once. Run independent plan tasks in para
 
 1. Get the groups: \`bb plugin run aif-chat groups --target <plan path> --max ${n} --json\`. It answers \`{ groups, coordinatorOnly }\` — groups of task ids in execution order — or \`{ error }\`. On \`error\`, or for a fix plan, ultra bundle or OpenSpec change, use the one-worker flow above. Tasks in \`coordinatorOnly\` (commit and deploy tasks) you do yourself, as the plan says. A group with one task also uses the one-worker flow.
 2. Before each group with two or more tasks, \`git status --porcelain\` must show only your own changes from earlier tasks of this plan. If it shows changes you did not make, stop and ask the owner; never commit them.
-3. Checkpoint: if there are changes from earlier tasks, commit them locally (no push) with \`git commit -am 'chore(aif): <plan> · before group N'\` after \`git add\` of exactly those files. The copies are built from a commit and would not see uncommitted work.
-4. For each task of the group spawn its worker on a fresh copy that BB makes from that commit (\`<base>\` = this workspace folder, \`pwd\`; \`<sha>\` = \`git rev-parse HEAD\`). The folder may be a section inside a larger repository: the copy is of the whole repository, and the worker starts in the same subfolder.
+3. Checkpoint: if there are changes from earlier tasks, commit exactly those files locally (no push): \`git add -- <files>\`, then \`git commit -m 'chore(aif): <plan> · before group N' -- <files>\`. Never \`git commit -a\`: it would also take a file someone changed after step 2. The copies are built from a commit and would not see uncommitted work.
+4. For each task of the group spawn its worker on a fresh copy that BB makes from that commit (\`<base>\` = this workspace folder as an absolute path; \`<sha>\` = \`git rev-parse HEAD\`). \`<base>\` goes inside a JSON string: write it with forward slashes (\`C:/Users/me/repo\`, \`//server/share/repo\`), never with backslashes, and escape a \`"\` as \`\\"\`. The folder may be a section inside a larger repository: the copy is of the whole repository, and the worker starts in the same subfolder.
 
 \`\`\`bash
 bb thread spawn --project "$BB_PROJECT_ID" --environment-provider aif-chat-worktree --environment-inputs '{"basePath":"<base>","name":"<plan>-<taskId>","ref":"<sha>"}' --parent-self --lifecycle-owner-thread "$BB_THREAD_ID" --parent-notifications off ${flags} --title 'AIF · <plan> · <taskId>' --prompt-file <brief> --json
@@ -195,13 +212,13 @@ bb thread spawn --project "$BB_PROJECT_ID" --environment-provider aif-chat-workt
 
    Add to each brief, after the worker rules: "You work in your own copy of the project: the folder BB opened this thread in. Before any change run \`git rev-parse --show-toplevel\`; if it fails, \`cd\` into that folder first. If dependencies are missing, install them first (\`<install command from the project's command catalog>\`). Do not commit."
 5. Wait for all workers of the group (step 4 of the one-worker flow for each id).
-6. Bring the results back one worker at a time. \`<copy>\` is \`environment.path\` from \`bb thread show <id> --json\`; \`<top>\` is \`git rev-parse --show-toplevel\` of this workspace; \`<patch>\` is the absolute path of a new file in your temporary folder, such as \`<tmp>/task-<taskId>.patch\` (\`-C\` changes the folder, so a relative path would point elsewhere). Run exactly these commands, in this order, each as its own command (git writes the patch itself, so no shell redirection changes its encoding):
-   - \`git -C <copy> add -A\`
-   - \`git -C <copy> diff --cached --binary HEAD --output=<patch>\`
-   - \`git -C <top> apply --check <patch>\`
-   - \`git -C <top> apply <patch>\`
+6. Bring the results back one worker at a time. \`<copy>\` is \`environment.path\` from \`bb thread show <id> --json\`; \`<top>\` is \`git rev-parse --show-toplevel\` of this workspace; \`<patch>\` is the absolute path of a new file in your temporary folder, such as \`<tmp>/task-<taskId>.patch\` (\`-C\` changes the folder, so a relative path would point elsewhere). Run exactly these commands, in this order, each as its own command, keeping the double quotes around every path (paths may contain spaces). git writes the patch itself, so no shell redirection changes its encoding, and the diff flags keep the project's git settings (\`diff.relative\`, external diff tools, text conversion) out of the patch:
+   - \`git -C "<copy>" add -A\`
+   - \`git -C "<copy>" diff --cached --binary --no-relative --no-ext-diff --no-textconv HEAD --output="<patch>"\`
+   - \`git -C "<top>" apply --check "<patch>"\`
+   - \`git -C "<top>" apply "<patch>"\`
 
-   Ignored files such as \`node_modules\` and \`dist\` stay out of the patch. An empty patch means the worker changed nothing: skip both apply commands and treat the task as not done. Without \`--3way\`, \`git apply\` changes all files of the patch or none, and never touches the index, so a refused patch leaves this workspace and the results of earlier tasks as they were. If \`apply --check\` or \`apply\` fails, apply nothing more for this group: do not retry with \`--3way\`, and do not run \`git checkout\`, \`git reset\` or \`git stash\` — there is nothing to undo. Stop and report the task and the files named in the error to the owner. After a successful apply, review the diff and run that task's verification as in step 5 of the one-worker flow.
+   Ignored files such as \`node_modules\` and \`dist\` stay out of the patch. An empty patch means the worker changed nothing: skip both apply commands and treat the task as not done. Without \`--3way\`, \`git apply\` never touches the index and refuses a patch that does not fit before it writes anything, so a failed \`apply --check\` leaves this workspace and the results of earlier tasks exactly as they were. If \`apply --check\` fails, apply nothing more for this group: do not retry with \`--3way\`, and do not run \`git checkout\`, \`git reset\` or \`git stash\` — there is nothing to undo. Stop and report the task and the files named in the error to the owner. If \`apply\` itself fails after a passing check (a file could not be written: permissions, a locked file), some files of that patch may already be changed: do not try to undo it either; stop and report the error and \`git -C "<top>" status --porcelain\` to the owner. After a successful apply, review the diff and run that task's verification as in step 5 of the one-worker flow.
 7. Mark each task done only after its patch is applied and verified. Then archive its worker (\`bb thread archive <id>\`); BB removes its copy five minutes later.
 8. Continue with the next group. The final commits stay as the plan describes; the local checkpoint commits are part of them and are never pushed without the owner's approval.
 

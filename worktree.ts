@@ -1,6 +1,6 @@
 import { execFile } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { mkdir, stat } from 'node:fs/promises';
+import { mkdir, rm, stat } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
@@ -32,18 +32,39 @@ export async function createWorktree(input: { basePath: string; name: string; re
   const root = path.join(worktreesRoot(), repoKey, input.name);
   if (await exists(root)) throw new Error(`Копия ${root} уже существует`);
   await mkdir(path.dirname(root), { recursive: true });
-  await git(top, ['worktree', 'add', '--detach', root, sha]);
+  // A copy that fails after git registered it (a post-checkout hook, a full disk, a missing section) is removed:
+  // nothing else would ever remove it, and the next try with the same name would say it already exists.
+  const discard = async () => {
+    await git(top, ['worktree', 'remove', '--force', root]).catch(() => '');
+    await rm(root, { recursive: true, force: true });
+    await git(top, ['worktree', 'prune']).catch(() => '');
+  };
+  try {
+    await git(top, ['worktree', 'add', '--detach', root, sha]);
+  } catch (cause) { await discard(); throw cause; }
   // git prints the prefix with `/` and a trailing slash; resolve gives the machine's own separators without it.
-  return { root, path: path.resolve(root, prefix), sha };
+  const worker = path.resolve(root, prefix);
+  if (!(await exists(worker))) {
+    await discard();
+    throw new Error(`Папки ${prefix} нет в коммите ${sha.slice(0, 12)}: закоммитьте раздел перед запуском исполнителей`);
+  }
+  return { root, path: worker, sha };
 }
 
 /** Removes a copy made by createWorktree; a copy that is already gone counts as removed. */
 export async function removeWorktree(input: { basePath: string; root: string }): Promise<{ removed: true }> {
   const root = path.resolve(input.root);
   const inside = path.relative(worktreesRoot(), root);
-  if (!inside || inside.startsWith('..') || path.isAbsolute(inside)) throw new Error(`${root} не копия AI Factory`);
-  // git runs from the main repository: on Windows a git started inside the copy cannot delete it (Permission denied).
-  if (await exists(root)) await git(input.basePath, ['worktree', 'remove', '--force', root]);
-  else await git(input.basePath, ['worktree', 'prune']).catch(() => '');
+  // `..demo-1a2b3c4d` (a repository named `..demo`) is inside; only `..` itself or `../…` leaves the folder.
+  if (!inside || inside === '..' || inside.startsWith('..' + path.sep) || path.isAbsolute(inside)) throw new Error(`${root} не копия AI Factory`);
+  if (!(await exists(root))) {
+    await git(input.basePath, ['worktree', 'prune']).catch(() => '');
+    return { removed: true };
+  }
+  // The copy names its main repository, so a renamed or deleted base folder does not leak it. The removing git runs
+  // with --git-dir, not inside the copy: on Windows a git whose folder is the copy cannot delete it (Permission denied).
+  const common = await git(root, ['rev-parse', '--path-format=absolute', '--git-common-dir']).catch(() => null);
+  if (common) await run('git', ['--git-dir', common, 'worktree', 'remove', '--force', root], { timeout: 120_000 });
+  else await git(input.basePath, ['worktree', 'remove', '--force', root]);
   return { removed: true };
 }
