@@ -6,6 +6,7 @@ import { promisify } from 'node:util';
 import { parseDocument } from 'yaml';
 import { snapshotSchema, type HostInput, type Snapshot } from './model.ts';
 import { workflowActions } from './workflow.ts';
+import { BUILD_FILES, DOCKER_FILES, readinessSteps, type ReadinessFacts } from './readiness.ts';
 import { BASIC_PLAN_ROOTS, usesBasicWorkflow, isCompletedPlan } from './basic-workflow.ts';
 import { planVerification } from './plan-verification.ts';
 import { planSettings, supportsAif222 } from './aif222.ts';
@@ -18,7 +19,8 @@ const obj = (v: unknown): Record<string, any> => v && typeof v === 'object' && !
 const str = (v: unknown): string | null => typeof v === 'string' && v.trim() ? v : null;
 export function safeRelative(value: string): string {
   if (!value || value.length > 1000 || path.isAbsolute(value) || /^[A-Za-z]:|[\x00-\x1f]/.test(value)) throw new Error('Нужен относительный путь внутри проекта.');
-  const normalized = value.replaceAll('\\', '/');
+  // config.yaml writes directory paths with a trailing slash (`docs/`, `.ai-factory/plans/`).
+  const normalized = value.replaceAll('\\', '/').replace(/(?<=[^/])\/+$/, '');
   if (normalized.split('/').some(p => !p || p === '..' || p === '.' || p === '.git' || p.includes(':'))) throw new Error('Недопустимый путь артефакта.');
   return normalized;
 }
@@ -153,6 +155,14 @@ class Reader {
   }
 }
 
+export async function readPlanText(root: string, target: string): Promise<{ path: string; text: string }> {
+  const rel = safeRelative(target.replace(/^@/, ''));
+  if (!rel.endsWith('.md')) throw new Error('План должен быть файлом .md.');
+  const text = await new Reader(root).read(rel);
+  if (text === null) throw new Error(`План не найден: ${rel}`);
+  return { path: rel, text };
+}
+
 async function git(root: string, args: string[], signal?: AbortSignal, trim = true): Promise<string | null> {
   try {
     const { stdout } = await exec('git', ['--no-optional-locks', '-c', `safe.directory=${root.replaceAll('\\', '/')}`, '-c', 'core.fsmonitor=false', '-C', root, ...args],
@@ -233,7 +243,7 @@ export async function collectSnapshot(input: HostInput, signal?: AbortSignal): P
     pendingQuestions: null, pendingConfirmation: null,
     versions: { globalCli: null, globalSource: null, installed: null, sourceVersion: null, sourceWorktreeVersion: null, sourceSha: null, sourceDirty: null },
     upstream: { version: null, sha: null, ref: null, checkedAt: null, error: null },
-    extensions: [], skills: [], candidates: [], target: null, checks: [], actions: [], diagnostics: [],
+    extensions: [], skills: [], candidates: [], target: null, checks: [], actions: [], readiness: [], diagnostics: [],
   };
   if (input.cachedVersions) {
     Object.assign(s.versions, input.cachedVersions.versions, { installed: null });
@@ -336,11 +346,41 @@ export async function collectSnapshot(input: HostInput, signal?: AbortSignal): P
   const native = hub && (Object.keys(tools).length ? tools.openspec === true : aifhub.artifactProtocol === 'openspec-native');
   if (native && s.profile !== 'invalid') s.profile = 'aifhub-openspec';
   const paths = obj(config.paths);
-  // Upstream's default config uses directory paths ending in '/'. Normalize
-  // directory separators only; Reader still validates traversal and links.
+  // Directory paths in config.yaml usually end with `/`; normalize separators and strip
+  // trailing slashes so joined paths match candidate paths. Reader still validates traversal and links.
   const directory = (value: string) => value.replaceAll('\\', '/').replace(/\/+$/, '');
+  const dir = (v: unknown, fallback: string) => directory(str(v) ?? fallback);
+  const planRoot = dir(paths.plans, '.ai-factory/plans');
+  const qaRoot = dir(paths.qa, '.ai-factory/qa');
+  const openRoot = dir(obj(aifhub.openspec).root, 'openspec');
+  // Readiness probes share Reader limits and the fingerprint's seen set; a failed path is a false fact, not a failed snapshot.
+  const files: Record<string, boolean> = {};
+  const probe = async (rel: string) => {
+    try { files[rel] = (await read.read(rel)) !== null; }
+    catch { files[rel] = false; s.diagnostics.push(`Подготовка проекта: ${rel} недоступен.`); }
+  };
+  const probeDir = async (rel: string, keep?: (item: { name: string; directory: boolean }) => boolean) => {
+    const target = rel.replace(/\/+$/, '');
+    try { for (const item of await read.list(target)) if (!keep || keep(item)) files[`${target}/${item.name}`] = true; }
+    catch { s.diagnostics.push(`Подготовка проекта: каталог ${target} недоступен.`); }
+  };
+  const description = str(paths.description) ?? '.ai-factory/DESCRIPTION.md';
+  const architecture = str(paths.architecture) ?? '.ai-factory/ARCHITECTURE.md';
+  const rulesBase = str(obj(config.rules).base) ?? '.ai-factory/rules/base.md';
+  const docs = str(paths.docs) ?? 'docs';
+  const rulesFile = str(paths.rules_file) ?? '.ai-factory/RULES.md';
+  for (const rel of [description, '.ai-factory/config.yaml', architecture, rulesBase, 'AGENTS.md',
+    'lefthook.yml', '.lefthook.yml', '.pre-commit-config.yaml',
+    '.gitlab-ci.yml', '.circleci/config.yml', 'Jenkinsfile', 'bitbucket-pipelines.yml',
+    rulesFile, ...BUILD_FILES, ...DOCKER_FILES]) await probe(rel);
+  await probeDir('.husky');
+  await probeDir(docs);
+  await probeDir('.github/workflows', item => !item.directory && /\.ya?ml$/i.test(item.name));
+  const readinessFacts: ReadinessFacts = { configured: s.configured,
+    contextSkill: s.skills.includes('aif') || s.skills.includes('aif-analyze'),
+    files, paths: { description, architecture, rulesBase, docs, rulesFile } };
   if (s.profile !== 'invalid') {
-    const rules = directory(str(paths.rules) ?? '.ai-factory/rules');
+    const rules = dir(paths.rules, '.ai-factory/rules');
     const artifacts = [
       { id: 'describe', label: 'Описать проект', paths: [str(paths.description) ?? '.ai-factory/DESCRIPTION.md'], optional: false },
       { id: 'architecture', label: 'Описать архитектуру', paths: [str(paths.architecture) ?? '.ai-factory/ARCHITECTURE.md'], optional: false },
@@ -348,7 +388,7 @@ export async function collectSnapshot(input: HostInput, signal?: AbortSignal): P
       { id: 'quality', label: 'Настроить проверки', paths: ['.husky/pre-commit', 'lefthook.yml', '.lefthook.yml', '.pre-commit-config.yaml'], optional: true },
       { id: 'ci', label: 'Настроить CI', paths: ['.github/workflows/', '.gitlab-ci.yml', '.circleci/config.yml', 'Jenkinsfile', 'bitbucket-pipelines.yml'], optional: true },
       { id: 'rules', label: 'Настроить правила проекта', paths: [`${rules}/`], optional: true },
-      { id: 'docs', label: 'Создать документацию', paths: ['README.md', directory(str(paths.docs) ?? 'docs') + '/'], optional: true },
+      { id: 'docs', label: 'Создать документацию', paths: ['README.md', dir(paths.docs, 'docs') + '/'], optional: true },
       { id: 'build', label: 'Настроить сборку', paths: ['Makefile', 'Taskfile.yml', 'justfile', 'magefile.go'], optional: true },
       { id: 'docker', label: 'Настроить Docker', paths: ['Dockerfile', 'compose.yml', 'compose.yaml', 'docker-compose.yml'], optional: true },
     ];
@@ -362,9 +402,6 @@ export async function collectSnapshot(input: HostInput, signal?: AbortSignal): P
       })),
     ];
   }
-  const planRoot = directory(str(paths.plans) ?? '.ai-factory/plans');
-  const qaRoot = directory(str(paths.qa) ?? '.ai-factory/qa');
-  const openRoot = directory(str(obj(aifhub.openspec).root) ?? 'openspec');
   const branch = await git(root, ['branch', '--show-current'], signal);
   const head = await git(root, ['rev-parse', 'HEAD'], signal);
   const dirtyDiff = await git(root, ['diff', '--no-ext-diff', '--no-textconv', '--binary', 'HEAD', '--', '.'], signal);
@@ -491,10 +528,13 @@ export async function collectSnapshot(input: HostInput, signal?: AbortSignal): P
           const report = await read.read(rel);
           const parsed = report ? lastGate(report, gate) : null;
           s.checks.push({ id: gate, label, state: parsed ? parsed.status === 'pass' ? 'reported-pass' : parsed.status as 'warn' | 'fail' : report ? 'unknown' : 'notrun',
-            detail: parsed ? `${parsed.status.toUpperCase()} в отчёте; привязка к текущим inputs не подтверждена` : report ? 'Отчёт есть, валидный gate block не найден' : 'Evidence не найдено; факт запуска неизвестен',
+            detail: parsed ? `${parsed.status.toUpperCase()} в отчёте; привязка к текущим inputs не подтверждена` : report ? 'Отчёт есть, валидный gate block не найден' : 'Отчёт проверки не найден',
             path: report ? rel : null, required: native && (gate === 'verify' || gate === 'rules' && policy.requireRulesPassForDone !== false) });
         }
-        for (const [id, label, filename] of [['qa-plan', 'QA-сценарии', 'test-cases.md'], ['qa', 'Прохождение QA', 'qa-check.md'], ['coverage', 'Spec coverage', 'coverage.json'], ['readiness', 'Done readiness', 'done-readiness.json']]) {
+        // coverage.json and done-readiness.json are written only by the AIFHub extension.
+        const artifacts = [['qa-plan', 'QA-сценарии', 'test-cases.md'], ['qa', 'Прохождение QA', 'qa-check.md'],
+          ...(hub ? [['coverage', 'Spec coverage', 'coverage.json'], ['readiness', 'Done readiness', 'done-readiness.json']] : [])];
+        for (const [id, label, filename] of artifacts) {
           const rel = `${evidenceDir}/${filename}`;
           const report = await read.read(rel);
           s.checks.push({ id, label, state: report ? 'unknown' : 'notrun', detail: report ? 'Артефакт существует; результат и актуальность проверяет владелец' : 'Артефакт не найден', path: report ? rel : null,
@@ -548,6 +588,7 @@ export async function collectSnapshot(input: HostInput, signal?: AbortSignal): P
       files: [...read.seen].sort(), untracked: [...extra.seen].sort() }));
   } catch { s.inputsFingerprint = null; }
   s.fingerprint = hash(JSON.stringify([s.fingerprint, s.inputsFingerprint, s.preparation]));
+  s.readiness = s.profile === 'invalid' ? [] : readinessSteps(readinessFacts, []);
   s.actions = workflowActions(s);
   return snapshotSchema.parse(s);
 }

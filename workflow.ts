@@ -27,6 +27,22 @@ export function workflowActions(s: Snapshot): Action[] {
       reason: s.skills.includes(contextSkill) ? installedHub ? 'Настроить контекст проекта через AIFHub analyze' : 'Настроить контекст проекта через AI Factory' : `Сначала установите ${contextSkill} для ${s.runtime}`,
       available: s.skills.includes(contextSkill) },
   ];
+  const setupSkills = new Set<string>();
+  const addSetup = (id: string, label: string, skill: string, reason: string, args = '') => {
+    setupSkills.add(skill);
+    const available = s.skills.includes(skill);
+    maintenance.push({ id, label, command: `${prefix}${skill}${args}`, group: 'setup',
+      reason: available ? reason : `Сначала установите ${skill} для ${s.runtime}`, available });
+  };
+  addSetup('setup-architecture', 'Описать архитектуру', 'aif-architecture', 'Сформировать архитектурные правила проекта');
+  addSetup('quality-setup', 'Настроить проверки', 'aif-quality-setup', 'Отдельная настройка подходящих quality tools', ' setup');
+  addSetup('ci-setup', 'Настроить CI', 'aif-ci', 'Создание/аудит pipeline не означает успешный CI-run');
+  addSetup('docs-setup', 'Документация', 'aif-docs', 'Создать или обновить README и docs/');
+  addSetup('roadmap-setup', 'Roadmap', 'aif-roadmap', 'Составить или обновить ROADMAP.md');
+  addSetup('rules-setup', 'Правила кода', 'aif-rules', 'Добавить правила проекта или области');
+  addSetup('build-setup', 'Команды сборки', 'aif-build-automation', 'Makefile, Taskfile или Justfile');
+  addSetup('docker-setup', 'Docker', 'aif-dockerize', 'Dockerfile и compose');
+  addSetup('archive-plans', 'Архив планов', 'aif-archive', 'Убрать выполненные планы в архив');
   if (s.extensions.length) maintenance.push({ id: 'update-extensions', label: 'Обновить расширения', command: 'ai-factory extension update', group: 'maintenance',
     reason: 'Сначала обновить AI Factory и установку проекта, затем зарегистрированные расширения и проверить версии/команды; без --force', available: s.configured });
   if (s.configured && supportsAif222(s.versions.installed)) maintenance.push({ id: 'check-worktree', label: 'Проверить ресурсы worktree', command: 'ai-factory worktree-check --json', group: 'check',
@@ -39,9 +55,10 @@ export function workflowActions(s: Snapshot): Action[] {
   if (s.profile === 'invalid') return maintenance.filter(action => action.id === 'update-factory' || action.id === 'update-extensions');
   if (usesBasicWorkflow(s)) return basicActions(s);
   if (!s.configured) return maintenance;
+  // prep-* steps duplicate the setup actions above for the same skill; one preparation step gets one button.
   for (const step of s.preparation ?? []) {
     const command = preparationCommands[step.id];
-    if (!command || step.state !== 'missing' || !s.skills.includes(command.skill)) continue;
+    if (!command || step.state !== 'missing' || !s.skills.includes(command.skill) || setupSkills.has(command.skill)) continue;
     maintenance.push({ id: `prep-${step.id}`, label: step.label, command: `${prefix}${command.skill}${command.args ?? ''}`,
       group: 'setup', reason: 'Отдельный шаг подготовки проекта', available: true });
   }
@@ -86,7 +103,7 @@ export function workflowActions(s: Snapshot): Action[] {
     if (hub && s.profile !== 'aifhub-ultra' && !failed && verify && ['reported-pass', 'warn'].includes(verify.state)) {
       add('done', 'Проверить готовность и завершить', 'aif-done', 'next', 'Verify и done readiness различаются; финализатор проверит актуальность evidence');
     } else add('verify', 'Проверить реализацию', 'aif-verify', 'next', 'Проверить завершённые задачи и обязательные gates');
-    if (!hub) add('commit', 'Подготовить коммит', 'aif-commit', 'next', 'Verify необязателен в upstream; project-required checks сохраняются', '');
+    if (!hub && !commitNavigationDeferred(s)) add('commit', 'Подготовить коммит', 'aif-commit', 'next', 'Verify необязателен в upstream; project-required checks сохраняются', '');
   } else {
     // Improvement can be repeated, and an unrelated phase cannot attest that it
     // has or has not happened. Keep both owners reachable for an unfinished plan.
@@ -98,7 +115,7 @@ export function workflowActions(s: Snapshot): Action[] {
   if (s.phase === 'done' && s.profile !== 'aifhub-ultra') {
     // A declared phase is not proof of archive success. These are explicit owner actions.
     if (hub) add('sync', 'Синхронизировать артефакты', 'aif-mode', 'next', 'Синхронизация после подтверждённой финализации', ' sync');
-    add('commit', 'Подготовить коммит', 'aif-commit', 'next', 'Коммит выполняется отдельно от done', '');
+    if (!commitNavigationDeferred(s)) add('commit', 'Подготовить коммит', 'aif-commit', 'next', 'Коммит выполняется отдельно от done', '');
   }
   add('check-verify', 'Соответствие плану', 'aif-verify', 'check', 'Авторитетная проверка реализации');
   add('check-rules', 'Правила проекта', 'aif-rules-check', 'check', 'Rules gate; при необходимости сохранить durable evidence', s.profile === 'aifhub-openspec' ? arg : '');
@@ -112,8 +129,6 @@ export function workflowActions(s: Snapshot): Action[] {
   add('quality', 'Качество кода', 'aif-quality-setup', 'check', 'Read-only аудит стека и существующих проверок; команды не запускаются автоматически', ' audit');
   add('ci', 'Посмотреть CI', 'aif-chat', 'check', 'Проверить существующий CI для нужного SHA; не генерировать конфигурацию', ' ci');
   result[result.length - 1].available = true; // bundled plugin skill, not an AI Factory installation record
-  add('quality-setup', 'Настроить проверки', 'aif-quality-setup', 'setup', 'Отдельная настройка подходящих quality tools', ' setup');
-  add('ci-setup', 'Настроить CI', 'aif-ci', 'setup', 'Создание/аудит pipeline не означает успешный CI-run', '');
   return [...result, ...maintenance].filter((v, i, a) => a.findIndex(x => x.id === v.id) === i);
 }
 
@@ -133,7 +148,7 @@ export function actionPrompt(s: Snapshot, action: Action): string {
     'Сохрани выбранный useSymlinks и skillSymlinks: не переключай --symlinks/--no-symlinks автоматически. Completion hook остаётся opt-in: не выполняй enable или run и не подключай verifier в рамках обновления.',
     'После операции обнови карточку через aif_chat_status с принудительным чтением. Не запускай реализацию или проверки приложения.',
   ].join('\n');
-  if (action.id === 'setup-context' || action.id.startsWith('prep-')) return `${action.command}\n\nПользователь выбрал отдельный шаг подготовки проекта. Примени именно ${action.command} по установленному skill-контракту. Выбранный план не является аргументом команды. После шага обнови карточку через aif_chat_status.`;
+  if (action.id === 'setup-context' || action.group === 'setup') return `${action.command}\n\nПользователь выбрал отдельный шаг подготовки проекта или другую команду на вкладке AI Factory («${action.label}»). Примени именно ${action.command} по установленному skill-контракту. Не выполняй план и не начинай реализацию. Выбранный план не является аргументом команды. После шага обнови карточку через aif_chat_status.`;
   if (action.id === 'commit') return `${action.command}\n\nКонтекст кнопки AI Factory: ${JSON.stringify({ target: s.target?.path ?? null, profile: s.profile, expectedFingerprint: s.fingerprint })}.\nПользователь выбрал подготовку коммита. Примени установленный aif-commit в текущем проекте: сначала перечитай правила, git status и diff, определи относящиеся к задаче изменения и сообщение коммита. Незакоммиченные файлы не означают, что все они согласованы для включения: сохрани несвязанные изменения и не добавляй все файлы автоматически. Соблюдай действующие gates и разрешения на коммит; не выполняй push или публикацию без отдельного разрешения. Активный план может отсутствовать после архивации. После действия обнови карточку через aif_chat_status.`;
   const readiness = action.id === 'implement'
     ? '\nНаличие кнопки не подтверждает прохождение improve, sync или готовность к выполнению. Проверь обязательные handoff, артефакты и условия установленного aif-implement/AIFHub. Сохрани действующие blockers; не обходи отсутствующие обязательные условия и не запускай повторное улучшение только из-за неизвестного этапа карточки.' : '';

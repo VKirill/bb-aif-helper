@@ -23,7 +23,7 @@ test('preparation uses configured artifact paths and offers only installed setup
     const snapshot = await collectSnapshot(input(f.root));
     assert.equal(snapshot.preparation?.find(step => step.id === 'describe')?.state, 'found');
     assert.equal(snapshot.preparation?.find(step => step.id === 'architecture')?.state, 'missing');
-    assert.equal(snapshot.actions.find(action => action.id === 'prep-architecture')?.command, '$aif-architecture');
+    assert.equal(snapshot.actions.find(action => action.id === 'setup-architecture')?.command, '$aif-architecture');
     assert(!snapshot.actions.some(action => action.id === 'prep-docker'));
   } finally { await f.cleanup(); }
 });
@@ -200,6 +200,9 @@ test('check input fingerprint ignores phase, detects tracked and untracked byte 
 test('artifact paths reject escapes, drive paths, git administration and null bytes', () => {
   for (const s of ['../secret', 'a/../secret', 'C:/x', '/x', '.git/config', 'a\u0000b', 'x//y']) assert.throws(() => safeRelative(s));
   assert.equal(safeRelative('.ai-factory\\plans\\one.md'), '.ai-factory/plans/one.md');
+  assert.equal(safeRelative('.ai-factory/plans/'), '.ai-factory/plans', 'directory paths from config.yaml end with a slash');
+  assert.equal(safeRelative('docs/'), 'docs');
+  assert.throws(() => safeRelative('/'));
 });
 test('duplicate YAML keys fail rather than choosing a hidden mode', () => {
   assert.throws(() => parseYaml('aifhub: true\naifhub: false'));
@@ -362,5 +365,49 @@ test('gate report remains reported PASS; preparation artifacts never become gree
     assert.equal(s.checks.find(c => c.id === 'verify')?.state, 'reported-pass');
     assert.equal(s.checks.find(c => c.id === 'qa')?.state, 'notrun');
     assert.equal(s.checks.find(c => c.id === 'rules')?.required, true);
+  } finally { await f.cleanup(); }
+});
+
+test('readiness reflects project files and config.yaml paths; an invalid profile has no steps', async () => {
+  const f = await fixture();
+  try {
+    const state = (s: Awaited<ReturnType<typeof collectSnapshot>>, id: string) => s.readiness.find(r => r.id === id);
+    let s = await collectSnapshot(input(f.root));
+    assert.equal(state(s, 'install')?.state, 'done');
+    assert.equal(state(s, 'context')?.state, 'todo');
+    assert.deepEqual(state(s, 'context')?.missing, ['.ai-factory/DESCRIPTION.md', '.ai-factory/rules/base.md', 'AGENTS.md']);
+    assert.equal(state(s, 'ci')?.state, 'todo');
+    await f.write('.ai-factory/config.yaml', 'paths:\n  description: docs/about.md\nrules:\n  base: rules/base.md\n');
+    for (const rel of ['docs/about.md', 'rules/base.md', 'AGENTS.md', '.github/workflows/ci.yml', '.husky/pre-commit']) await f.write(rel, 'x');
+    s = await collectSnapshot(input(f.root));
+    assert.equal(state(s, 'context')?.state, 'done');
+    assert.equal(state(s, 'ci')?.state, 'done');
+    assert.equal(state(s, 'quality')?.state, 'done');
+    assert.equal(state(s, 'architecture')?.state, 'todo');
+    await f.write('.ai-factory.json', '{');
+    assert.deepEqual((await collectSnapshot(input(f.root))).readiness, []);
+  } finally { await f.cleanup(); }
+});
+
+test('Spec coverage and Done readiness rows exist only with AIFHub; a missing report reads as not run', async () => {
+  for (const hub of [false, true]) {
+    const f = await fixture(hub);
+    try {
+      await f.write('.ai-factory/plans/demo.md', '# Demo\n## Tasks\n- [ ] 1 Implement');
+      const ids = (await collectSnapshot(input(f.root))).checks.map(c => c.id);
+      assert.equal(ids.includes('coverage'), hub); assert.equal(ids.includes('readiness'), hub);
+      assert.equal((await collectSnapshot(input(f.root))).checks.find(c => c.id === 'verify')?.detail, 'Отчёт проверки не найден');
+    } finally { await f.cleanup(); }
+  }
+});
+
+test('plan and QA directories from config.yaml may end with a slash', async () => {
+  const f = await fixture(); try {
+    await f.write('.ai-factory/config.yaml', 'paths:\n  plans: .ai-factory/plans/\n  qa: .ai-factory/qa/\n');
+    await f.write('.ai-factory/plans/feature.md', '# Feature\n## Tasks\n- [ ] Task 1: Work\n');
+    const s = await collectSnapshot(input(f.root, '.ai-factory/plans/feature.md'));
+    assert.notEqual(s.profile, 'invalid'); assert(!s.diagnostics.some(d => /не найден в допустимых|Недопустимый путь/.test(d)));
+    assert.equal(s.target?.path, '.ai-factory/plans/feature.md'); assert.equal(s.target?.tasks.length, 1);
+    assert(s.candidates.every(c => !c.path.includes('//')));
   } finally { await f.cleanup(); }
 });

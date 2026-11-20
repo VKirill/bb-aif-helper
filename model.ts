@@ -11,6 +11,11 @@ export const actionSchema = z.object({
   id: z.string(), label: z.string(), command: z.string(), group: z.enum(['next', 'check', 'setup', 'maintenance']),
   reason: z.string(), available: z.boolean(), disabledReason: z.enum(['unchanged', 'requires-cli222', 'context-blocked']).optional(),
 });
+export const readinessStepSchema = z.object({
+  id: z.string(), label: z.string(), actionId: z.string(),
+  state: z.enum(['done', 'todo', 'skipped']), skippable: z.boolean(), anyOf: z.boolean(),
+  missing: z.array(z.string()),
+});
 export const snapshotSchema = z.object({
   schemaVersion: z.literal('aif-chat/v1'), collectedAt: z.string(), fingerprint: z.string(),
   inputsFingerprint: z.string().length(64).nullable().default(null),
@@ -48,10 +53,11 @@ export const snapshotSchema = z.object({
     chat: z.object({ seq: z.number(), at: z.string(), target: z.string(),
       result: z.lazy(() => gateResultSchema), freshness: z.enum(['unknown', 'unchanged', 'changed']),
       inputFingerprint: z.string().length(64).optional(), observedAt: z.string().optional() }).optional() })),
-  actions: z.array(actionSchema), diagnostics: z.array(z.string()),
+  actions: z.array(actionSchema), readiness: z.array(readinessStepSchema).default([]), diagnostics: z.array(z.string()),
 });
 export type Snapshot = z.infer<typeof snapshotSchema>;
 export type Action = z.infer<typeof actionSchema>;
+export type ReadinessStep = z.infer<typeof readinessStepSchema>;
 export type Phase = z.infer<typeof phaseSchema>;
 export type CardRequest = z.infer<typeof requestSchema>;
 export const selectionSchema = z.object({ target: z.string().max(1000), phase: phaseSchema }).strict();
@@ -83,7 +89,46 @@ export type GateResult = z.infer<typeof gateResultSchema>;
 export const suggestionsSchema = z.object({
   sourceKey: z.string(), fingerprint: z.string(), threadState: z.string(),
   gate: gateResultSchema.nullable().default(null), gateError: z.string().nullable().default(null), gateWarning: z.string().nullable().optional(),
-  items: z.array(z.object({ id: z.string(), command: z.string(), available: z.boolean(), reason: z.string(),
+  // 'plan' when the reply had no commands and chips come from the plan's next steps.
+  origin: z.enum(['reply', 'plan']).default('reply'),
+  items: z.array(z.object({ id: z.string(), command: z.string(), available: z.boolean(), reason: z.string(), probability: z.number().min(0).max(1).nullable().default(null),
     label: z.string().optional(), kind: z.literal('improve-approval').optional() })),
 });
 export type Suggestions = z.infer<typeof suggestionsSchema>;
+export const chipScoringStateSchema = z.object({
+  enabled: z.boolean().default(false),
+  source: z.enum(['catalog', 'manual']).default('catalog'),
+  catalogName: z.string().nullable().default(null),
+  lastError: z.string().nullable().default(null),
+  lastScoredAt: z.number().nullable().default(null),
+});
+export type ChipScoringState = z.infer<typeof chipScoringStateSchema>;
+export const RESEARCH_ROLES = ['research', 'research2', 'research3'] as const;
+export type ResearchRole = typeof RESEARCH_ROLES[number];
+export const delegationRoleSchema = z.enum(['implement', ...RESEARCH_ROLES]);
+export type DelegationRole = z.infer<typeof delegationRoleSchema>;
+export const DELEGATION_ROLES = ['implement', ...RESEARCH_ROLES] as const;
+
+const id = z.string().regex(/^[\w.-]{1,100}$/);
+export const delegationChoiceSchema = z.discriminatedUnion('mode', [
+  z.object({ mode: z.literal('self') }).strict(),
+  z.object({ mode: z.literal('bb'), providerId: id, model: z.string().regex(/^[^\s?&#]{1,200}$/), reasoning: id.optional(), tier: id.optional(), parallel: z.number().int().min(2).max(4).optional() }).strict(),
+]);
+export type DelegationChoice = z.infer<typeof delegationChoiceSchema>;
+export const delegationDefaultsSchema = z.object({ implement: delegationChoiceSchema, research: delegationChoiceSchema, research2: delegationChoiceSchema, research3: delegationChoiceSchema }).strict();
+export type DelegationDefaults = z.infer<typeof delegationDefaultsSchema>;
+export const delegationStateSchema = z.object({
+  choice: delegationChoiceSchema,
+  /** Model for research worker 1 (Explore) of every AI Factory skill; self = the agent's own subagent. */
+  research: delegationChoiceSchema,
+  /** Research workers 2 and 3; self = same as worker 1. */
+  research2: delegationChoiceSchema,
+  research3: delegationChoiceSchema,
+  configured: z.boolean(),
+  // phases.implement points at an agent this plugin does not manage.
+  foreign: z.string().nullable(),
+  error: z.string().nullable(),
+  // Set only on the setDelegation response when legacy runner files were removed.
+  removedLegacy: z.boolean().optional(),
+});
+export type DelegationState = z.infer<typeof delegationStateSchema>;
