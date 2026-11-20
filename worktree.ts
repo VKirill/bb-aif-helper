@@ -50,16 +50,17 @@ export type CreatedWorktree = { root: string; path: string; sha: string };
 /** In a copy's own git folder: the tree of its last bring-back, or of the coordinator's work it was seeded with. */
 export const BROUGHT_BACK = 'aif-brought-back';
 
-/** A per-worktree ref keeps the baseline tree out of `git gc`: unreachable, it could be pruned while a worker runs. */
+/** The shared ref that keeps a copy's baseline tree out of `git gc`, also one run from the coordinator's folder. */
+const keepRef = (root: string) => `refs/aif-worktrees/${path.basename(root)}`;
 export async function keepTree(copyTop: string, tree: string) {
-  await git(copyTop, ['update-ref', 'refs/worktree/aif-brought-back', tree]).catch(() => '');
+  await git(copyTop, ['update-ref', keepRef(copyTop), tree]).catch(() => '');
 }
 
 /**
  * Gives a fresh copy the coordinator's uncommitted work: changed, new (not ignored) and deleted files, so a worker
  * sees the results of earlier tasks without a commit. The tree is built in a temporary index, so the coordinator's
- * index stays as it was. The copy keeps HEAD in its index (the work shows as ordinary changes) and records the tree,
- * so bring-back moves only what the worker changed on top of it.
+ * index stays as it was. The copy's index and files become exactly that tree (the work shows as staged changes),
+ * and the tree is recorded, so bring-back moves only what the worker changed on top of it.
  */
 async function seed(top: string, root: string, sha: string) {
   const dir = await mkdtemp(path.join(tmpdir(), 'aif-seed-'));
@@ -73,8 +74,9 @@ async function seed(top: string, root: string, sha: string) {
     await copyFile(index, env.GIT_INDEX_FILE).catch(() => inTemp(['read-tree', sha]));
     await inTemp(['-c', 'core.fsmonitor=false', 'add', '-A']);
     const tree = (await inTemp(['write-tree'])).stdout.trim();
-    await git(root, ['read-tree', '-m', '-u', sha, tree]);
-    await git(root, ['reset', '-q']);
+    // --reset, not a two-tree merge: the fresh copy has nothing to keep, and a merge refuses a case-only rename on a
+    // case-insensitive disk (`hello.txt` "would be overwritten" by itself).
+    await git(root, ['read-tree', '--reset', '-u', tree]);
     await writeFile(await git(root, ['rev-parse', '--path-format=absolute', '--git-path', BROUGHT_BACK]), `${tree}\n`);
     await keepTree(root, tree);
   } finally { await removePath(dir).catch(() => undefined); }
@@ -142,6 +144,7 @@ export async function removeWorktree(input: { basePath: string; root: string }):
       if (await git(root, ['rev-parse', '--git-dir']).then(() => true, () => false)) throw cause;
     });
   } else await git(input.basePath, ['worktree', 'remove', '--force', root]).catch(() => '');
+  if (common) await run('git', ['--git-dir', common, 'update-ref', '-d', keepRef(root)], { timeout: 120_000 }).catch(() => '');
   await removePath(root);
   return { removed: true };
 }

@@ -1,6 +1,6 @@
 import { execFile } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { chmod, lstat, mkdir, mkdtemp, readdir, readFile, readlink, stat, symlink, writeFile } from 'node:fs/promises';
+import { chmod, copyFile, lstat, mkdir, mkdtemp, readdir, readFile, readlink, stat, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { BROUGHT_BACK, keepTree, removePath, worktreesRoot } from './worktree.ts';
@@ -81,15 +81,17 @@ export async function bringBack(input: { root: string; copy: string }) {
   const mark = line(await git(theirs.top, ['rev-parse', '--path-format=absolute', '--git-path', BROUGHT_BACK]));
   const last = (await readFile(mark, 'utf8').catch(() => '')).trim();
   const base = /^[0-9a-f]{40,64}$/.test(last) && await git(theirs.top, ['cat-file', '-e', `${last}^{tree}`]).then(() => true, () => false) ? last : 'HEAD';
-  // The worker's state is staged in a temporary index that starts from the base tree: a file of the base stays
-  // tracked even if the worker's .gitignore now matches it, and a submodule the copy never checked out keeps the
-  // base's commit, so neither reads as a change of the worker. The copy's own index is not touched.
+  // The worker's state is staged in a temporary index that starts as a copy of the copy's own index (the seed tree
+  // plus whatever the worker staged: `add -f`, a case-only `git mv`): a file of the base stays tracked even if the
+  // worker's .gitignore now matches it, and a submodule the copy never checked out keeps its commit, so neither reads
+  // as a change of the worker. The copy's own index is not touched.
   const dir = await mkdtemp(path.join(tmpdir(), 'aif-patch-'));
   try {
   const env = { GIT_INDEX_FILE: path.join(dir, 'index') };
   const inCopy = (args: string[]) => git(theirs.top, args, undefined, env);
-  await inCopy(['read-tree', base]);
-  await inCopy(['add', '-A']);
+  const index = line(await git(theirs.top, ['rev-parse', '--path-format=absolute', '--git-path', 'index']));
+  await copyFile(index, env.GIT_INDEX_FILE).catch(() => inCopy(['read-tree', base]));
+  await inCopy(['-c', 'core.fsmonitor=false', 'add', '-A']);
   const tree = line(await inCopy(['write-tree']));
   const files = (await inCopy(['diff', '--cached', '--name-only', '-z', '--no-relative', '--no-renames', '--ignore-submodules=none', base])).split('\0').filter(Boolean);
   if (!files.length) return { applied: false as const, empty: true as const, files };

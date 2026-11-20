@@ -393,8 +393,8 @@ test('a seeded copy holds the coordinator\'s uncommitted work, and bring-back re
   assert.equal(text(path.join(copy.path, 'staged.txt')), 's1\n');
   assert.equal(existsSync(path.join(copy.path, 'gone.txt')), false);
   assert.equal(existsSync(path.join(copy.path, 'node_modules')), false, 'ignored files stay out');
-  // The work shows in the copy as ordinary changes: its index stays at HEAD.
-  assert.equal(sh(copy.root, 'diff', '--cached', '--name-only'), '');
+  // The copy's index holds the work (staged), so what the worker stages lands on top of it.
+  assert.equal(sh(copy.root, 'diff', '--name-only'), '', 'files and index of the copy agree');
   assert.equal(sh(copy.root, 'rev-parse', 'HEAD'), before[2]);
   // Nothing done by the worker: nothing comes back, the coordinator's work is not echoed.
   assert.deepEqual(await bringBack({ root: base, copy: copy.path }), { applied: false, empty: true, files: [] });
@@ -429,6 +429,7 @@ test('review of e497ba0: an ignore rule, a force-added file, a submodule the cop
   mkdirSync(lib, { recursive: true }); writeFileSync(path.join(lib, 'l.txt'), 'A\n');
   sh(lib, 'init', '-q'); sh(lib, 'add', '-A'); sh(lib, 'commit', '-qm', 'A');
   writeFileSync(path.join(lib, 'l.txt'), 'B\n'); sh(lib, 'commit', '-qam', 'B');
+  const libB = sh(lib, 'rev-parse', 'HEAD'); // no branch name: init.defaultBranch may be main or master
   mkdirSync(top, { recursive: true });
   writeFileSync(path.join(top, '.gitignore'), '*.env\n');
   sh(top, 'init', '-q'); sh(top, 'submodule', 'add', '-q', lib, 'lib'); sh(path.join(top, 'lib'), 'checkout', '-q', 'HEAD~1');
@@ -436,7 +437,7 @@ test('review of e497ba0: an ignore rule, a force-added file, a submodule the cop
   // Coordinator's work: an untracked file, a force-added ignored file, a submodule moved without a commit.
   writeFileSync(path.join(top, 'local.txt'), 'mine\n');
   writeFileSync(path.join(top, 'config.env'), 'KEY=1\n'); sh(top, 'add', '-f', 'config.env');
-  sh(path.join(top, 'lib'), 'checkout', '-q', 'master');
+  sh(path.join(top, 'lib'), 'checkout', '-q', libB);
   const copy = await createWorktree({ basePath: top, name: 'seed-review-1', seed: true });
   assert.equal(text(path.join(copy.path, 'config.env')), 'KEY=1\n', 'a force-added file is part of the work');
   // The worker ignores the coordinator's file and adds its own: only its own file comes back.
@@ -447,4 +448,31 @@ test('review of e497ba0: an ignore rule, a force-added file, a submodule the cop
   assert.deepEqual([back.error, back.applied, [...back.files].sort()], [undefined, true, ['.gitignore', 'worker.txt']]);
   assert.equal(text(path.join(top, 'local.txt')), 'mine\n', 'the coordinator\'s file survives');
   await removeWorktree({ basePath: top, root: copy.root });
+});
+
+test('review of 9f6867b: a worker\'s add -f comes back, gc from the coordinator keeps the seed, case-only renames', async () => {
+  const top = path.join(sandbox, 'seed-review-2');
+  const sh = (cwd: string, ...args: string[]) => execFileSync('git', ['-C', cwd, '-c', 'user.email=t@t', '-c', 'user.name=t', ...args], { encoding: 'utf8' }).trim();
+  mkdirSync(top, { recursive: true });
+  writeFileSync(path.join(top, '.gitignore'), '*.ignore\n');
+  writeFileSync(path.join(top, 'Hello.txt'), 'h\n');
+  writeFileSync(path.join(top, 'Keep.txt'), 'k\n');
+  sh(top, 'init', '-q'); sh(top, 'add', '-A'); sh(top, 'commit', '-qm', 'init');
+  writeFileSync(path.join(top, 'previous.txt'), 'p\n');
+  // A case-insensitive disk (Windows, macOS): the coordinator has staged a case-only rename.
+  writeFileSync(path.join(top, 'Probe.tmp'), ''); const folds = existsSync(path.join(top, 'probe.tmp')); unlinkSync(path.join(top, 'Probe.tmp'));
+  if (folds) sh(top, 'mv', 'Hello.txt', 'hello.txt');
+  const copy = await createWorktree({ basePath: top, name: 'seed-review-2', seed: true });
+  if (folds) assert.ok(readdirSync(copy.path).includes('hello.txt'), 'the coordinator\'s case-only rename reaches the copy');
+  sh(top, 'gc', '-q', '--prune=now');
+  writeFileSync(path.join(copy.path, 'required.ignore'), 'r\n'); sh(copy.root, 'add', '-f', 'required.ignore');
+  writeFileSync(path.join(copy.path, 'other.txt'), 'o\n');
+  if (folds) sh(copy.root, 'mv', 'Keep.txt', 'keep.txt');
+  const back = await bringBack({ root: top, copy: copy.path });
+  assert.deepEqual([back.error, back.applied, [...back.files].sort()],
+    [undefined, true, folds ? ['Keep.txt', 'keep.txt', 'other.txt', 'required.ignore'] : ['other.txt', 'required.ignore']]);
+  assert.equal(text(path.join(top, 'required.ignore')), 'r\n');
+  if (folds) assert.ok(readdirSync(top).includes('keep.txt') && !readdirSync(top).includes('Keep.txt'), 'the worker\'s case-only rename comes back');
+  await removeWorktree({ basePath: top, root: copy.root });
+  assert.equal(sh(top, 'for-each-ref', 'refs/aif-worktrees/'), '', 'the gc ref goes with the copy');
 });
