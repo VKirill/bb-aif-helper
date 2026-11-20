@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
-import { definePluginApp, useRpc, experimental_useRpcQuery, useComposer, useBbNavigate, experimental_useAppPanel, experimental_ProviderModelPicker as ProviderModelPicker, type ExperimentalProviderModelPickerValue as PickerValue, type PluginMessageDirectiveProps, type ExperimentalThreadContextCardProps, type ExperimentalThreadTabProps, type ExperimentalCodeFenceRendererProps, type PluginComposerApi } from '@get-bb/plugin-sdk/app';
+import { definePluginApp, useRpc, experimental_useRpcQuery, Markdown, experimental_FileLink as FileLink, useComposer, useBbNavigate, experimental_useAppPanel, experimental_ProviderModelPicker as ProviderModelPicker, type ExperimentalProviderModelPickerValue as PickerValue, type PluginMessageDirectiveProps, type ExperimentalThreadContextCardProps, type ExperimentalThreadTabProps, type ExperimentalCodeFenceRendererProps, type PluginComposerApi } from '@get-bb/plugin-sdk/app';
 import { rpcContract, type ChipScoringView, type DelegationView } from './contract.ts';
 import type { DelegationChoice, DelegationRole } from './delegation.ts';
-import { phaseSchema, cardIdSchema, type Snapshot, type Phase, type Action, type ReadinessStep, type Suggestions } from './model.ts';
+import { phaseSchema, cardIdSchema, RESEARCH_TASK_MAX_LENGTH, type Snapshot, type Phase, type Action, type ReadinessStep, type Suggestions } from './model.ts';
 import { readinessComplete, readinessCoreComplete, nextReadinessStep, readinessHelp, type SkippableStepId } from './readiness.ts';
 import { parseReplyGate } from './gate.ts';
 import { checkHelp, rowActions, supplementaryChecks, toolHelp } from './check-actions.ts';
@@ -10,11 +10,13 @@ import { updateInVersionDetails, VERSION_TTL } from './versions.ts';
 import { contextSetupInDetails } from './workflow.ts';
 import { chipDraft, isCommandDraft } from './suggestions.ts';
 import { AIF_MENTION } from './aif-mode.ts';
-import { isBasicPlanPath, usesBasicWorkflow } from './basic-workflow.ts';
+import { isBasicPlanPath, usesBasicWorkflow, isCompletedPlan } from './basic-workflow.ts';
+import { mountPlanPresentation } from './plan-presentation.ts';
 import { toast } from 'sonner';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { Progress } from '@/components/ui/progress';
+import { Checkbox } from '@/components/ui/checkbox';
 import { Icon } from '@/components/ui/icon';
 import { cn } from '@/lib/utils';
 import { Callout, Disclosure, Hint, Section, StatusDot, SurfaceProvider, useSurface, type Tone } from '@/components/aif/layout';
@@ -47,12 +49,47 @@ function GateData({ code, status, Original }: ExperimentalCodeFenceRendererProps
   </div>;
 }
 
+function PlanDocument({ code, status, message }: ExperimentalCodeFenceRendererProps) {
+  const rpc = useRpc<typeof rpcContract>();
+  const [saved, setSaved] = useState<{ path: string; seq: number; hash: string; environmentId: string } | null>(null);
+  const [error, setError] = useState('');
+  const generation = useRef(0);
+  // A finished plan is saved once per text; a failed save is retried only by the button.
+  const save = useCallback(async () => {
+    const id = ++generation.current;
+    if (status !== 'closed' || !code.trim()) { setSaved(null); return; }
+    try {
+      const value = await rpc.call('planDocument', { threadId: message.threadId, text: code.trim() });
+      if (generation.current === id) { setSaved(value); setError(''); }
+    } catch (e) { if (generation.current === id) { setSaved(null); setError(e instanceof Error ? e.message : String(e)); } }
+  }, [rpc, message.threadId, code, status]);
+  useEffect(() => { void save(); return () => { generation.current++; }; }, [save]);
+  const state = status === 'streaming' ? 'Генерируется' : status === 'unclosed' ? 'Не завершён' : saved ? 'Сохранён' : 'Ожидает сохранения';
+  return <section aria-label="Документ плана" data-aif-plan-document="true" className="aif-plan-document my-3 flex min-w-0 flex-col gap-3 rounded-xl border border-border bg-card p-4 text-sm text-foreground [overflow-wrap:anywhere]">
+    <header className="flex flex-wrap items-center gap-2"><strong className="text-base font-semibold tracking-tight">План реализации</strong>
+      <Badge variant={saved ? 'default' : 'secondary'} className="ml-auto">{state}</Badge></header>
+    <Markdown content={code} className="aif-plan-markdown" />
+    {saved && <p className="m-0 flex flex-wrap items-baseline gap-2 text-xs"><FileLink target={{ kind: 'workspace', environmentId: saved.environmentId, path: saved.path }}>Открыть файл плана</FileLink>
+      <span className="text-muted-foreground">{saved.path}</span></p>}
+    {status === 'unclosed' && <Callout tone="error">Генерация прервана. Неполный план не сохранён и не запускается.</Callout>}
+    {error && <div className="flex flex-col gap-2"><Callout tone="error" role="alert">Не удалось сохранить план: {error}</Callout>
+      <Button type="button" size="sm" variant="outline" className="w-fit" onClick={() => void save()}>Повторить сохранение</Button></div>}
+    {status === 'closed' && !saved && !error && <p className="m-0 text-xs text-muted-foreground">Действия появятся после завершения генерации и сохранения файла.</p>}
+    {saved && <div aria-label="Действия после плана"><WorkflowCard key={`${message.threadId}:${saved.path}`} threadId={message.threadId} initialTarget={saved.path} phase="plan" compact /></div>}
+  </section>;
+}
+
 function WorkflowCard({ threadId, initialTarget = '', phase = 'unknown', openFile, compact = false, delegation = false, environmentId = null, inline = false }: {
   threadId: string; initialTarget?: string; phase?: Phase; openFile?: ((path: string) => boolean) | null; compact?: boolean; delegation?: boolean; environmentId?: string | null; inline?: boolean;
 }) {
   const surface = useSurface();
   const rpc = useRpc<typeof rpcContract>();
   const [target, setTarget] = useState(initialTarget);
+  const [newTask, setNewTask] = useState(false);
+  const [showCompleted, setShowCompleted] = useState(false);
+  const [researchOpen, setResearchOpen] = useState(false);
+  const [researchTask, setResearchTask] = useState('');
+  const [researchError, setResearchError] = useState('');
   const [actionError, setError] = useState('');
   const [notice, setNotice] = useState('');
   const [sending, setSending] = useState(false);
@@ -69,9 +106,11 @@ function WorkflowCard({ threadId, initialTarget = '', phase = 'unknown', openFil
   const mounted = useRef(true);
   const sendingRef = useRef(false);
   useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
-  useEffect(() => { setTarget(initialTarget); }, [initialTarget, threadId]);
+  useEffect(() => { setTarget(initialTarget); setNewTask(false); setShowCompleted(false); setResearchOpen(false); setResearchTask(''); setResearchError(''); }, [initialTarget, threadId]);
   // BB's shared query cache: cards with the same input share one read; tag invalidation refreshes it, nothing polls.
-  const query = experimental_useRpcQuery({ contract: rpcContract, method: 'status', input: { threadId, target, phase } });
+  // A new task reads without the finished plan and phase; the server answers selectionReset for a plan that is gone.
+  const statusInput = newTask ? { threadId, target: '', phase: 'unknown' as Phase, newTask: true } : { threadId, target, phase };
+  const query = experimental_useRpcQuery({ contract: rpcContract, method: 'status', input: statusInput });
   // A failed read must not leave stale, still-clickable actions on screen.
   const [readFailed, setReadFailed] = useState('');
   useEffect(() => { setReadFailed(''); }, [query.data]);
@@ -79,23 +118,36 @@ function WorkflowCard({ threadId, initialTarget = '', phase = 'unknown', openFil
   const snapshot = failure ? null : query.data ?? null;
   const loading = query.isLoading;
   const error = actionError || failure;
-  useEffect(() => { if (snapshot?.configured && isBasicPlanPath(target)) setTarget(''); }, [snapshot, target]);
+  useEffect(() => {
+    if (snapshot?.selectionReset) { setTarget(''); setNewTask(true); }
+    else if (snapshot?.configured && isBasicPlanPath(target)) setTarget('');
+  }, [snapshot, target]);
   // Explicit re-read past the server cache; the shared query then picks the fresh snapshot up.
   const refresh = useCallback(async (checkUpdates = false, force = false) => {
     try {
-      if (checkUpdates || force) await rpc.call('status', { threadId, target, phase, checkUpdates, force });
+      if (checkUpdates || force) await rpc.call('status', { ...statusInput, checkUpdates, force });
       await query.refetch();
       if (mounted.current) { setError(''); setReadFailed(''); }
     } catch (e) { if (mounted.current) setReadFailed(e instanceof Error ? e.message : String(e)); }
-  }, [rpc, query, threadId, target, phase]);
-  async function run(action: Action) {
+  }, [rpc, query, threadId, target, phase, newTask]);
+  async function run(action: Action, task?: string) {
     if (!snapshot || sendingRef.current) return;
     sendingRef.current = true; setSending(true); setError(''); setNotice('');
+    if (action.id === 'basic-explore') setResearchError('');
     try {
       const result = await rpc.call('run', { threadId, target: snapshot.target?.path ?? target, phase: snapshot.phase,
-        fingerprint: snapshot.fingerprint, actionId: action.id, requestId: crypto.randomUUID() });
-      if (mounted.current) setNotice(result.message);
-    } catch (e) { if (mounted.current) setError(e instanceof Error ? e.message : String(e)); }
+        fingerprint: snapshot.fingerprint, actionId: action.id, requestId: crypto.randomUUID(),
+        ...(newTask ? { newTask: true } : {}), ...(task === undefined ? {} : { researchTask: task }) });
+      if (mounted.current) {
+        setNotice(result.message);
+        if (result.sent && action.id === 'basic-explore') { setResearchOpen(false); setResearchTask(''); }
+        if (result.sent && result.newTask) { setTarget(''); setNewTask(true); }
+      }
+    } catch (e) { if (mounted.current) {
+      const message = e instanceof Error ? e.message : String(e);
+      // A failed research dispatch keeps the form and its draft; the error stays next to it.
+      if (action.id === 'basic-explore') setResearchError(message); else setError(message);
+    } }
     finally { sendingRef.current = false; if (mounted.current) { setSending(false); void refresh(); } }
   }
   const setReadinessSkip = async (stepId: SkippableStepId, skipped: boolean) => {
@@ -106,6 +158,12 @@ function WorkflowCard({ threadId, initialTarget = '', phase = 'unknown', openFil
   const busy = !!snapshot && (!['idle', 'error'].includes(snapshot.threadState) || !!snapshot.pendingQuestions || snapshot.pendingConfirmation !== false);
   const tasks = snapshot?.target?.tasks ?? [];
   const completed = tasks.filter(t => t.done).length;
+  const hiddenPlans = snapshot?.candidates.filter(isCompletedPlan) ?? [];
+  const visiblePlans = snapshot?.candidates.filter(c => showCompleted || !isCompletedPlan(c)) ?? [];
+  const researchAction = snapshot?.actions.find(a => a.id === 'basic-explore');
+  // After a finished plan the research button stands apart: it starts a new task instead of continuing this one.
+  const newResearch = !!researchAction && (snapshot?.target?.kind === 'basic' && tasks.length > 0 && completed === tasks.length
+    || !!snapshot?.chatPlan?.accepted && snapshot.phase === 'done');
   const nextVersionCheck = snapshot?.upstream.checkedAt ? Date.parse(snapshot.upstream.checkedAt) + VERSION_TTL : 0;
   // One primary action per card: the first "next" step. Everything else is outline.
   // In the tab the readiness block owns its steps' actions, so they never take primary styling there.
@@ -113,7 +171,9 @@ function WorkflowCard({ threadId, initialTarget = '', phase = 'unknown', openFil
   const primaryId = snapshot && (snapshot.actions.find(a => a.group === 'next' && a.available)
     ?? snapshot.actions.find(a => a.group === 'maintenance' && a.available && !updateInVersionDetails(snapshot, a.id) && !contextSetupInDetails(snapshot, a.id) && !(delegation && readinessActionIds.has(a.id))))?.id;
   const renderAction = (a: Action) => <Hint key={a.id} text={`${a.reason}\n${a.command}`}><Button type="button" size="sm" variant={a.id === primaryId ? 'default' : 'outline'}
-    disabled={sending || busy || !a.available} onClick={() => void run(a)}>
+    disabled={sending || busy || !a.available} onClick={() => {
+      if (a.id === 'basic-explore') { setResearchOpen(true); setError(''); setNotice(''); } else void run(a);
+    }}>
     {a.label}{!a.available && (a.disabledReason === 'unchanged' ? ' · без изменений' : ' · не установлен')}</Button></Hint>;
   const renderActions = (actions: Action[]) => actions.length ? <div className="flex flex-wrap gap-2">{actions.map(renderAction)}</div> : null;
   const stateText = snapshot ? snapshot.pendingQuestions ? `ожидаю ответы: ${snapshot.pendingQuestions}` : snapshot.pendingConfirmation ? 'ожидается подтверждение пользователя' : snapshot.pendingConfirmation === null ? 'ожидание подтверждения не проверено' : busy ? 'агент занят' : snapshot.threadState === 'error' ? 'ошибка выполнения BB' : 'агент свободен' : '';
@@ -176,16 +236,20 @@ function WorkflowCard({ threadId, initialTarget = '', phase = 'unknown', openFil
           <StatusDot tone={busy ? 'live' : snapshot.threadState === 'error' ? 'error' : 'idle'} />
           <span className="font-medium">{phaseNames[snapshot.phase]} <span className="font-normal text-muted-foreground">· {stateText}</span></span>
         </p>
-        {usesBasicWorkflow(snapshot) && <p aria-label="Базовый workflow" className="m-0 text-xs text-muted-foreground">Без AI Factory доступен встроенный flow: исследование → план → выполнение → проверка → коммит. Установка — отдельная кнопка; планы сохраняются в .bb-aif-helper/plans/.</p>}
+        {usesBasicWorkflow(snapshot) && <p aria-label="Базовый workflow" className="m-0 text-xs text-muted-foreground">Без AI Factory доступен встроенный flow: исследование → Plan BB → выполнение → проверка → коммит. «Составить план» включает штатный режим Plan. Установка — отдельная кнопка.</p>}
         {snapshot.candidates.length > 0 && <label className="flex flex-col gap-1 text-xs text-muted-foreground">План / change
-          <select aria-label="Выбранный план или change" value={snapshot.target?.path ?? target} onChange={e => { setTarget(e.target.value); setNotice(''); }}
+          <select aria-label="Выбранный план или change" value={snapshot.target?.path ?? target} onChange={e => { setTarget(e.target.value); setNewTask(false); setNotice(''); }}
             className="h-9 w-full cursor-pointer rounded-md border border-input bg-transparent px-3 text-sm text-foreground outline-none focus-visible:ring-1 focus-visible:ring-ring">
             {!snapshot.target && <option value="">Выберите задачу</option>}
-            {snapshot.candidates.map(t => <option key={t.path} value={t.path}>{t.title} · {t.kind}</option>)}
+            {!showCompleted && snapshot.target && hiddenPlans.some(t => t.path === snapshot.target!.path) && <option value={snapshot.target.path} hidden>{snapshot.target.title} · завершён</option>}
+            {visiblePlans.map(t => <option key={t.path} value={t.path} title={t.path}>{t.title}{t.progress ? ` · выполнено ${t.progress.completed} из ${t.progress.total}` : ''}{t.closed ? ' · закрыт' : ''} · {t.kind}</option>)}
           </select></label>}
+        {hiddenPlans.length > 0 && <label htmlFor={`aif-show-completed-${threadId}`} className="flex w-fit cursor-pointer items-center gap-2 text-xs text-muted-foreground">
+          <Checkbox id={`aif-show-completed-${threadId}`} checked={showCompleted} onCheckedChange={v => setShowCompleted(v === true)} />Показать завершённые ({hiddenPlans.length})</label>}
         {snapshot.target && <div className="flex flex-col gap-2">
           <div className="flex flex-wrap items-baseline justify-between gap-3"><strong className="font-medium">{snapshot.target.title}</strong>
             <span className="text-xs text-muted-foreground tabular-nums">{completed}/{tasks.length} задач</span></div>
+          {snapshot.target.verification?.verified && <p className="m-0 text-xs text-muted-foreground" title="Отметка владельца проверки в файле плана">План отмечен проверенным</p>}
           <Progress aria-label="Выполнение задач плана" value={tasks.length ? completed / tasks.length * 100 : 0} className="h-1.5 bg-muted" />
           <Disclosure summary="Задачи плана">
             {tasks.length ? <ul className="m-0 flex list-none flex-col gap-1.5 p-0">{tasks.map((t, i) => <li key={`${t.id}-${i}`} className="grid grid-cols-[16px_minmax(0,1fr)] gap-2 text-xs">
@@ -194,7 +258,29 @@ function WorkflowCard({ threadId, initialTarget = '', phase = 'unknown', openFil
               : <p className="m-0 text-xs text-muted-foreground">Чекбоксы задач не найдены; прогресс неизвестен.</p>}
           </Disclosure>
         </div>}
-        {renderActions(snapshot.actions.filter(a => a.group === 'next').slice(0, 3))}
+        {snapshot.chatPlan && !snapshot.target && <div aria-label="План из чата" className="flex flex-col gap-1">
+          <strong className="font-medium">{snapshot.chatPlan.title}</strong>
+          <p className="m-0 text-xs text-muted-foreground">{snapshot.chatPlan.accepted ? 'Выполнение плана запрошено' : 'План предложен · ожидает запуска'} · сообщение #{snapshot.chatPlan.seq}. Прогресс задач и результаты проверок не подтверждены.</p>
+        </div>}
+        {renderActions(snapshot.actions.filter(a => a.group === 'next' && !(newResearch && a.id === 'basic-explore')).slice(0, 3))}
+        {newResearch && <div role="group" aria-label="Новая задача">{renderActions([researchAction!])}</div>}
+        {researchOpen && researchAction && <form aria-label="Описание исследования" className="flex flex-col gap-2" onSubmit={event => {
+          event.preventDefault();
+          if (!researchTask.trim() || busy || sending || !researchAction.available) return;
+          void run(researchAction, researchTask.trim());
+        }}>
+          <label className="flex flex-col gap-1 text-xs text-muted-foreground">Что исследовать?
+            <textarea autoFocus required maxLength={RESEARCH_TASK_MAX_LENGTH} rows={4} value={researchTask} disabled={sending || busy}
+              placeholder="Опишите вопрос, проблему или укажите ссылку на задачу" onChange={event => setResearchTask(event.target.value)}
+              className="w-full resize-y rounded-md border border-input bg-transparent px-3 py-2 text-sm text-foreground outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-50" />
+          </label>
+          <p className="m-0 text-xs text-muted-foreground">До {RESEARCH_TASK_MAX_LENGTH} символов. Исследование изучает задачу и код, не меняя файлы.</p>
+          {researchError && <Callout tone="error" role="alert">{researchError}</Callout>}
+          <div className="flex flex-wrap gap-2">
+            <Button type="submit" size="sm" disabled={!researchTask.trim() || sending || busy || !researchAction.available}>Начать исследование</Button>
+            <Button type="button" size="sm" variant="outline" disabled={sending} onClick={() => { setResearchOpen(false); setResearchTask(''); setResearchError(''); }}>Отмена</Button>
+          </div>
+        </form>}
         {(() => { const items = snapshot.actions.filter(a => a.group === 'maintenance' && !updateInVersionDetails(snapshot, a.id) && !contextSetupInDetails(snapshot, a.id) && !(delegation && a.id === 'setup-context'));
           return items.length ? <div className="aif-maintenance" role="group" aria-label="Обновление и настройка AI Factory">{renderActions(items)}</div> : null; })()}
         {!delegation && snapshot.actions.some(a => contextSetupInDetails(snapshot, a.id)) && <Disclosure className="aif-context-setup" summary="Настройка контекста проекта">
@@ -839,6 +925,8 @@ function AifPillController() {
 
 export default definePluginApp(app => {
   app.slots.experimental_codeFenceRenderer({ id: 'gate-data', languages: ['aif-gate-result'], component: GateData });
+  app.slots.experimental_codeFenceRenderer({ id: 'plan-document', languages: ['aif-plan'], component: PlanDocument });
+  app.contentScripts.register({ id: 'plan-presentation', mount: mountPlanPresentation });
   app.composer.customize({ id: 'suggested-commands', scopes: ['thread'], banners: [{ id: 'commands', chrome: 'bare', component: SuggestedCommands }] });
   app.composer.customize({ id: 'aif-mode', scopes: ['new-thread', 'thread'], actions: [{ id: 'aif-mode', component: AifModeAction }] });
   app.composer.customize({ id: 'aif-mode-pill', scopes: ['thread'], banners: [{ id: 'aif-pill', chrome: 'bare', component: AifPillController }] });

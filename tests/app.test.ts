@@ -122,7 +122,7 @@ test('configuration errors do not hide the installation update button', async ()
   } finally { slot.lifecycle.unmount(); }
 });
 
-test('without AI Factory the card shows a separate installer and usable bundled flow without automatic dispatch', { skip: 'Task 9' }, async () => {
+test('without AI Factory the card shows a separate installer and usable bundled flow without automatic dispatch', async () => {
   const s = snapshot({ configured: false, profile: 'none', target: null, candidates: [], skills: [], phase: 'unknown' });
   s.actions = workflowActions(s); let runs = 0;
   const slot = renderSlot(app.messageDirectives[0], props, { rpc: { status: () => s, run: (input: any) => {
@@ -146,7 +146,7 @@ test('without AI Factory the card shows a separate installer and usable bundled 
   } finally { slot.lifecycle.unmount(); }
 });
 
-test('the document renders before its form and only a completed saved plan exposes workflow actions', { skip: 'Task 9' }, async () => {
+test('the document renders before its form and only a completed saved plan exposes workflow actions', async () => {
   const renderer = app.codeFenceRenderers.find(r => r.id === 'plan-document')!;
   const code = '# Ready\n\n## Tasks\n- [ ] 1. Work';
   const s = snapshot({ configured: false, profile: 'none', skills: [], target: {
@@ -173,7 +173,7 @@ test('the document renders before its form and only a completed saved plan expos
   finally { interrupted.lifecycle.unmount(); }
 });
 
-test('a stale plan reference is released and research/planning buttons remain usable without AI Factory', { skip: 'Task 9' }, async () => {
+test('a stale plan reference is released and research/planning buttons remain usable without AI Factory', async () => {
   const base = snapshot({ configured: false, profile: 'none', target: null, candidates: [], skills: [], phase: 'explore' });
   base.actions = workflowActions(base);
   const requests: any[] = [];
@@ -190,7 +190,7 @@ test('a stale plan reference is released and research/planning buttons remain us
   } finally { slot.lifecycle.unmount(); }
 });
 
-test('the selector hides completed plans without requiring verification and restores them with a view-only toggle', { skip: 'Task 9' }, async () => {
+test('the selector hides completed plans without requiring verification and restores them with a view-only toggle', async () => {
   const s = snapshot({ configured: false, profile: 'none', skills: [], candidates: [
     { path: '.bb/aif-helper/plans/active.md', title: 'Active task', kind: 'basic', progress: { completed: 1, total: 3, verified: false } },
     { path: '.bb/aif-helper/plans/done.md', title: 'Finished task', kind: 'basic', progress: { completed: 2, total: 2, verified: false } },
@@ -207,7 +207,7 @@ test('the selector hides completed plans without requiring verification and rest
   } finally { slot.lifecycle.unmount(); }
 });
 
-test('closed classic plans are hidden, restorable and distinct from checkbox-complete active plans', { skip: 'Task 9' }, async () => {
+test('closed classic plans are hidden, restorable and distinct from checkbox-complete active plans', async () => {
   const s = snapshot({ profile: 'aifhub-classic', target: null, candidates: [
     { path: '.ai-factory/plans/closed.md', title: 'Closed classic', kind: 'classic', closed: true, progress: { completed: 12, total: 12, verified: false } },
     { path: '.ai-factory/plans/open.md', title: 'Still open classic', kind: 'classic', progress: { completed: 12, total: 12, verified: false } },
@@ -222,7 +222,7 @@ test('closed classic plans are hidden, restorable and distinct from checkbox-com
   } finally { slot.lifecycle.unmount(); }
 });
 
-test('a proposed native plan shows an explicit execution button instead of asking to create another plan', { skip: 'Task 9' }, async () => {
+test('a proposed native plan shows an explicit execution button instead of asking to create another plan', async () => {
   const s = snapshot({ configured: false, profile: 'none', target: null, candidates: [], skills: [], phase: 'plan',
     chatPlan: { seq: 20, hash: 'a'.repeat(64), title: 'Native proposal', accepted: false } });
   s.actions = workflowActions(s); let runs = 0;
@@ -237,7 +237,7 @@ test('a proposed native plan shows an explicit execution button instead of askin
   } finally { slot.lifecycle.unmount(); }
 });
 
-test('a completed plan keeps its actions and opens a separate new-task research form before resetting selection', { skip: 'Task 9' }, async () => {
+test('a completed plan keeps its actions and opens a separate new-task research form before resetting selection', async () => {
   const target = { path: '.bb/aif-helper/plans/finished.md', id: 'finished', title: 'Finished task', kind: 'basic' as const,
     tasks: [{ id: '1', title: 'Done', done: true }] };
   const s = snapshot({ configured: false, profile: 'none', target, candidates: [{ ...target }], skills: [], phase: 'done', worktree: { hasUncommitted: true } });
@@ -263,7 +263,7 @@ test('a completed plan keeps its actions and opens a separate new-task research 
   } finally { slot.lifecycle.unmount(); }
 });
 
-test('research description can be cancelled and survives refresh and failed dispatch without sending an empty task', { skip: 'Task 9' }, async () => {
+test('research description can be cancelled and survives refresh and failed dispatch without sending an empty task', async () => {
   const s = snapshot({ configured: false, profile: 'none', target: null, candidates: [], skills: [] });
   s.actions = workflowActions(s); let attempts = 0;
   const slot = renderSlot(app.messageDirectives[0], props, { rpc: { status: () => s, run: () => { attempts++; throw new Error('Контекст изменился'); } } });
@@ -282,6 +282,7 @@ test('research description can be cancelled and survives refresh and failed disp
     s.threadState = 'active'; await slot.behavior.experimental_invalidateRpc(['thread:thr_test']);
     assert.equal((slot.getByRole('button', { name: 'Начать исследование' }) as HTMLButtonElement).disabled, true);
     s.threadState = 'idle'; await slot.behavior.experimental_invalidateRpc(['thread:thr_test']);
+    await waitFor(() => assert.equal((slot.getByRole('button', { name: 'Начать исследование' }) as HTMLButtonElement).disabled, false));
     fireEvent.click(slot.getByRole('button', { name: 'Начать исследование' }));
     await waitFor(() => assert.equal(attempts, 1));
     await slot.findByRole('alert');
