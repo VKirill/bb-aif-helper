@@ -41,12 +41,12 @@ export const hostContract = defineRpcContract({
     output: z.object({ root: z.string(), path: z.string(), sha: z.string() }), experimental_retryable: false },
   removeWorktree: { input: z.object({ basePath: z.string().min(1).max(4096), root: z.string().min(1).max(4096) }).strict(),
     output: z.object({ removed: z.literal(true) }), experimental_retryable: true },
-  listChanges: { input: rootInput, output: z.object({ files: z.array(changeSchema), token: z.string() }), experimental_retryable: true },
+  listChanges: { input: rootInput, output: z.object({ files: z.array(changeSchema), plugin: z.array(changeSchema), token: z.string() }), experimental_retryable: true },
   checkpoint: { input: z.object({ root: z.string().min(1).max(4096), token: z.string().regex(/^[a-f0-9]{32}$/), message: z.string().min(1).max(300) }).strict(),
     output: z.object({ committed: z.boolean(), sha: z.string().optional(), files: z.array(z.string()) }), experimental_retryable: false },
   headCommit: { input: rootInput, output: z.object({ sha: z.string() }), experimental_retryable: true },
   bringBack: { input: z.object({ root: z.string().min(1).max(4096), copy: z.string().min(1).max(4096) }).strict(),
-    output: z.object({ applied: z.boolean(), empty: z.boolean().optional(), files: z.array(z.string()), error: z.string().optional() }), experimental_retryable: false },
+    output: z.object({ applied: z.boolean(), empty: z.boolean().optional(), partial: z.boolean().optional(), files: z.array(z.string()), error: z.string().optional() }), experimental_retryable: false },
   readBrief: { input: z.object({ path: z.string().min(1).max(4096) }).strict(), output: z.object({ text: z.string() }), experimental_retryable: true },
 });
 export const hostSignals = {

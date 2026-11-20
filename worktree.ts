@@ -16,6 +16,11 @@ const exists = (p: string) => stat(p).then(() => true, () => false);
 /** Every copy lives here, so removal never touches a folder this plugin did not make. */
 export const worktreesRoot = () => path.join(homedir(), '.bb-aif-helper', 'worktrees');
 export const WORKTREE_NAME = /^[A-Za-z0-9._-]{1,120}$/;
+/** True for a path inside a copy made here: such a folder belongs to a parallel worker. */
+export function insideWorktrees(p: string): boolean {
+  const inside = path.relative(worktreesRoot(), path.resolve(p));
+  return !!inside && inside !== '..' && !inside.startsWith('..' + path.sep) && !path.isAbsolute(inside);
+}
 
 export type CreatedWorktree = { root: string; path: string; sha: string };
 

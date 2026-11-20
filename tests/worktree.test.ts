@@ -105,11 +105,11 @@ test('bringing results back: a conflicting patch changes nothing and earlier res
   writeFileSync(path.join(two.path, 'a.txt'), 'one\nTASK2\nthree\n');
   writeFileSync(path.join(two.path, 'b.txt'), 'b changed\n');
   writeFileSync(path.join(two.path, 'new.txt'), 'new\n');
-  // The worker's copy refreshed the plugin's own blocks: that change must not travel, or it would collide.
+  // A worker's real edit of an instruction file travels like any other file.
   mkdirSync(path.join(one.path, '.ai-factory', 'skill-context'), { recursive: true });
-  writeFileSync(path.join(one.path, '.ai-factory', 'skill-context', 'own.md'), 'refreshed\n');
+  writeFileSync(path.join(one.path, '.ai-factory', 'skill-context', 'notes.md'), 'owner text\n');
   assert.deepEqual((await bringBack({ root: base, copy: one.path })).applied, true);
-  assert.equal(existsSync(path.join(base, '.ai-factory')), false, 'the plugin\'s own blocks stay out of the patch');
+  assert.equal(text(path.join(base, '.ai-factory', 'skill-context', 'notes.md')), 'owner text\n');
   assert.equal(text(path.join(base, 'a.txt')), 'one\nTASK1\nthree\n');
   assert.equal(text(path.join(top, 'a.txt')), 'one\ntwo\nthree\n', 'the root file with the same contents is untouched');
   assert.deepEqual([...readFileSync(path.join(base, 'logo.bin'))], [0, 255, 1, 254, 0]);
@@ -138,12 +138,16 @@ test('bring-back carries renames, deletions and awkward names, and refuses a fol
   sh(copy.path, 'mv', 'old.txt', 'new name.txt');
   rmSync(path.join(copy.path, 'gone.txt'));
   writeFileSync(path.join(copy.path, 'todo[1].txt'), 'bracket\n');
-  writeFileSync(path.join(copy.path, "it's \"quoted\" тест.txt"), 'q\n');
+  // `"` cannot be in a Windows file name; a `'` and Cyrillic can.
+  const quoted = process.platform === 'win32' ? "it's тест.txt" : "it's \"quoted\" тест.txt";
+  writeFileSync(path.join(copy.path, quoted), 'q\n');
   const result = await bringBack({ root: base, copy: copy.path });
   assert.equal(result.applied, true, JSON.stringify(result));
   assert.equal(existsSync(path.join(base, 'old.txt')) || existsSync(path.join(base, 'gone.txt')), false);
-  for (const f of ['new name.txt', 'todo[1].txt', "it's \"quoted\" тест.txt"]) assert.equal(existsSync(path.join(base, f)), true, f);
-  assert.equal((await bringBack({ root: base, copy: copy.path })).applied, false, 'the same patch again does not fit');
+  for (const f of ['new name.txt', 'todo[1].txt', quoted]) assert.equal(existsSync(path.join(base, f)), true, f);
+  const twice = sh(top, 'status', '--porcelain');
+  assert.equal((await bringBack({ root: base, copy: copy.path })).applied, true, 'a second bring-back of the same worker changes nothing');
+  assert.equal(sh(top, 'status', '--porcelain'), twice);
   await assert.rejects(bringBack({ root: base, copy: top }), /не копия AI Factory/);
   await removeWorktree({ basePath: base, root: copy.root });
 });
@@ -168,8 +172,10 @@ test('checkpoint lists each file, commits exactly the listed ones and refuses af
   writeFileSync(path.join(root, '.ai-factory', 'skill-context', 'own.md'), 'v2\n');
   writeFileSync(path.join(top, 'outside.txt'), 'outside changed\n');
   const listed = await listChanges({ root });
-  // One entry per file (a new folder is not collapsed to `new dir/`), the plugin's blocks and other sections left out.
-  assert.deepEqual(listed.files.map(f => f.path), ['sec/gone.txt', 'sec/new dir/тест.txt', 'sec/old.txt', 'sec/renamed.txt', 'sec/todo1.txt', 'sec/todo[1].txt']);
+  // One entry per file (a new folder is not collapsed to `new dir/`), the whole repository (a root lockfile counts),
+  // the plugin's own blocks apart.
+  assert.deepEqual(listed.files.map(f => f.path), ['outside.txt', 'sec/gone.txt', 'sec/new dir/тест.txt', 'sec/old.txt', 'sec/renamed.txt', 'sec/todo1.txt', 'sec/todo[1].txt']);
+  assert.deepEqual(listed.plugin.map(f => f.path), ['sec/.ai-factory/skill-context/own.md']);
   writeFileSync(path.join(root, 'todo[1].txt'), 'edited after the list\n');
   await assert.rejects(checkpoint({ root, token: listed.token, message: 'cp' }), /поменялись после проверки/);
   rmSync(path.join(root, 'todo1.txt'));
@@ -177,9 +183,97 @@ test('checkpoint lists each file, commits exactly the listed ones and refuses af
   const done = await checkpoint({ root, token: again.token, message: 'chore(aif): plan · before group 2' });
   assert.equal(done.committed, true);
   assert.deepEqual(sh(top, '-c', 'core.quotepath=false', 'show', '--name-status', '--format=', 'HEAD').split('\n').sort(),
-    ['A\tsec/new dir/тест.txt', 'A\tsec/todo[1].txt', 'D\tsec/gone.txt', 'R100\tsec/old.txt\tsec/renamed.txt'].sort());
-  assert.deepEqual(sh(top, 'status', '--porcelain').split('\n').map(l => l.trim()).sort(), ['M outside.txt', 'M sec/.ai-factory/skill-context/own.md'], 'other sections and the plugin\'s blocks stay uncommitted');
+    ['A\tsec/new dir/тест.txt', 'A\tsec/todo[1].txt', 'D\tsec/gone.txt', 'M\toutside.txt', 'R100\tsec/old.txt\tsec/renamed.txt'].sort());
+  assert.deepEqual(sh(top, 'status', '--porcelain').split('\n').map(l => l.trim()), ['M sec/.ai-factory/skill-context/own.md'], 'the plugin\'s blocks stay uncommitted');
   const empty = await listChanges({ root });
   assert.deepEqual(empty.files, []);
   assert.deepEqual(await checkpoint({ root, token: empty.token, message: 'cp' }), { committed: false, files: [] });
+});
+
+test('checkpoint: a file replaced by a folder, a staged version kept on a rejected commit, the executable bit in the token', async () => {
+  const top = path.join(sandbox, 'checkpoint edge');
+  const sh = (cwd: string, ...args: string[]) => execFileSync('git', ['-C', cwd, ...args], { encoding: 'utf8' });
+  mkdirSync(top, { recursive: true });
+  writeFileSync(path.join(top, 'config'), 'file\n');
+  writeFileSync(path.join(top, 'a.txt'), 'v1\n');
+  writeFileSync(path.join(top, 'run.sh'), 'echo 1\n');
+  sh(top, 'init', '-q'); sh(top, 'config', 'user.email', 't@t'); sh(top, 'config', 'user.name', 't'); sh(top, 'config', 'core.autocrlf', 'false');
+  sh(top, 'add', '-A'); sh(top, 'commit', '-qm', 'init');
+  rmSync(path.join(top, 'config'));
+  mkdirSync(path.join(top, 'config'));
+  writeFileSync(path.join(top, 'config', 'index.ts'), 'export {}\n');
+  const done = await checkpoint({ root: top, token: (await listChanges({ root: top })).token, message: 'cp' });
+  assert.equal(done.committed, true);
+  assert.equal(sh(top, 'status', '--porcelain'), '', 'a file replaced by a folder is committed and nothing stays staged');
+  // A rejected commit: the real index keeps the version the owner staged.
+  writeFileSync(path.join(top, 'a.txt'), 'staged\n'); sh(top, 'add', 'a.txt');
+  writeFileSync(path.join(top, 'a.txt'), 'unstaged\n');
+  const hooks = path.join(sandbox, 'reject-hooks'); mkdirSync(hooks, { recursive: true });
+  writeFileSync(path.join(hooks, 'pre-commit'), '#!/bin/sh\nexit 1\n', { mode: 0o755 });
+  sh(top, 'config', 'core.hooksPath', hooks);
+  const head = sh(top, 'rev-parse', 'HEAD');
+  await assert.rejects(checkpoint({ root: top, token: (await listChanges({ root: top })).token, message: 'cp' }));
+  assert.equal(sh(top, 'rev-parse', 'HEAD'), head);
+  assert.equal(sh(top, 'show', ':a.txt'), 'staged\n', 'the staged version is untouched');
+  sh(top, 'config', '--unset', 'core.hooksPath');
+  if (process.platform !== 'win32') {
+    const { chmodSync } = await import('node:fs');
+    writeFileSync(path.join(top, 'run.sh'), 'echo 2\n');
+    const token = (await listChanges({ root: top })).token;
+    chmodSync(path.join(top, 'run.sh'), 0o755);
+    await assert.rejects(checkpoint({ root: top, token, message: 'cp' }), /поменялись после проверки/);
+  }
+});
+
+test('bring-back resumes after writing stopped half way, and a copy never refreshes the plugin blocks', async (t) => {
+  const { insideWorktrees } = await import('../worktree.ts');
+  const { readDelegation, writeDelegation, CONTEXT_PATH } = await import('../delegation.ts');
+  const top = path.join(sandbox, 'resume repo');
+  const sh = (cwd: string, ...args: string[]) => execFileSync('git', ['-C', cwd, '-c', 'user.email=t@t', '-c', 'user.name=t', ...args], { encoding: 'utf8' }).trim();
+  mkdirSync(path.join(top, 'locked'), { recursive: true });
+  writeFileSync(path.join(top, 'a.txt'), 'a\n');
+  writeFileSync(path.join(top, 'locked', 'z.txt'), 'z\n');
+  writeFileSync(path.join(top, '.ai-factory.json'), '{}\n');
+  sh(top, 'init', '-q'); sh(top, 'config', 'core.autocrlf', 'false'); sh(top, 'add', '-A'); sh(top, 'commit', '-qm', 'init');
+  await writeDelegation(top, { mode: 'bb', providerId: 'codex', model: 'm', parallel: 2 });
+  sh(top, 'add', '-A'); sh(top, 'commit', '-qm', 'delegation');
+  const copy = await createWorktree({ basePath: top, name: 'resume-1' });
+  assert.equal(insideWorktrees(copy.path), true);
+  // An old block in the copy stays as it is: reading the copy's settings does not rewrite it.
+  const block = path.join(copy.path, CONTEXT_PATH);
+  writeFileSync(block, readFileSync(block, 'utf8').replace('bring-back --worker', 'OLD --worker'));
+  await readDelegation(copy.path);
+  assert.ok(readFileSync(block, 'utf8').includes('OLD --worker'));
+  sh(copy.path, 'checkout', '--', CONTEXT_PATH);
+  writeFileSync(path.join(copy.path, 'a.txt'), 'A\n');
+  writeFileSync(path.join(copy.path, 'locked', 'z.txt'), 'Z\n');
+  const { chmodSync } = await import('node:fs');
+  if (process.platform === 'win32' || process.getuid?.() === 0) { t.diagnostic('read-only folders need a POSIX non-root user'); }
+  else {
+    chmodSync(path.join(top, 'locked'), 0o555);
+    try {
+      const stopped = await bringBack({ root: top, copy: copy.path });
+      assert.equal(stopped.applied, false);
+      assert.equal((stopped as { partial?: boolean }).partial, true, JSON.stringify(stopped));
+    } finally { chmodSync(path.join(top, 'locked'), 0o755); }
+    // Whatever was written before the stop, the retry finishes the job.
+  }
+  const again = await bringBack({ root: top, copy: copy.path });
+  assert.equal(again.applied, true, JSON.stringify(again));
+  assert.equal(text(path.join(top, 'a.txt')), 'A\n');
+  assert.equal(text(path.join(top, 'locked', 'z.txt')), 'Z\n');
+  assert.equal((await bringBack({ root: top, copy: copy.path })).applied, true, 'an already applied patch counts as brought back');
+  await removeWorktree({ basePath: top, root: copy.root });
+});
+
+test('a brief saved by Windows PowerShell 5.1 (UTF-16 with BOM) is read; other bytes are refused', async () => {
+  const { readBrief } = await import('../parallel-git.ts');
+  const file = path.join(sandbox, 'brief ё.md');
+  writeFileSync(file, Buffer.concat([Buffer.from([0xff, 0xfe]), Buffer.from('Задача 2\r\n', 'utf16le')]));
+  assert.equal((await readBrief({ path: file })).text, 'Задача 2\r\n');
+  writeFileSync(file, Buffer.from([0xef, 0xbb, 0xbf, ...Buffer.from('Задача 3')]));
+  assert.equal((await readBrief({ path: file })).text, 'Задача 3');
+  writeFileSync(file, Buffer.from([0xd0, 0x00, 0xff, 0x41]));
+  await assert.rejects(readBrief({ path: file }), /UTF-8/);
+  await assert.rejects(readBrief({ path: 'brief.md' }), /абсолютный путь/);
 });

@@ -25,7 +25,7 @@ async function setup() {
     experimental_callHostRpc: async call => {
       calls.push({ method: call.method, input: call.input, hostId: call.hostId });
       if (call.method === 'collect') throw new Error('not needed');
-      if (call.method === 'listChanges') return { files: [{ status: ' M', path: 'src/a.ts' }], token: 'a'.repeat(32) };
+      if (call.method === 'listChanges') return { files: [{ status: ' M', path: 'src/a.ts' }], plugin: [], token: 'a'.repeat(32) };
       if (call.method === 'checkpoint') return { committed: true, sha: 'b'.repeat(40), files: ['src/a.ts'] };
       if (call.method === 'delegation') return { choice: { mode: 'bb', providerId: 'codex', model: 'gpt-6.2-sol', reasoning: 'high', tier: 'fast', parallel: 2 }, research: { mode: 'self' }, research2: { mode: 'self' }, research3: { mode: 'self' }, configured: true, foreign: null, error: null } as any;
       if (call.method === 'readBrief') return { text: 'Do task 2.' };
