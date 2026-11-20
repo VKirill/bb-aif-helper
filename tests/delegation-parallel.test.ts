@@ -41,9 +41,13 @@ test('contextBlock with parallel spawns workers on BB-made copies and keeps prov
   const text = contextBlock({ mode: 'bb', providerId: 'codex', model: 'gpt-6.2-sol', reasoning: 'high', tier: 'fast', parallel: 3 });
   // The copy comes from the plugin's environment provider, so a section inside a larger repository works too.
   // Every git and spawn step is a plugin command: no path, JSON or `git status` output passes through the shell.
+  // The plugin no longer parses plans: the coordinator model reads the plan, as in AI Factory.
+  assert.ok(!text.includes('aif-chat groups'));
   for (const absent of ['git worktree add', 'git worktree remove', 'git apply --check', 'git apply "', 'git status', 'git add', 'git commit', '--environment-inputs', '--3way', 'commit -am', 'git checkout --']) assert.ok(!text.includes(absent), absent);
   for (const part of [
-    'Parallel mode', '--max 3', 'bb plugin run aif-chat groups --target "<plan path>"',
+    'Parallel mode', 'up to 3 workers', "AI Factory's `implement-coordinator`", '(depends on X, Y)', 'Tasks of the same phase without explicit dependencies are independent',
+    '<!-- parallel: tasks N, M -->', '- [~] Task N: … <!-- in-progress -->', '- [!] Task N: … <!-- failed: <reason> -->', 'handoff_outcome: blocked_external',
+    'the list of files you modified', 'same cause three times', 'Status: complete',
     'bb plugin run aif-chat checkpoint --target "<plan path>" --group <N> --json', '--token <token>', 'If a file is not yours, stop and ask the owner; never commit it',
     'bb plugin run aif-chat spawn-worker --target "<plan path>" --task <taskId> --brief "<absolute brief path>" --json',
     'bb plugin run aif-chat bring-back --worker <id> --json', 'nothing was changed', 'there is nothing to undo', '{ applied: false, empty: true }',
@@ -61,6 +65,7 @@ test('writeDelegation stores parallel in phases.implement.model and manages the 
   const planContext = await readFile(join(root, PLAN_CONTEXT_PATH), 'utf8');
   assert.ok(planContext.includes('bb-aif-helper:plan'));
   assert.ok(planContext.includes('Files:'));
+  assert.ok(planContext.includes('(depends on 1, 2)'), 'plan hints use AI Factory task format');
   const implementContext = await readFile(join(root, CONTEXT_PATH), 'utf8');
   assert.ok(implementContext.includes('Parallel mode'));
 

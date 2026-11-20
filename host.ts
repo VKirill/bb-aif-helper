@@ -3,7 +3,7 @@ import path from 'node:path';
 import { experimental_defineHostEntry } from '@get-bb/plugin-sdk';
 import type { ExperimentalHostRpcContext, ExperimentalHostWatchEvent } from '@get-bb/plugin-sdk';
 import { hostContract, hostSignals } from './contract.ts';
-import { collectSnapshot, readPlanText } from './reader.ts';
+import { collectSnapshot } from './reader.ts';
 import { readDelegation, writeDelegation } from './delegation.ts';
 import { savePlanDocument, markPlanVerified } from './plan-document.ts';
 import { WATCH_IGNORED, relevantChange } from './live-updates.ts';
@@ -77,7 +77,6 @@ export default experimental_defineHostEntry({
     },
     delegation: input => readDelegation(input.root),
     setDelegation: input => writeDelegation(input.root, input.choice, input.role),
-    planText: input => readPlanText(input.root, input.target),
     savePlan: async (input, context) => {
       const result = await savePlanDocument(input);
       await addSeparateWatches(input.root, context);

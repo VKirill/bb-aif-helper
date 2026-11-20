@@ -244,26 +244,57 @@ If \`bb thread spawn\` fails, say so and do that research yourself; do not repea
 function parallelSection(n: number): string {
   return `## Parallel mode (managed by BB AIF Helper)
 
-The owner allowed up to ${n} workers at once. Run independent plan tasks in parallel, each worker in its own git worktree copy of the project:
+The owner allowed up to ${n} workers at once. You run the plan as AI Factory's \`implement-coordinator\` does: you read the plan and decide what runs in parallel; BB threads with the owner's model are your workers, each in its own git worktree copy of the project. The plugin commands below do the git and launch steps, so no path or JSON passes through your shell. This applies to an ordinary plan or an ultra bundle (\`index.md\` holds the checkboxes); a fix plan or OpenSpec change uses the one-worker flow above.
 
-1. Get the groups: \`bb plugin run aif-chat groups --target "<plan path>" --max ${n} --json\`. It answers \`{ groups, coordinatorOnly }\` — groups of task ids in execution order — or \`{ error }\`. On \`error\`, or for a fix plan, ultra bundle or OpenSpec change, use the one-worker flow above. Tasks in \`coordinatorOnly\` (commit and deploy tasks) you do yourself, as the plan says. A group with one task also uses the one-worker flow.
-2. Checkpoint before each group with two or more tasks: \`bb plugin run aif-chat checkpoint --target "<plan path>" --group <N> --json\`. It lists every changed file of the repository (\`{ files: [{ status, path }], plugin, token }\`; the whole repository, because a task may change a file above this folder, such as a root lockfile). \`plugin\` lists BB AIF Helper's own instruction files in \`.ai-factory/skill-context/\`: they are never committed here and need no decision. If every listed file is your own change from earlier tasks of this plan, run it again with \`--token <token>\`: the plugin commits exactly those files locally (no push) and refuses if anything changed since the list — then list again. If the answer has \`extra\`, a pre-commit hook added those files: tell the owner. If a file is not yours, stop and ask the owner; never commit it. The copies are built from the last commit and would not see uncommitted work.
-3. For each task of the group write its brief to a temporary file (as in step 1 of the one-worker flow) and start its worker: \`bb plugin run aif-chat spawn-worker --target "<plan path>" --task <taskId> --brief "<absolute brief path>" --json\`. It answers \`{ id }\`. The plugin starts the worker with the owner's model on a fresh copy of the project made from the checkpoint commit, as a child of this chat; the folder may be a section inside a larger repository (the copy is of the whole repository, the worker starts in the same subfolder). A retry is the same command: every launch gets its own copy.
-4. Wait for all workers of the group (step 4 of the one-worker flow for each id).
-5. Bring the results back one worker at a time: \`bb plugin run aif-chat bring-back --worker <id> --json\`. It moves everything the worker changed (new, changed, renamed and deleted files; ignored files such as \`node_modules\` stay out) into this workspace and answers \`{ applied: true, files }\`. \`{ applied: false, empty: true }\`: the worker changed nothing — treat the task as not done. \`{ applied: false, error }\`: the changes do not fit and nothing was changed, the results of earlier tasks are intact; apply nothing more for this group, do not run \`git apply\`, \`git checkout\`, \`git reset\` or \`git stash\` yourself — there is nothing to undo. Stop and report the task and the error to the owner. If writing fails half way (a locked or read-only file), the plugin puts back what it already wrote and answers \`{ applied: false, error }\` too; once the cause is fixed, run the same \`bring-back\` again. \`{ applied: false, partial: true, files, error }\`: those files could not be put back — stop and report them to the owner. \`bring-back\` takes only what the worker changed since its last bring-back, so a worker asked to fix its work is brought back again with just the fix. After a successful bring-back, review the diff and run that task's verification as in step 5 of the one-worker flow.
-6. Mark each task done only after its changes are brought back and verified. Then archive its worker (\`bb thread archive <id>\`); BB removes its copy five minutes later.
-7. Continue with the next group. The final commits stay as the plan describes; the local checkpoint commits are part of them and are never pushed without the owner's approval.
+### Layers
 
-If \`spawn-worker\` fails for a group, archive the workers it already started, report the error and run the rest of the plan with the one-worker flow.`;
+1. Read the whole plan. For each \`[ ]\` task take its number, phase (\`### Phase N\`) and its \`(depends on X, Y)\`. Tasks of the same phase without explicit dependencies are independent; a later phase depends on every earlier phase unless its tasks say otherwise. Keep apart, in different layers, tasks you can see will change the same file (from their \`Files:\` hints or text). Commit tasks (\`<!-- aif:task-kind:commit -->\`), commit checkpoints from \`## Commit Plan\`, and push or deploy steps are yours alone: never give them to a worker.
+2. Before the first worker, write \`<!-- parallel: tasks N, M -->\` on its own line above each group of independent tasks in the plan, once.
+3. The layer loop. \`ready\` = open tasks whose dependencies are all done. If none is ready while tasks remain, stop and report the circular or missing dependency. Check each ready task against the requirements as the skill's requirement-consistency step says. One ready task: the one-worker flow. Several: up to ${n} per layer, the rest in the next batch.
+4. Mark the layer's tasks \`- [~] Task N: … <!-- in-progress -->\` in the plan, then run the steps below. A task is \`[x]\` only after its changes are brought back and verified; then remove the \`in-progress\` comment.
+
+### One layer
+
+1. Checkpoint: \`bb plugin run aif-chat checkpoint --target "<plan path>" --group <N> --json\`. It lists every changed file of the repository (\`{ files: [{ status, path }], plugin, token }\`). \`plugin\` lists BB AIF Helper's own instruction files: they are never committed here. If every listed file is your own change from earlier tasks of this plan, run it again with \`--token <token>\`: the plugin commits exactly those files locally (no push) and refuses if anything changed since the list — then list again. If the answer has \`extra\`, a pre-commit hook added those files: tell the owner. If a file is not yours, stop and ask the owner; never commit it. The copies are built from the last commit and would not see uncommitted work.
+2. For each task write its brief to a temporary file in UTF-8. It starts with the worker contract below, then the plan path, the task number and full text (for an ultra bundle the whole \`## Task N\` section of its phase file), the relevant files and project rules, the verification commands and what done means. Start the worker: \`bb plugin run aif-chat spawn-worker --target "<plan path>" --task <taskId> --brief "<absolute brief path>" --json\` → \`{ id }\`. The plugin starts it with the owner's model on a fresh copy made from the checkpoint commit, as a child of this chat; a folder inside a larger repository works too. Every launch gets its own copy.
+3. Wait for every worker: \`bb thread wait <id> --status idle --timeout 8m\`, repeating while it still works. The report is \`bb thread output <id>\`.
+4. Bring the results back one worker at a time: \`bb plugin run aif-chat bring-back --worker <id> --json\`. It moves everything the worker changed (new, changed, renamed and deleted files; ignored files stay out) into this workspace. Answers:
+   - \`{ applied: true, files }\`: compare \`files\` with the worker's report and the task, review the diff and run the task's verification.
+   - \`{ applied: false, empty: true }\`: the worker changed nothing; the task is not done.
+   - \`{ applied: false, error }\`: the changes do not fit, and nothing was changed; the results of earlier tasks are intact. Do not run \`git apply\`, \`git checkout\`, \`git reset\` or \`git stash\` yourself: there is nothing to undo. Usually another task of the layer changed the same lines (see Failures). If writing failed half way (a locked or read-only file), the plugin put back what it wrote; once the cause is fixed, run the same \`bring-back\` again.
+   - \`{ applied: false, partial: true, files, error }\`: those files could not be put back. Stop and report them to the owner.
+   \`bring-back\` takes only what changed since the worker's last bring-back, so a worker asked to fix its work is brought back again with just the fix.
+5. After the whole layer is back, verify the merged result once (build and tests the plan names), then archive the layer's workers (\`bb thread archive <id>\`; BB removes its copy five minutes later). Commit only at the plan's commit tasks or checkpoints, as the plan says; you alone commit, and you never push without the owner.
+
+### The worker contract — the mandatory start of every brief (replace \`<thread-id>\` with your own \`BB_THREAD_ID\`)
+
+\`\`\`
+You are an implement-worker of an AI Factory /aif-implement coordinator (BB thread <thread-id>).
+Do exactly the one task below in the current workspace, then stop. Do not edit the plan or phase files or their checkboxes, do not commit, push or switch branches, do not start AI Factory skills or other agents.
+If the task contradicts the plan, the requirements or the code, change nothing and answer "handoff_outcome: blocked_external" with the conflict.
+Run the verification commands the task names, review your own diff once and fix what you find.
+Finish with a report: what changed; the list of files you modified; the checks you ran with their results; warnings and anything left open.
+\`\`\`
+
+### Failures
+
+Find the cause before you act; never repeat the same step unchanged.
+- A check failed or the work has a gap: fix a small one yourself, or send the exact error with \`bb thread tell <id> '<what to fix>'\`, wait, and bring the worker back again.
+- Two workers changed the same lines (\`bring-back\` error): keep what is already back, then redo that task after the layer with a fresh worker on a new checkpoint, so it sees the other task's changes.
+- BB failed (\`spawn-worker\` error, a host that is not connected, a worker that stopped without a report): retry once, then do that task yourself with the one-worker flow.
+- A task fails for the same cause three times: mark it \`- [!] Task N: … <!-- failed: <reason> -->\`, finish the tasks that do not depend on it, and ask the owner, naming the cause and the assumption you doubt.
+- Stop and ask the owner at once when a worker answers \`blocked_external\` or the requirements conflict, when a worker changed files outside its task that other tasks also change, or when a step needs secrets, a production server or deleting data.
+
+Update the plan right before and after each layer, so another session can continue. For an ultra bundle edit only \`index.md\`. When the plan is done, report \`Status: complete\`, \`partial\`, \`failed\` or \`blocked_external\`, and continue as the skill says (verification, commit).`;
 }
 
 export function planRuleBlock(): string {
   return `## Task hints for parallel execution (managed by BB AIF Helper)
 
-The project runs independent plan tasks in parallel. In every plan task line write, after the task text:
-- \`Files:\` with every file the task creates or changes, each in backticks, concrete paths only (no globs, no "listed above");
-- \`Depends on\` with the task numbers it needs (\`Depends on 2, 4\` or \`Depends on 1-3\`), or \`Depends on —\` when it needs none.
-Keep tasks that change the same file dependent or merged. Commit and deploy tasks stay last.`;
+The project runs independent plan tasks in parallel. Keep AI Factory's task format and make it complete:
+- end each task line with \`(depends on 1, 2)\` when it needs earlier tasks; tasks of one phase without it run side by side;
+- give every task a \`Files:\` hint with the files it creates or changes;
+- tasks that change the same file depend on each other or are merged into one; commit and deploy tasks stay last.`;
 }
 
 export function contextBlock(c: Extract<DelegationChoice, { mode: 'bb' }>) {

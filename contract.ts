@@ -29,7 +29,6 @@ export const hostContract = defineRpcContract({
   collect: { input: hostInputSchema, output: snapshotSchema, experimental_retryable: true },
   delegation: { input: z.object({ root: z.string().min(1).max(4096) }).strict(), output: delegationStateSchema, experimental_retryable: true },
   setDelegation: { input: z.object({ root: z.string().min(1).max(4096), choice: delegationChoiceSchema, role: delegationRoleSchema.optional() }).strict(), output: delegationStateSchema },
-  planText: { input: z.object({ root: z.string().min(1).max(4096), target: z.string().min(1).max(1000) }).strict(), output: z.object({ path: z.string(), text: z.string() }), experimental_retryable: true },
   watch: { input: z.object({ root: z.string().min(1).max(4096) }).strict(), output: z.object({ ok: z.literal(true) }) },
   unwatch: { input: z.object({ root: z.string().min(1).max(4096) }).strict(), output: z.object({ ok: z.literal(true) }) },
   savePlan: { input: z.object({ root: z.string().min(1).max(4096), threadId: z.string().regex(/^[\w-]{1,200}$/),

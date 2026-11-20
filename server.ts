@@ -16,7 +16,6 @@ import { SnapshotCache } from './snapshot-cache.ts';
 import { AIF_MENTION, aifMentionItems, aifModeInstructions, shouldContribute } from './aif-mode.ts';
 import { versionSampleFresh } from './versions.ts';
 import { DECISIONS_URL, decisionsRequest, decisionsResponseSchema, probabilitiesFor, scoringKey } from './chip-scoring.ts';
-import { parallelGroups } from './parallel-plan.ts';
 import { CHIP_SCORING_TAG, projectTag, threadTag } from './live-updates.ts';
 import { isBasicPlanPath, nativePlanInput } from './basic-workflow.ts';
 import { readChatPlan, type ChatPlanRecord } from './chat-plan.ts';
@@ -1045,18 +1044,17 @@ export default async function plugin(bb: BbPluginApi) {
   bb.cli.register({
     name: 'aif-chat', summary: 'AI Factory versions, live workflow card and read-only plan/check progress',
     commands: [...['status', 'show', 'save-plan', 'mark-verified', 'check-updates', 'reset', 'reset-dispatch'].map(name => ({ name, summary: name === 'show' ? 'Show a live chat card' : name, usage: `bb plugin run aif-chat ${name} [--thread <id>] [--target <path>] [--phase <phase>] [--json]` })),
-      { name: 'groups', summary: 'Parallel task groups of a plan', usage: 'bb plugin run aif-chat groups --target <path> [--max 1-4] [--json]' },
       { name: 'checkpoint', summary: 'List, then commit, the coordinator\'s changes before a parallel group', usage: 'bb plugin run aif-chat checkpoint --target <plan> --group <N> [--token <token>] [--json]' },
       { name: 'spawn-worker', summary: 'Start a parallel worker on its own copy of the project', usage: 'bb plugin run aif-chat spawn-worker --target <plan> --task <id> --brief <file> [--json]' },
       { name: 'bring-back', summary: 'Apply a parallel worker\'s changes to this workspace', usage: 'bb plugin run aif-chat bring-back --worker <thread id> [--json]' }],
     async run(argv, ctx) {
       try {
         const [command = 'help', ...args] = argv;
-        if (command === 'help' || command === '--help') return { exitCode: 0, stdout: 'bb plugin run aif-chat status|show|save-plan|mark-verified|check-updates|reset|reset-dispatch|groups|checkpoint|spawn-worker|bring-back [--thread ID] [--target PATH] [--phase explore|plan|improve|implement|verify|fix|done] [--max 1-4] [--json]' };
+        if (command === 'help' || command === '--help') return { exitCode: 0, stdout: 'bb plugin run aif-chat status|show|save-plan|mark-verified|check-updates|reset|reset-dispatch|checkpoint|spawn-worker|bring-back [--thread ID] [--target PATH] [--phase explore|plan|improve|implement|verify|fix|done] [--json]' };
         const options: Record<string, string> = {}; let json = false;
         for (let i = 0; i < args.length; i++) {
           if (args[i] === '--json') { json = true; continue; }
-          if (!['--thread', '--target', '--phase', '--max', '--group', '--token', '--task', '--brief', '--worker'].includes(args[i]) || !args[i + 1] || args[i + 1].startsWith('--')) throw new Error('Неизвестный аргумент или отсутствует значение.');
+          if (!['--thread', '--target', '--phase', '--group', '--token', '--task', '--brief', '--worker'].includes(args[i]) || !args[i + 1] || args[i + 1].startsWith('--')) throw new Error('Неизвестный аргумент или отсутствует значение.');
           if (args[i] in options) throw new Error('Повторяющийся аргумент.');
           const name = args[i]; options[name] = args[++i];
         }
@@ -1096,23 +1094,6 @@ export default async function plugin(bb: BbPluginApi) {
           await bb.storage.kv.delete(`${command === 'reset' ? 'selection' : 'deliveries'}:${input.threadId}`);
           if (command === 'reset') await bb.storage.kv.delete(`chat-plan:${input.threadId}`);
           cache.invalidate(key => !!watchers.get(key)?.has(input.threadId)); return { exitCode: 0, stdout: 'Состояние интерфейса сброшено; проект не изменён.' };
-        }
-        if (command === 'groups') {
-          if (!input.target) throw new Error('Укажите план: --target <путь>.');
-          const { environment } = await context(input.threadId);
-          const plan = await host.call('planText', { root: environment.path!, target: input.target }, { hostId: environment.hostId });
-          const max = Number(options['--max'] ?? 3);
-          const result = parallelGroups(plan.text, max);
-          if ('error' in result) {
-            bb.log.warn(`aif-chat: parallel groups target=${plan.path} error=${result.error}`);
-            if (json) return { exitCode: 0, stdout: JSON.stringify({ target: plan.path, error: result.error }) };
-            return { exitCode: 1, stderr: result.error };
-          }
-          bb.log.info(`aif-chat: parallel groups target=${plan.path} groups=${result.groups.length}`);
-          if (json) return { exitCode: 0, stdout: JSON.stringify({ target: plan.path, max, ...result }) };
-          const lines = result.groups.map((group, i) => `Группа ${i + 1}: задачи ${group.join(', ')}`);
-          if (result.coordinatorOnly.length) lines.push(`Только координатор: задачи ${result.coordinatorOnly.join(', ')}`);
-          return { exitCode: 0, stdout: lines.join('\n') };
         }
         if (command === 'checkpoint' || command === 'spawn-worker' || command === 'bring-back') {
           const result = await parallelCommand(command, input.threadId, input.target, options);
