@@ -24,7 +24,7 @@ const cardId = '11111111-1111-4111-8111-111111111111';
 const props = { attributes: { phase: 'plan', card: cardId }, source: `::aif-chat{phase="plan" card="${cardId}"}`, message: { id: 'msg_1', threadId: 'thr_test', turnId: 'turn_1', projectId: 'proj_test' }, openWorkspaceFile: null };
 function data() { const s = snapshot(); s.actions = workflowActions(s); return s; }
 
-test('2.22 plan controls, skipped tasks and version-gated diagnostics remain explicit in the panel', { skip: 'Task 10' }, async () => {
+test('2.22 plan controls, skipped tasks and version-gated diagnostics remain explicit in the panel', async () => {
   const s = snapshot({ fixDefaults: { mode: 'plan', patch: false } });
   s.versions.installed = '2.22.0'; s.versions.globalCli = '2.21.0';
   s.target!.settings = { commitStrategy: 'incremental-at-end', methodology: 'tdd', tddGranularity: 'feature-based' };
@@ -292,7 +292,7 @@ test('research description can be cancelled and survives refresh and failed disp
   } finally { slot.lifecycle.unmount(); }
 });
 
-test('a stale SessionBrief displays recovery next to a disabled execution button without dispatch on render', { skip: 'Task 10' }, async () => {
+test('a stale SessionBrief displays recovery next to a disabled execution button without dispatch on render', async () => {
   const s = snapshot({ profile: 'aifhub-openspec', phase: 'implement' }); s.target!.kind = 'openspec';
   s.extensions = [{ name: 'aifhub-extension', installedVersion: '1.8.1', recordedVersion: '1.8.1', source: 'local', state: 'present', contributions: [], commands: ['aifhub-session-brief'] }];
   s.sessionBrief = { target: s.target!.path, seq: 2, status: 'stale' }; s.actions = workflowActions(s);

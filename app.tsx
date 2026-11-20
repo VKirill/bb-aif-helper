@@ -12,6 +12,8 @@ import { chipDraft, isCommandDraft } from './suggestions.ts';
 import { AIF_MENTION } from './aif-mode.ts';
 import { isBasicPlanPath, usesBasicWorkflow, isCompletedPlan } from './basic-workflow.ts';
 import { mountPlanPresentation } from './plan-presentation.ts';
+import { sessionBriefBlocked } from './session-brief.ts';
+import { preparationCommands } from './project-preparation.ts';
 import { toast } from 'sonner';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
@@ -25,6 +27,28 @@ import './aif-chat.css';
 const phaseNames: Record<Phase, string> = { unknown: 'Контекст задачи', explore: 'Исследование', plan: 'Планирование', improve: 'Уточнение плана', implement: 'Выполнение плана', verify: 'Проверка', fix: 'Исправление замечаний', done: 'Финализация' };
 const profileNames: Record<Snapshot['profile'], string> = { none: 'Нет установки', upstream: 'AI Factory', 'aifhub-classic': 'AIFHub · classic', 'aifhub-openspec': 'AIFHub · OpenSpec', 'aifhub-ultra': 'AIFHub · legacy ultra', invalid: 'Проверьте конфигурацию' };
 const checkLabels = { notrun: 'Не запускалась', 'reported-pass': 'PASS в отчёте', warn: 'С замечаниями', fail: 'Ошибка', unknown: 'Не подтверждено' };
+const actionIcons: Record<string, string> = {
+  commit: 'GitCommit', fix: 'Wrench', 'fix-new': 'Wrench', 'fix-findings': 'Wrench', 'execute-fix': 'Wrench',
+  verify: 'RotateCw', 'check-verify': 'ListChecks', implement: 'Play', 'implement-proposed': 'Play',
+  explore: 'Search', plan: 'ListTodo', improve: 'Sparkles', 'apply-improvements': 'CheckCheck',
+  done: 'Archive', 'ultra-receipt': 'FileCheck', sync: 'RefreshCw', 'context-sync': 'RefreshCw',
+  'context-compile': 'FileText', 'setup-context': 'Settings', analyze: 'Search', init: 'Download',
+  install: 'Download', 'install-factory': 'Download', 'update-factory': 'Download', 'update-extensions': 'Package',
+  'check-rules': 'ScrollText', 'rules-check': 'ScrollText', 'check-security': 'ShieldCheck', 'security-checklist': 'ShieldCheck',
+  'check-review': 'GitPullRequest', review: 'GitPullRequest', 'check-mode': 'Settings', mode: 'Settings',
+  'check-worktree': 'FolderCheck', 'check-coupling': 'Network', 'qa-prepare': 'ClipboardList', qa: 'ClipboardList',
+  'qa-run': 'ListChecks', 'qa-check': 'ListChecks', quality: 'CheckCheck', 'quality-setup': 'Settings',
+  ci: 'Workflow', 'ci-setup': 'Settings',
+};
+/** Icon by action id, then by the aif skill named in its command; decorative only. */
+function ActionIcon({ id, command = '' }: { id: string; command?: string }) {
+  const skill = command.match(/(?:^|[\s$/])aif-([a-z][a-z0-9-]*)\b/)?.[1];
+  const name = id.startsWith('prep-') ? preparationCommands[id.slice(5)]?.icon ?? 'Settings'
+    : actionIcons[id.replace(/^basic-/, '')] ?? actionIcons[skill ?? ''] ?? 'ArrowRight';
+  return <Icon name={name} className="size-3.5" aria-hidden="true" />;
+}
+const unavailableSuffix = (a: Action) => a.disabledReason === 'unchanged' ? ' · без изменений' : a.disabledReason === 'requires-cli222' ? ' · нужен CLI 2.22+'
+  : a.disabledReason === 'context-blocked' ? ' · контекст неактуален' : ' · не установлен';
 const chipPercent = (p: number) => p > 0 && Math.round(p * 100) === 0 ? '<1%' : `${Math.round(p * 100)}%`;
 
 /** Info mark: "?" in a circle, drawn inline so it never falls back to a host glyph. */
@@ -73,7 +97,7 @@ function PlanDocument({ code, status, message }: ExperimentalCodeFenceRendererPr
       <span className="text-muted-foreground">{saved.path}</span></p>}
     {status === 'unclosed' && <Callout tone="error">Генерация прервана. Неполный план не сохранён и не запускается.</Callout>}
     {error && <div className="flex flex-col gap-2"><Callout tone="error" role="alert">Не удалось сохранить план: {error}</Callout>
-      <Button type="button" size="sm" variant="outline" className="w-fit" onClick={() => void save()}>Повторить сохранение</Button></div>}
+      <Button type="button" size="sm" variant="outline" className="w-fit" onClick={() => void save()}><ActionIcon id="verify" />Повторить сохранение</Button></div>}
     {status === 'closed' && !saved && !error && <p className="m-0 text-xs text-muted-foreground">Действия появятся после завершения генерации и сохранения файла.</p>}
     {saved && <div aria-label="Действия после плана"><WorkflowCard key={`${message.threadId}:${saved.path}`} threadId={message.threadId} initialTarget={saved.path} phase="plan" compact /></div>}
   </section>;
@@ -174,7 +198,7 @@ function WorkflowCard({ threadId, initialTarget = '', phase = 'unknown', openFil
     disabled={sending || busy || !a.available} onClick={() => {
       if (a.id === 'basic-explore') { setResearchOpen(true); setError(''); setNotice(''); } else void run(a);
     }}>
-    {a.label}{!a.available && (a.disabledReason === 'unchanged' ? ' · без изменений' : ' · не установлен')}</Button></Hint>;
+    <ActionIcon id={a.id} command={a.command} />{a.label}{!a.available && unavailableSuffix(a)}</Button></Hint>;
   const renderActions = (actions: Action[]) => actions.length ? <div className="flex flex-wrap gap-2">{actions.map(renderAction)}</div> : null;
   const stateText = snapshot ? snapshot.pendingQuestions ? `ожидаю ответы: ${snapshot.pendingQuestions}` : snapshot.pendingConfirmation ? 'ожидается подтверждение пользователя' : snapshot.pendingConfirmation === null ? 'ожидание подтверждения не проверено' : busy ? 'агент занят' : snapshot.threadState === 'error' ? 'ошибка выполнения BB' : 'агент свободен' : '';
   const checkTone = (c: Snapshot['checks'][number]) => {
@@ -237,6 +261,8 @@ function WorkflowCard({ threadId, initialTarget = '', phase = 'unknown', openFil
           <span className="font-medium">{phaseNames[snapshot.phase]} <span className="font-normal text-muted-foreground">· {stateText}</span></span>
         </p>
         {usesBasicWorkflow(snapshot) && <p aria-label="Базовый workflow" className="m-0 text-xs text-muted-foreground">Без AI Factory доступен встроенный flow: исследование → Plan BB → выполнение → проверка → коммит. «Составить план» включает штатный режим Plan. Установка — отдельная кнопка.</p>}
+        {sessionBriefBlocked(snapshot) && <div aria-label="Блокировка SessionBrief"><Callout tone="error" role="status">SessionBrief: {snapshot.sessionBrief!.status.toUpperCase()} · из чата. Выполнение остановлено. Синхронизируйте выбранный change, затем пересоберите SessionBrief. Актуальность контекста проверяет владелец workflow.</Callout></div>}
+        {snapshot.fixDefaults && <p className="m-0 text-xs text-muted-foreground">Fix: <code>{snapshot.fixDefaults.mode}</code> · learning patch: {snapshot.fixDefaults.patch ? 'включён' : 'выключен'} · настройки применяет aif-fix</p>}
         {snapshot.candidates.length > 0 && <label className="flex flex-col gap-1 text-xs text-muted-foreground">План / change
           <select aria-label="Выбранный план или change" value={snapshot.target?.path ?? target} onChange={e => { setTarget(e.target.value); setNewTask(false); setNotice(''); }}
             className="h-9 w-full cursor-pointer rounded-md border border-input bg-transparent px-3 text-sm text-foreground outline-none focus-visible:ring-1 focus-visible:ring-ring">
@@ -251,10 +277,12 @@ function WorkflowCard({ threadId, initialTarget = '', phase = 'unknown', openFil
             <span className="text-xs text-muted-foreground tabular-nums">{completed}/{tasks.length} задач</span></div>
           {snapshot.target.verification?.verified && <p className="m-0 text-xs text-muted-foreground" title="Отметка владельца проверки в файле плана">План отмечен проверенным</p>}
           <Progress aria-label="Выполнение задач плана" value={tasks.length ? completed / tasks.length * 100 : 0} className="h-1.5 bg-muted" />
+          {snapshot.target.settings && Object.values(snapshot.target.settings).some(Boolean) && <p aria-label="Настройки плана" className="m-0 text-xs text-muted-foreground">Коммиты: <code>{snapshot.target.settings.commitStrategy ?? 'не указано'}</code> · Метод: <code>{snapshot.target.settings.methodology ?? 'не указан'}</code>{snapshot.target.settings.tddGranularity && <> · TDD: <code>{snapshot.target.settings.tddGranularity}</code></>}</p>}
           <Disclosure summary="Задачи плана">
             {tasks.length ? <ul className="m-0 flex list-none flex-col gap-1.5 p-0">{tasks.map((t, i) => <li key={`${t.id}-${i}`} className="grid grid-cols-[16px_minmax(0,1fr)] gap-2 text-xs">
-              <Icon name={t.done ? 'CircleCheck' : 'Circle'} aria-label={t.done ? 'Выполнена по плану' : 'Не выполнена'} className={cn('mt-px size-4', t.done ? 'text-primary' : 'text-muted-foreground')} />
-              <span className={t.done ? 'text-muted-foreground' : ''}>{t.title}</span></li>)}</ul>
+              <span role="img" aria-label={t.outcome === 'skipped' ? 'Пропущена по плану' : t.done ? 'Выполнена по плану' : 'Не выполнена'} className="mt-px">
+                <Icon name={t.outcome === 'skipped' ? 'Minus' : t.done ? 'CircleCheck' : 'Circle'} aria-hidden="true" className={cn('size-4', t.done ? 'text-primary' : 'text-muted-foreground')} /></span>
+              <span className={t.done ? 'text-muted-foreground' : ''}>{t.title}{t.kind === 'commit' && <span className="text-muted-foreground"> · коммит</span>}{t.outcome === 'skipped' && <span className="text-muted-foreground"> · пропущено по плану</span>}</span></li>)}</ul>
               : <p className="m-0 text-xs text-muted-foreground">Чекбоксы задач не найдены; прогресс неизвестен.</p>}
           </Disclosure>
         </div>}
@@ -277,7 +305,7 @@ function WorkflowCard({ threadId, initialTarget = '', phase = 'unknown', openFil
           <p className="m-0 text-xs text-muted-foreground">До {RESEARCH_TASK_MAX_LENGTH} символов. Исследование изучает задачу и код, не меняя файлы.</p>
           {researchError && <Callout tone="error" role="alert">{researchError}</Callout>}
           <div className="flex flex-wrap gap-2">
-            <Button type="submit" size="sm" disabled={!researchTask.trim() || sending || busy || !researchAction.available}>Начать исследование</Button>
+            <Button type="submit" size="sm" disabled={!researchTask.trim() || sending || busy || !researchAction.available}><ActionIcon id="explore" />Начать исследование</Button>
             <Button type="button" size="sm" variant="outline" disabled={sending} onClick={() => { setResearchOpen(false); setResearchTask(''); setResearchError(''); }}>Отмена</Button>
           </div>
         </form>}
@@ -291,7 +319,7 @@ function WorkflowCard({ threadId, initialTarget = '', phase = 'unknown', openFil
 
       {delegation && view === 'nav' && snapshot.configured && <WorkingSection threadId={threadId} />}
 
-      {(!delegation || view === 'nav') && snapshot.target && snapshot.checks.length > 0 && <Disclosure className="aif-checks" summary={<>Что проверить <span className="font-normal text-muted-foreground">· из чата: {snapshot.checks.filter(c => c.chat).length} · отчётов PASS: {snapshot.checks.filter(c => c.state === 'reported-pass').length}</span></>}>
+      {(!delegation || view === 'nav') && snapshot.checks.length > 0 && <Disclosure className="aif-checks" summary={<>Что проверить <span className="font-normal text-muted-foreground">· из чата: {snapshot.checks.filter(c => c.chat).length} · отчётов PASS: {snapshot.checks.filter(c => c.state === 'reported-pass').length}</span></>}>
         <p className="m-0 text-xs text-muted-foreground">Дополнительные проверки — по выбору. Правила проекта и обязательные gates могут требовать их перед завершением; блокирующий FAIL сохраняет силу. Галочки задач и результаты проверок независимы. Актуальность отчётов подтверждает владелец workflow.</p>
         <ul className={cn('m-0 flex list-none flex-col divide-y divide-border p-0', surface === 'card' && 'rounded-lg border border-border')}>{snapshot.checks.map(c => <li key={c.id} className="flex flex-col gap-2 p-3">
           <div className="flex flex-wrap items-center gap-2">
@@ -337,7 +365,7 @@ function WorkflowCard({ threadId, initialTarget = '', phase = 'unknown', openFil
         </dl>
         <div className="flex flex-wrap items-center gap-2">
           <Hint text={nextVersionCheck > Date.now() ? `Следующая проверка доступна ${new Date(nextVersionCheck).toLocaleString('ru')}` : 'Проверить upstream; результат сохраняется на сутки'}><Button type="button" variant="outline" size="sm" disabled={network || nextVersionCheck > Date.now()}
-            onClick={async () => { setNetwork(true); try { await refresh(true); } finally { if (mounted.current) setNetwork(false); } }}>{network ? 'Проверяю GitHub…' : 'Проверить версию в GitHub'}</Button></Hint>
+            onClick={async () => { setNetwork(true); try { await refresh(true); } finally { if (mounted.current) setNetwork(false); } }}><Icon name="RefreshCw" className="size-3.5" aria-hidden="true" />{network ? 'Проверяю GitHub…' : 'Проверить версию в GitHub'}</Button></Hint>
           {nextVersionCheck > Date.now() && <span className="text-xs text-muted-foreground">Следующая проверка GitHub — {new Date(nextVersionCheck).toLocaleString('ru')}.</span>}
         </div>
         {snapshot.extensions.length ? <ul className="m-0 flex list-none flex-col gap-3 p-0 text-xs">{snapshot.extensions.map(e => <li key={e.name}><strong className="font-medium">{e.name}</strong> {e.installedVersion ?? 'файлы отсутствуют'} <span className="text-muted-foreground">· {e.state}</span>
