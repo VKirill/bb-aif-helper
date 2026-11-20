@@ -24,6 +24,7 @@ import { pendingConfirmation, asksToApplyPlanChanges } from './confirmation.ts';
 import { IMPROVE_APPROVAL, pendingImproveProposal } from './improve-approval.ts';
 import { readSessionBrief, sessionBriefBlocked, sessionBriefCommandAvailable, briefCommands, SESSION_BRIEF_COMMAND, type SessionBriefReport } from './session-brief.ts';
 import { GATE_EVIDENCE_COMMAND, gateEvidenceCommandAvailable } from './gate-evidence-command.ts';
+import { registerWorktreeProvider } from './worktree-provider.ts';
 export { rpcContract } from './contract.ts';
 type Selection = { environmentId: string; target: string; phase: Phase; newTask?: boolean };
 type Delivery = { requestId: string; fingerprint: string; actionId: string; state: 'attempting' | 'sent' | 'uncertain'; at: number };
@@ -59,6 +60,7 @@ export default async function plugin(bb: BbPluginApi) {
     decisionsKey: { type: 'string', label: 'Ключ Gemini Decisions (ручной ввод)', secret: true, default: '' },
   });
   const host = bb.hosts.experimental_client({ contract: hostContract, experimental_signals: hostSignals });
+  registerWorktreeProvider(bb, host);
   const watchers = new Map<string, Set<string>>();
   const threadEnvironments = new Map<string, string | null>();
   const noteEnvironment = (threadId: string, environmentId: string | null) => {

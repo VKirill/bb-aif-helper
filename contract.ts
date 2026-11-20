@@ -35,6 +35,10 @@ export const hostContract = defineRpcContract({
     output: z.object({ path: z.string() }), experimental_retryable: true },
   markPlanVerified: { input: z.object({ root: z.string().min(1).max(4096), target: z.string().min(1).max(1000), expectedHash: z.string().regex(/^[a-f0-9]{64}$/) }).strict(),
     output: z.object({ path: z.string(), verified: z.literal(true) }), experimental_retryable: false },
+  createWorktree: { input: z.object({ basePath: z.string().min(1).max(4096), name: z.string().regex(/^[A-Za-z0-9._-]{1,120}$/), ref: z.string().max(200).optional() }).strict(),
+    output: z.object({ root: z.string(), path: z.string(), sha: z.string() }), experimental_retryable: false },
+  removeWorktree: { input: z.object({ basePath: z.string().min(1).max(4096), root: z.string().min(1).max(4096) }).strict(),
+    output: z.object({ removed: z.literal(true) }), experimental_retryable: true },
 });
 export const hostSignals = {
   filesChanged: { payload: z.object({ root: z.string() }) },

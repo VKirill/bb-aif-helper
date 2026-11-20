@@ -7,6 +7,7 @@ import { collectSnapshot, readPlanText } from './reader.ts';
 import { readDelegation, writeDelegation } from './delegation.ts';
 import { savePlanDocument, markPlanVerified } from './plan-document.ts';
 import { WATCH_IGNORED, relevantChange } from './live-updates.ts';
+import { createWorktree, removeWorktree } from './worktree.ts';
 
 type Subscription = { dispose(): Promise<void> };
 type HostContext = ExperimentalHostRpcContext<typeof hostSignals>;
@@ -78,6 +79,8 @@ export default experimental_defineHostEntry({
       return result;
     },
     markPlanVerified: input => markPlanVerified(input),
+    createWorktree: input => createWorktree(input),
+    removeWorktree: input => removeWorktree(input),
     watch: async (input, context) => {
       const root = input.root;
       if (watches.has(root)) return { ok: true as const };

@@ -187,20 +187,19 @@ The owner allowed up to ${n} workers at once. Run independent plan tasks in para
 1. Get the groups: \`bb plugin run aif-chat groups --target <plan path> --max ${n} --json\`. It answers \`{ groups, coordinatorOnly }\` — groups of task ids in execution order — or \`{ error }\`. On \`error\`, or for a fix plan, ultra bundle or OpenSpec change, use the one-worker flow above. Tasks in \`coordinatorOnly\` (commit and deploy tasks) you do yourself, as the plan says. A group with one task also uses the one-worker flow.
 2. Before each group with two or more tasks, \`git status --porcelain\` must show only your own changes from earlier tasks of this plan. If it shows changes you did not make, stop and ask the owner; never commit them.
 3. Checkpoint: if there are changes from earlier tasks, commit them locally (no push) with \`git commit -am 'chore(aif): <plan> · before group N'\` after \`git add\` of exactly those files. The copies are built from a commit and would not see uncommitted work.
-4. For each task of the group create its copy on top of that commit and spawn the worker there (\`<branch>\` = \`git branch --show-current\`, \`<copy>\` = \`"$BB_THREAD_STORAGE/tmp/aif-wt-<plan>-<taskId>"\`):
+4. For each task of the group spawn its worker on a fresh copy that BB makes from that commit (\`<base>\` = this workspace folder, \`pwd\`; \`<sha>\` = \`git rev-parse HEAD\`). The folder may be a section inside a larger repository: the copy is of the whole repository, and the worker starts in the same subfolder.
 
 \`\`\`bash
-git worktree add --detach <copy> 'refs/heads/<branch>'
-bb thread spawn --project "$BB_PROJECT_ID" --environment <copy> --parent-self --lifecycle-owner-thread "$BB_THREAD_ID" --parent-notifications off ${flags} --title 'AIF · <plan> · <taskId>' --prompt-file <brief> --json
+bb thread spawn --project "$BB_PROJECT_ID" --environment-provider aif-chat-worktree --environment-inputs '{"basePath":"<base>","name":"<plan>-<taskId>","ref":"<sha>"}' --parent-self --lifecycle-owner-thread "$BB_THREAD_ID" --parent-notifications off ${flags} --title 'AIF · <plan> · <taskId>' --prompt-file <brief> --json
 \`\`\`
 
-   Add to each brief, after the worker rules: "You work in your own copy of the project. If dependencies are missing, install them first (\`<install command from the project's command catalog>\`). Do not commit."
+   Add to each brief, after the worker rules: "You work in your own copy of the project: the folder BB opened this thread in. Before any change run \`git rev-parse --show-toplevel\`; if it fails, \`cd\` into that folder first. If dependencies are missing, install them first (\`<install command from the project's command catalog>\`). Do not commit."
 5. Wait for all workers of the group (step 4 of the one-worker flow for each id).
-6. Bring the results back one worker at a time. In \`<copy>\` run \`git add -A\` and \`git diff --cached --binary HEAD > <tmp>/task-<taskId>.patch\` (exclude \`node_modules\`, \`dist\` and other ignored output). In the main workspace run \`git apply --3way <tmp>/task-<taskId>.patch\`, then review the diff and run that task's verification as in step 5 of the one-worker flow. If \`git apply\` fails or leaves conflicts, undo it (\`git checkout -- <files>\` for that patch only), stop, and report the task and the conflicting files to the owner.
-7. Mark each task done only after its patch is applied and verified. Then archive its worker (\`bb thread archive <id>\`) and remove its copy (\`git worktree remove --force <copy>\`).
+6. Bring the results back one worker at a time. \`<copy>\` is \`environment.path\` from \`bb thread show <id> --json\`. In \`<copy>\` run \`git add -A\` and \`git diff --cached --binary HEAD > <tmp>/task-<taskId>.patch\` (exclude \`node_modules\`, \`dist\` and other ignored output). In the main workspace run \`git apply --3way <tmp>/task-<taskId>.patch\`, then review the diff and run that task's verification as in step 5 of the one-worker flow. If \`git apply\` fails or leaves conflicts, undo it (\`git checkout -- <files>\` for that patch only), stop, and report the task and the conflicting files to the owner.
+7. Mark each task done only after its patch is applied and verified. Then archive its worker (\`bb thread archive <id>\`); BB removes its copy five minutes later.
 8. Continue with the next group. The final commits stay as the plan describes; the local checkpoint commits are part of them and are never pushed without the owner's approval.
 
-If \`git worktree add\` or \`bb thread spawn\` fails, remove the copies you made, report it and run the rest of the plan with the one-worker flow.`;
+If \`bb thread spawn\` fails for a group, archive the workers it already started, report the error and run the rest of the plan with the one-worker flow.`;
 }
 
 export function planRuleBlock(): string {
