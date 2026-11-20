@@ -1,6 +1,6 @@
 import { execFile } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
-import { lstat, mkdir, mkdtemp, readdir, readFile, readlink, stat, symlink, writeFile } from 'node:fs/promises';
+import { chmod, lstat, mkdir, mkdtemp, readdir, readFile, readlink, stat, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { withoutManagedBlocks } from './delegation.ts';
@@ -236,31 +236,8 @@ export async function bringBack(input: { root: string; copy: string }) {
   const patch = path.join(dir, `${randomUUID()}.patch`);
   try {
     await git(theirs.top, [...DIFF, base, `--output=${patch}`]);
-    // Two steps, additions and edits before deletions: in one `git apply` a deletion that leaves the chat folder empty
-    // removes it, and an added file then makes a new folder with default permissions (renaming the folder's only file).
-    // A file replaced by a folder of the same name, or the reverse, needs the single step. The patch splits at its
-    // `diff --git` lines: no content, binary or `\` line starts that way.
-    const blocks = (await readFile(patch, 'utf8')).split(/^(?=diff --git )/m).filter(Boolean);
-    const isDeletion = (block: string) => /^deleted file mode /m.test(block.split(/^(?:@@|GIT binary patch)/m)[0]);
-    const removed = tokens.filter((_, i) => i % 2 === 1 && / D$/.test(tokens[i - 1]));
-    const kept = tokens.filter((_, i) => i % 2 === 1 && !/ D$/.test(tokens[i - 1]));
-    const swap = removed.some(d => kept.some(k => k.startsWith(`${d}/`) || d.startsWith(`${k}/`)));
-    const groups = swap ? [blocks] : [blocks.filter(b => !isDeletion(b)), blocks.filter(isDeletion)].filter(g => g.length);
-    const steps = await Promise.all(groups.map(async (group, i) => {
-      const file = path.join(dir, `step-${i}.patch`);
-      await writeFile(file, group.join(''));
-      return file;
-    }));
-    // A step that already went in (the host was killed after `git apply` and before the receipt) applies in reverse:
-    // it is skipped, so a retry finishes the transfer instead of refusing it.
-    const pending: string[] = [];
-    for (const step of steps) {
-      try { await git(mine.top, ['apply', '--check', '--whitespace=nowarn', step]); pending.push(step); }
-      catch (cause) {
-        const done = await git(mine.top, ['apply', '--check', '--reverse', '--whitespace=nowarn', step]).then(() => true, () => false);
-        if (!done) return { applied: false as const, empty: false as const, files, error: (cause as Error).message };
-      }
-    }
+    try { await git(mine.top, ['apply', '--check', '--whitespace=nowarn', patch]); }
+    catch (cause) { return { applied: false as const, empty: false as const, files, error: (cause as Error).message }; }
     const saved = await Promise.all(files.map(f => save(mine.top, f)));
     // --whitespace=nowarn: `apply.whitespace=fix` in the project would strip the trailing spaces of a Markdown line break.
     const undo = async (error: string) => {
@@ -270,10 +247,12 @@ export async function bringBack(input: { root: string; copy: string }) {
         ? { applied: false as const, empty: false as const, partial: true as const, files: lost, error }
         : { applied: false as const, empty: false as const, files, error };
     };
-    for (const step of pending) {
-      try { await git(mine.top, ['apply', '--whitespace=nowarn', step]); }
-      catch (cause) { return undo((cause as Error).message); }
-    }
+    // git apply removes a folder a deletion leaves empty and makes it again for an added file (renaming the chat
+    // folder's only file): the new folder gets the chat folder's permissions back.
+    const folder = mine.prefix ? await stat(path.resolve(input.root)).catch(() => null) : null;
+    try { await git(mine.top, ['apply', '--whitespace=nowarn', patch]); }
+    catch (cause) { return undo((cause as Error).message); }
+    if (folder) await chmod(path.resolve(input.root), folder.mode & 0o7777).catch(() => undefined);
     await writeFile(mark, `${tree}\n`);
     return { applied: true as const, files };
   } finally { await removePath(dir).catch(() => undefined); }
