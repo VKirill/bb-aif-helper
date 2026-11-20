@@ -1,7 +1,7 @@
 import { execFile } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { lstat, mkdir, readdir, rm, rmdir, stat, unlink } from 'node:fs/promises';
-import { homedir } from 'node:os';
+import { lstat, mkdir, mkdtemp, readdir, rm, rmdir, stat, unlink, writeFile } from 'node:fs/promises';
+import { homedir, tmpdir } from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
 
@@ -47,7 +47,30 @@ export function insideWorktrees(p: string): boolean {
 
 export type CreatedWorktree = { root: string; path: string; sha: string };
 
-export async function createWorktree(input: { basePath: string; name: string; ref?: string }): Promise<CreatedWorktree> {
+/** In a copy's own git folder: the tree of its last bring-back, or of the coordinator's work it was seeded with. */
+export const BROUGHT_BACK = 'aif-brought-back';
+
+/**
+ * Gives a fresh copy the coordinator's uncommitted work: changed, new (not ignored) and deleted files, so a worker
+ * sees the results of earlier tasks without a commit. The tree is built in a temporary index, so the coordinator's
+ * index stays as it was. The copy keeps HEAD in its index (the work shows as ordinary changes) and records the tree,
+ * so bring-back moves only what the worker changed on top of it.
+ */
+async function seed(top: string, root: string, sha: string) {
+  const dir = await mkdtemp(path.join(tmpdir(), 'aif-seed-'));
+  const env = { ...process.env, GIT_INDEX_FILE: path.join(dir, 'index') };
+  const inTemp = (args: string[]) => run('git', ['-C', top, ...args], { timeout: 120_000, maxBuffer: 4 << 20, env });
+  try {
+    await inTemp(['read-tree', sha]);
+    await inTemp(['add', '-A']);
+    const tree = (await inTemp(['write-tree'])).stdout.trim();
+    await git(root, ['read-tree', '-m', '-u', sha, tree]);
+    await git(root, ['reset', '-q']);
+    await writeFile(await git(root, ['rev-parse', '--path-format=absolute', '--git-path', BROUGHT_BACK]), `${tree}\n`);
+  } finally { await removePath(dir).catch(() => undefined); }
+}
+
+export async function createWorktree(input: { basePath: string; name: string; ref?: string; seed?: boolean }): Promise<CreatedWorktree> {
   if (!WORKTREE_NAME.test(input.name)) throw new Error(`Недопустимое имя копии: ${input.name}`);
   if (!path.isAbsolute(input.basePath)) throw new Error(`Нужен абсолютный путь: ${input.basePath}`);
   if (input.ref?.startsWith('-')) throw new Error(`Недопустимая ссылка: ${input.ref}`);
@@ -76,12 +99,15 @@ export async function createWorktree(input: { basePath: string; name: string; re
   };
   try {
     await git(top, ['worktree', 'add', '--detach', root, sha]);
+    if (input.seed) await seed(top, root, sha);
   } catch (cause) { await discard(); throw cause; }
   // git prints the prefix with `/` and a trailing slash; resolve gives the machine's own separators without it.
   const worker = path.resolve(root, prefix);
   if (!(await stat(worker).then(s => s.isDirectory(), () => false))) {
     await discard();
-    throw new Error(`Папки ${prefix} нет в коммите ${sha.slice(0, 12)}: закоммитьте раздел перед запуском исполнителей`);
+    throw new Error(input.seed
+      ? `Папки ${prefix} нет ни в коммите ${sha.slice(0, 12)}, ни среди незакоммиченных файлов: в ней нет ни одного файла, который видит git`
+      : `Папки ${prefix} нет в коммите ${sha.slice(0, 12)}: закоммитьте раздел перед запуском исполнителей`);
   }
   return { root, path: worker, sha };
 }

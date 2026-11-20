@@ -24,7 +24,6 @@ export const chipScoringViewSchema = z.object({
 });
 export type ChipScoringView = z.infer<typeof chipScoringViewSchema>;
 const rootInput = z.object({ root: z.string().min(1).max(4096) }).strict();
-const changeSchema = z.object({ status: z.string(), path: z.string() });
 export const hostContract = defineRpcContract({
   collect: { input: hostInputSchema, output: snapshotSchema, experimental_retryable: true },
   delegation: { input: z.object({ root: z.string().min(1).max(4096) }).strict(), output: delegationStateSchema, experimental_retryable: true },
@@ -36,13 +35,10 @@ export const hostContract = defineRpcContract({
     output: z.object({ path: z.string() }), experimental_retryable: true },
   markPlanVerified: { input: z.object({ root: z.string().min(1).max(4096), target: z.string().min(1).max(1000), expectedHash: z.string().regex(/^[a-f0-9]{64}$/) }).strict(),
     output: z.object({ path: z.string(), verified: z.literal(true) }), experimental_retryable: false },
-  createWorktree: { input: z.object({ basePath: z.string().min(1).max(4096), name: z.string().regex(/^[A-Za-z0-9._-]{1,120}$/), ref: z.string().max(200).optional() }).strict(),
+  createWorktree: { input: z.object({ basePath: z.string().min(1).max(4096), name: z.string().regex(/^[A-Za-z0-9._-]{1,120}$/), ref: z.string().max(200).optional(), seed: z.boolean().optional() }).strict(),
     output: z.object({ root: z.string(), path: z.string(), sha: z.string() }), experimental_retryable: false },
   removeWorktree: { input: z.object({ basePath: z.string().min(1).max(4096), root: z.string().min(1).max(4096) }).strict(),
     output: z.object({ removed: z.literal(true) }), experimental_retryable: true },
-  listChanges: { input: rootInput, output: z.object({ files: z.array(changeSchema), plugin: z.array(changeSchema), token: z.string() }), experimental_retryable: true },
-  checkpoint: { input: z.object({ root: z.string().min(1).max(4096), token: z.string().regex(/^[a-f0-9]{32}$/), message: z.string().min(1).max(300) }).strict(),
-    output: z.object({ committed: z.boolean(), sha: z.string().optional(), files: z.array(z.string()), extra: z.array(z.string()).optional() }), experimental_retryable: false },
   headCommit: { input: rootInput, output: z.object({ sha: z.string() }), experimental_retryable: true },
   bringBack: { input: z.object({ root: z.string().min(1).max(4096), copy: z.string().min(1).max(4096) }).strict(),
     output: z.object({ applied: z.boolean(), empty: z.boolean().optional(), partial: z.boolean().optional(), files: z.array(z.string()), error: z.string().optional() }), experimental_retryable: false },

@@ -25,8 +25,6 @@ async function setup() {
     experimental_callHostRpc: async call => {
       calls.push({ method: call.method, input: call.input, hostId: call.hostId });
       if (call.method === 'collect') throw new Error('not needed');
-      if (call.method === 'listChanges') return { files: [{ status: ' M', path: 'src/a.ts' }], plugin: [], token: 'a'.repeat(32) };
-      if (call.method === 'checkpoint') return { committed: true, sha: 'b'.repeat(40), files: ['src/a.ts'] };
       if (call.method === 'delegation') return { choice: { mode: 'bb', providerId: 'codex', model: 'gpt-6.2-sol', reasoning: 'high', tier: 'fast', parallel: 2 }, research: { mode: 'self' }, research2: { mode: 'self' }, research3: { mode: 'self' }, configured: true, foreign: null, error: null } as any;
       if (call.method === 'readBrief') return { text: 'Do task 2.' };
       if (call.method === 'headCommit') return { sha: 'c'.repeat(40) };
@@ -38,22 +36,7 @@ async function setup() {
   return { h, calls, spawns };
 }
 
-test('checkpoint lists first and commits only with the token, with a message built by the plugin', async () => {
-  const { h, calls } = await setup();
-  try {
-    const listed = await h.harness.behavior.runCli(['checkpoint', '--thread', 'thr_test', '--target', '.ai-factory/plans/demo plan.md', '--group', '2', '--json']);
-    assert.equal(listed.exitCode, 0, listed.stderr);
-    assert.deepEqual(JSON.parse(listed.stdout!).files, [{ status: ' M', path: 'src/a.ts' }]);
-    const done = await h.harness.behavior.runCli(['checkpoint', '--thread', 'thr_test', '--target', '.ai-factory/plans/demo plan.md', '--group', '2', '--token', 'a'.repeat(32)]);
-    assert.equal(done.exitCode, 0, done.stderr);
-    const commit = calls.find(c => c.method === 'checkpoint')!;
-    assert.deepEqual(commit.input, { root: ROOT, token: 'a'.repeat(32), message: 'chore(aif): demo-plan · before group 2' });
-    assert.equal(commit.hostId, 'host_win');
-    assert.equal((await h.harness.behavior.runCli(['checkpoint', '--thread', 'thr_test', '--target', 'p.md', '--group', 'x'])).exitCode, 1);
-  } finally { await h.harness.lifecycle.dispose(); }
-});
-
-test('spawn-worker starts the owner model on a fresh copy of the checkpoint commit, as a child of the chat', async () => {
+test('spawn-worker starts the owner model on a fresh copy seeded with the coordinator\'s work, as a child of the chat', async () => {
   const { h, spawns } = await setup();
   try {
     const result = await h.harness.behavior.runCli(['spawn-worker', '--thread', 'thr_test', '--target', '.ai-factory/plans/demo.md', '--task', '2', '--brief', 'C:\\Temp\\brief 2.md', '--json']);
@@ -64,6 +47,8 @@ test('spawn-worker starts the owner model on a fresh copy of the checkpoint comm
     assert.equal(args.environment.environmentProviderId, 'aif-chat-worktree');
     assert.equal(args.environment.inputs.basePath, ROOT, 'a Windows path with a space and Cyrillic arrives as is');
     assert.equal(args.environment.inputs.ref, 'c'.repeat(40));
+    assert.equal(args.environment.inputs.seed, true, 'the copy gets the uncommitted work of earlier tasks');
+    assert.match(args.prompt, /never revert, stash or reset it/);
     assert.match(args.environment.inputs.name, /^demo-2-[0-9a-f]{8}$/);
     assert.deepEqual(args.environment.machine, { type: 'existing', hostId: 'host_win' });
     assert.deepEqual([args.providerId, args.model, args.reasoningLevel, args.serviceTier], ['codex', 'gpt-6.2-sol', 'high', 'fast']);
@@ -87,12 +72,14 @@ test('bring-back takes only a worker of this chat, in an AI Factory copy on the 
   } finally { await h.harness.lifecycle.dispose(); }
 });
 
-test('a coordinator with the old block calling groups gets an error and falls back to one worker', async () => {
+test('a coordinator with the old block calling groups or checkpoint gets an error and falls back to one worker', async () => {
   const { h, calls } = await setup();
   try {
     const result = await h.harness.behavior.runCli(['groups', '--thread', 'thr_test', '--target', '.ai-factory/plans/demo.md', '--max', '2', '--json']);
     assert.equal(result.exitCode, 0, result.stderr);
     assert.match(JSON.parse(result.stdout!).error, /groups удалена/);
+    const old = await h.harness.behavior.runCli(['checkpoint', '--thread', 'thr_test', '--target', '.ai-factory/plans/demo.md', '--group', '1', '--json']);
+    assert.match(JSON.parse(old.stdout!).error, /checkpoint удалена/);
     assert.equal(calls.length, 0, 'nothing is read or changed on the machine');
   } finally { await h.harness.lifecycle.dispose(); }
 });

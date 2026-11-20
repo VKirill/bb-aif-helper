@@ -1,10 +1,9 @@
 import { execFile } from 'node:child_process';
-import { createHash, randomUUID } from 'node:crypto';
+import { randomUUID } from 'node:crypto';
 import { chmod, lstat, mkdir, mkdtemp, readdir, readFile, readlink, stat, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { withoutManagedBlocks } from './delegation.ts';
-import { removePath, worktreesRoot } from './worktree.ts';
+import { BROUGHT_BACK, removePath, worktreesRoot } from './worktree.ts';
 
 // Git steps of parallel /aif-implement that the coordinator used to type by hand. Paths never pass through a shell or
 // an agent's copy and paste: git prints them NUL-separated and reads them back NUL-separated, so spaces, Cyrillic,
@@ -22,135 +21,16 @@ function git(cwd: string, args: string[], input?: string, env?: Record<string, s
 const nul = (list: string[]) => list.map(p => `${p}\0`).join('');
 const FROM_STDIN = ['--pathspec-from-file=-', '--pathspec-file-nul'];
 
-/**
- * The plugin rewrites its own instruction blocks here after an update. A checkpoint does not commit a file whose only
- * change is such a refresh (the owner decides), and worker copies never refresh them (see readDelegation), so a
- * worker's patch carries only real edits.
- */
-export const OWN_DIR = '.ai-factory/skill-context/';
-
 // git ends its answer with a newline; a path may itself start or end with a space, so nothing else is trimmed.
 const line = (text: string) => text.replace(/\r?\n$/, '');
 
 async function repo(root: string) {
   const top = line(await git(root, ['rev-parse', '--show-toplevel']).catch(() => { throw new Error(`${root} не в git-репозитории`); }));
   const prefix = line(await git(root, ['rev-parse', '--show-prefix'])); // `sec/` or '' — always with `/`
-  return { top, prefix, own: prefix + OWN_DIR };
+  return { top, prefix };
 }
 
-export type Change = { status: string; path: string };
-const byPath = (a: Change, b: Change) => a.path < b.path ? -1 : a.path > b.path ? 1 : 0;
 const exists = (p: string) => lstat(p).then(() => true, () => false); // a dangling symlink exists too
-
-/** A file of the plugin's folder whose change is only a refreshed managed block, not an edit by a task or the owner. */
-async function onlyBlockRefresh(top: string, file: string): Promise<boolean> {
-  // The plugin writes regular files: a symlink, a folder or a missing file is an edit by someone else.
-  if (!(await lstat(path.join(top, file)).then(s => s.isFile(), () => false))) return false;
-  if ((await git(top, ['--literal-pathspecs', 'ls-tree', 'HEAD', '--', file]).catch(() => '')).split(' ')[0] === '120000') return false;
-  const now = await readFile(path.join(top, file), 'utf8').catch(() => null);
-  const before = await git(top, ['show', `HEAD:${file}`]).catch(() => null);
-  if (now === null || before === null || withoutManagedBlocks(now) !== withoutManagedBlocks(before)) return false;
-  // A changed executable bit is an edit too.
-  const headMode = (await git(top, ['--literal-pathspecs', 'ls-tree', 'HEAD', '--', file]).catch(() => '')).split(' ')[0];
-  const exec = await stat(path.join(top, file)).then(s => (s.mode & 0o111) !== 0, () => false);
-  const filemode = (await git(top, ['config', '--type=bool', 'core.filemode']).catch(() => 'true')).trim() !== 'false';
-  return !filemode || (headMode === '100755') === exec;
-}
-
-/**
- * Every change of the repository, one entry per file (`-uall`: a new folder is its files, not `dir/`). The whole
- * repository, not only this section: the copies are of the whole repository, and a section's task may change a file
- * above it (a root lockfile). A file in the plugin's folder whose only change is a refreshed block is listed apart.
- */
-async function changes(root: string) {
-  const r = await repo(root);
-  const raw = await git(r.top, ['status', '--porcelain=v1', '-z', '-uall', '--no-renames']);
-  const all: Change[] = raw.split('\0').filter(Boolean).map(entry => ({ status: entry.slice(0, 2), path: entry.slice(3) })).sort(byPath);
-  const files: Change[] = [], plugin: Change[] = [];
-  for (const c of all) (c.path.startsWith(r.own) && await onlyBlockRefresh(r.top, c.path) ? plugin : files).push(c);
-  // The token pins the exact content and the executable bit: a file someone edits after the list makes the commit refuse.
-  const hash = createHash('sha256').update(line(await git(r.top, ['rev-parse', '--verify', 'HEAD^{commit}']).catch(() => 'none')));
-  for (const c of files) {
-    const full = path.join(r.top, c.path);
-    const mode = await lstat(full).then(s => s.isSymbolicLink() ? 'l' : s.isDirectory() ? 'd' : s.mode & 0o111 ? 'x' : '-', () => 'deleted');
-    hash.update(`\0${c.status}\0${c.path}\0${mode}\0`);
-    // A folder in the list is a submodule: its checked-out commit and its dirt are what gets committed.
-    const content = mode === 'l' ? readlink(full).then(t => Buffer.from(t))
-      : mode === 'd' ? git(full, ['rev-parse', 'HEAD']).then(async head => Buffer.from(head + await git(full, ['status', '--porcelain'])))
-      : readFile(full);
-    hash.update((await content.catch(() => null)) ?? '');
-  }
-  return { ...r, files, plugin, token: hash.digest('hex').slice(0, 32) };
-}
-
-export async function listChanges(input: { root: string }) {
-  const c = await changes(input.root);
-  return { files: c.files, plugin: c.plugin, token: c.token };
-}
-
-/** States in which a commit would not be the coordinator's checkpoint, or would silently drop someone's work. */
-async function refuseUnsafe(top: string, files: Change[], plugin: Change[]) {
-  for (const name of ['MERGE_HEAD', 'CHERRY_PICK_HEAD', 'REVERT_HEAD', 'REBASE_HEAD', 'rebase-merge', 'rebase-apply']) {
-    if (await exists(line(await git(top, ['rev-parse', '--path-format=absolute', '--git-path', name]))))
-      throw new Error('В репозитории не завершено слияние, rebase или cherry-pick: завершите его, потом снова checkpoint.');
-  }
-  if (await exists(line(await git(top, ['rev-parse', '--path-format=absolute', '--git-path', 'index.lock']))))
-    throw new Error('Индекс занят другим процессом git (index.lock). Дождитесь его завершения и повторите checkpoint.');
-  const conflict = files.find(f => f.status.includes('U') || f.status === 'AA' || f.status === 'DD');
-  if (conflict) throw new Error(`В файле ${conflict.path} не разрешён конфликт слияния.`);
-  // Something staged by hand (a `git rm --cached`, an `add --chmod`, a partial `add -p`) is a decision the disk does
-  // not show; the checkpoint does not guess it. The owner or the coordinator commits or unstages it first.
-  const staged = [...files, ...plugin].filter(f => f.status[0] !== ' ' && f.status[0] !== '?').map(f => f.path);
-  // No ready-made command: which version to keep is the owner's decision, and a pasted command could lose one.
-  // The instruction goes first and the list is capped by length: the CLI cuts stderr at about 1,000 characters, and
-  // the count of the omitted paths is always there. One quoted path per line, so a comma cannot read as two files.
-  if (staged.length) {
-    const shown: string[] = [];
-    let size = 0; // UTF-8 bytes: the cut may count bytes, and a Cyrillic path is twice its length in them
-    for (const f of staged.map(p => JSON.stringify(p))) { size += Buffer.byteLength(f) + 1; if (size > 560) break; shown.push(f); }
-    const more = staged.length - shown.length;
-    throw new Error(`В индексе уже есть изменения (${staged.length}). Пусть владелец закоммитит их или уберёт из индекса, потом снова checkpoint. Файлы (пути от корня репозитория):${shown.map(f => `\n${f}`).join('')}${more ? `\nи ещё ${more}` : ''}`);
-  }
-}
-
-/**
- * Commits exactly the listed changes, after the coordinator has checked that every one of them is its own.
- * Refuses when anything changed since the list (another file appeared, a listed file was edited again).
- * The commit is built in a temporary index from HEAD plus these files, so whatever else was staged stays staged and
- * out of the commit, a file replaced by a folder of the same name works, and a rejected commit (a pre-commit hook)
- * leaves the real index exactly as it was.
- */
-export async function checkpoint(input: { root: string; token: string; message: string }) {
-  const c = await changes(input.root);
-  if (c.token !== input.token) throw new Error('Изменения в репозитории поменялись после проверки. Запустите checkpoint без --token и проверьте список заново.');
-  await refuseUnsafe(c.top, c.files, c.plugin);
-  if (!c.files.length) return { committed: false as const, files: [] as string[] };
-  // Nothing is staged (refuseUnsafe), so HEAD plus the listed working-tree changes is exactly the list. A path git
-  // reports deleted is deleted even if a folder of that name appeared (its files are listed on their own), and
-  // nothing is added with -f: an ignored file is never committed.
-  const present: string[] = [], missing: string[] = [];
-  for (const f of c.files) (f.status[1] === 'D' || !(await exists(path.join(c.top, f.path))) ? missing : present).push(f.path);
-  const gitDir = line(await git(c.top, ['rev-parse', '--path-format=absolute', '--git-dir']));
-  const index = path.join(gitDir, `aif-checkpoint-${randomUUID()}.index`);
-  const env = { GIT_INDEX_FILE: index };
-  const hasHead = await git(c.top, ['rev-parse', '--verify', '-q', 'HEAD^{commit}']).then(() => true, () => false);
-  try {
-    await git(c.top, hasHead ? ['read-tree', 'HEAD'] : ['read-tree', '--empty'], undefined, env);
-    if (missing.length) await git(c.top, ['--literal-pathspecs', 'rm', '-q', '--cached', '--ignore-unmatch', '-r', ...FROM_STDIN], nul(missing), env);
-    if (present.length) await git(c.top, ['--literal-pathspecs', 'add', '-A', ...FROM_STDIN], nul(present), env);
-    await git(c.top, ['commit', '-q', '-m', input.message], undefined, env);
-  } finally { await removePath(index).catch(() => undefined); }
-  const sha = line(await git(c.top, ['rev-parse', 'HEAD']));
-  // A pre-commit hook may stage more files: they are named, not hidden.
-  const committed = (await git(c.top, ['diff-tree', '--no-commit-id', '--name-only', '-r', '-z', '--no-renames', ...(hasHead ? [] : ['--root']), 'HEAD'])).split('\0').filter(Boolean);
-  const listed = new Set(c.files.map(f => f.path));
-  const extra = committed.filter(f => !listed.has(f));
-  // The real index catches up for these paths only (and for what a hook added): they now match HEAD.
-  await git(c.top, ['--literal-pathspecs', 'reset', '-q', ...FROM_STDIN], nul([...c.files.map(f => f.path), ...extra])).catch((cause: Error) => {
-    throw new Error(`Коммит ${sha.slice(0, 12)} создан, но индекс не обновился (${cause.message.slice(0, 300)}). Выполните git reset -q -- <эти файлы>, затем продолжайте.`);
-  });
-  return { committed: true as const, sha, files: c.files.map(f => f.path), ...(extra.length ? { extra } : {}) };
-}
 
 export async function headCommit(input: { root: string }) {
   return { sha: line(await git(input.root, ['rev-parse', '--verify', 'HEAD^{commit}'])) };
@@ -196,8 +76,9 @@ export async function bringBack(input: { root: string; copy: string }) {
   const theirs = await repo(probe);
   const common = async (dir: string) => path.resolve(line(await git(dir, ['rev-parse', '--path-format=absolute', '--git-common-dir'])));
   if (await common(mine.top) !== await common(theirs.top)) throw new Error(`${copy} — копия другого репозитория`);
-  // The copy's own git folder (one per worktree) remembers the tree that was brought back last.
-  const mark = line(await git(theirs.top, ['rev-parse', '--path-format=absolute', '--git-path', 'aif-brought-back']));
+  // The copy's own git folder (one per worktree) remembers the tree that was brought back last, or the coordinator's
+  // work the copy was seeded with: only the worker's own changes come back.
+  const mark = line(await git(theirs.top, ['rev-parse', '--path-format=absolute', '--git-path', BROUGHT_BACK]));
   const last = (await readFile(mark, 'utf8').catch(() => '')).trim();
   const base = /^[0-9a-f]{40,64}$/.test(last) && await git(theirs.top, ['cat-file', '-e', `${last}^{tree}`]).then(() => true, () => false) ? last : 'HEAD';
   await git(theirs.top, ['add', '-A']);

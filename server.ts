@@ -978,29 +978,10 @@ export default async function plugin(bb: BbPluginApi) {
   });
   // Parallel /aif-implement: the git and spawn steps run here and on the folder's machine, so no path or JSON ever
   // passes through the coordinator's shell (PowerShell, quoting, `git status` output copied by hand).
-  async function parallelCommand(command: 'checkpoint' | 'spawn-worker' | 'bring-back', threadId: string, target: string, options: Record<string, string>) {
+  async function parallelCommand(command: 'spawn-worker' | 'bring-back', threadId: string, target: string, options: Record<string, string>) {
     const { thread, environment } = await context(threadId);
     const root = environment.path!, hostId = environment.hostId;
     const planName = (target.split(/[\\/]/).pop() ?? 'plan').replace(/\.md$/i, '').replace(/[^A-Za-z0-9._-]+/g, '-').replace(/^[-.]+/, '').slice(0, 60) || 'plan';
-    if (command === 'checkpoint') {
-      if (!target) throw new Error('Укажите план: --target <путь>.');
-      const group = options['--group'];
-      if (!/^\d{1,4}$/.test(group ?? '')) throw new Error('Укажите номер группы: --group <N>.');
-      const token = options['--token'];
-      if (!token) {
-        const listed = await host.call('listChanges', { root }, { hostId });
-        bb.log.info(`aif-chat: checkpoint list threadId=${threadId} files=${listed.files.length}`);
-        const plugin = listed.plugin.length ? `\nБлоки плагина (${listed.plugin.length}) не коммитятся и в копии не попадают: ${listed.plugin.map(f => f.path).join(', ')}` : '';
-        const text = (listed.files.length
-          ? `Изменения в репозитории (${listed.files.length}):\n${listed.files.map(f => `${f.status} ${f.path}`).join('\n')}\nЕсли все они ваши, повторите с --token ${listed.token}`
-          : `Изменений нет: контрольная точка не нужна. Токен: ${listed.token}`) + plugin;
-        return { ok: true, data: listed, text };
-      }
-      const result = await host.call('checkpoint', { root, token, message: `chore(aif): ${planName} · before group ${group}` }, { hostId });
-      bb.log.info(`aif-chat: checkpoint threadId=${threadId} committed=${result.committed} files=${result.files.length}`);
-      const extra = result.extra?.length ? `\nХук pre-commit добавил в коммит файлы не из списка: ${result.extra.join(', ')}` : '';
-      return { ok: true, data: result, text: (result.committed ? `Контрольная точка ${result.sha!.slice(0, 12)}: ${result.files.length} файлов.` : 'Изменений нет, коммит не нужен.') + extra };
-    }
     if (command === 'spawn-worker') {
       const task = options['--task'], brief = options['--brief'];
       if (!target) throw new Error('Укажите план: --target <путь>.');
@@ -1013,10 +994,10 @@ export default async function plugin(bb: BbPluginApi) {
       const { sha } = await host.call('headCommit', { root }, { hostId });
       // A fresh suffix per launch: a retry never collides with a copy BB has not removed yet.
       const name = `${planName}-${task}-${randomUUID().slice(0, 8)}`;
-      const prompt = `${text.trim()}\n\nYou work in your own copy of the project: the folder BB opened this thread in. Before any change run \`git rev-parse --show-toplevel\`; if it fails, \`cd\` into that folder first. If dependencies are missing, install them first. Do not commit.`;
+      const prompt = `${text.trim()}\n\nYou work in your own copy of the project: the folder BB opened this thread in. Before any change run \`git rev-parse --show-toplevel\`; if it fails, \`cd\` into that folder first. The copy already holds the coordinator's uncommitted work from earlier tasks: \`git status\` shows it as changes. Keep it; never revert, stash or reset it. If dependencies are missing, install them first. Do not commit.`;
       const spawned = await bb.sdk.threads.spawn({
         projectId: thread.projectId, origin: 'plugin', title: `AIF · ${planName} · ${task}`, prompt,
-        environment: { type: 'provider', environmentProviderId: WORKTREE_PROVIDER_ID, inputs: { basePath: root, name, ref: sha }, machine: { type: 'existing', hostId } },
+        environment: { type: 'provider', environmentProviderId: WORKTREE_PROVIDER_ID, inputs: { basePath: root, name, ref: sha, seed: true }, machine: { type: 'existing', hostId } },
         parentThreadId: threadId, lifecycleOwnerThreadId: threadId, parentNotifications: 'off',
         providerId: choice.providerId, model: choice.model,
         ...(choice.reasoning ? { reasoningLevel: choice.reasoning } : {}),
@@ -1044,13 +1025,12 @@ export default async function plugin(bb: BbPluginApi) {
   bb.cli.register({
     name: 'aif-chat', summary: 'AI Factory versions, live workflow card and read-only plan/check progress',
     commands: [...['status', 'show', 'save-plan', 'mark-verified', 'check-updates', 'reset', 'reset-dispatch'].map(name => ({ name, summary: name === 'show' ? 'Show a live chat card' : name, usage: `bb plugin run aif-chat ${name} [--thread <id>] [--target <path>] [--phase <phase>] [--json]` })),
-      { name: 'checkpoint', summary: 'List, then commit, the coordinator\'s changes before a parallel group', usage: 'bb plugin run aif-chat checkpoint --target <plan> --group <N> [--token <token>] [--json]' },
       { name: 'spawn-worker', summary: 'Start a parallel worker on its own copy of the project', usage: 'bb plugin run aif-chat spawn-worker --target <plan> --task <id> --brief <file> [--json]' },
       { name: 'bring-back', summary: 'Apply a parallel worker\'s changes to this workspace', usage: 'bb plugin run aif-chat bring-back --worker <thread id> [--json]' }],
     async run(argv, ctx) {
       try {
         const [command = 'help', ...args] = argv;
-        if (command === 'help' || command === '--help') return { exitCode: 0, stdout: 'bb plugin run aif-chat status|show|save-plan|mark-verified|check-updates|reset|reset-dispatch|checkpoint|spawn-worker|bring-back [--thread ID] [--target PATH] [--phase explore|plan|improve|implement|verify|fix|done] [--json]' };
+        if (command === 'help' || command === '--help') return { exitCode: 0, stdout: 'bb plugin run aif-chat status|show|save-plan|mark-verified|check-updates|reset|reset-dispatch|spawn-worker|bring-back [--thread ID] [--target PATH] [--phase explore|plan|improve|implement|verify|fix|done] [--json]' };
         const options: Record<string, string> = {}; let json = false;
         for (let i = 0; i < args.length; i++) {
           if (args[i] === '--json') { json = true; continue; }
@@ -1095,12 +1075,12 @@ export default async function plugin(bb: BbPluginApi) {
           if (command === 'reset') await bb.storage.kv.delete(`chat-plan:${input.threadId}`);
           cache.invalidate(key => !!watchers.get(key)?.has(input.threadId)); return { exitCode: 0, stdout: 'Состояние интерфейса сброшено; проект не изменён.' };
         }
-        // `groups` was removed; a coordinator still holding the old managed block falls back to the one-worker flow.
-        if (command === 'groups') {
-          const error = 'Команда groups удалена: перечитайте блок параллельного режима в .ai-factory/skill-context/aif-implement/SKILL.md (откройте вкладку AI Factory), а до этого работайте одним исполнителем.';
+        // `groups` and `checkpoint` were removed; a coordinator still holding the old managed block falls back to the one-worker flow.
+        if (command === 'groups' || command === 'checkpoint') {
+          const error = `Команда ${command} удалена: перечитайте блок параллельного режима в .ai-factory/skill-context/aif-implement/SKILL.md (откройте вкладку AI Factory), а до этого работайте одним исполнителем.`;
           return json ? { exitCode: 0, stdout: JSON.stringify({ error }) } : { exitCode: 1, stderr: error };
         }
-        if (command === 'checkpoint' || command === 'spawn-worker' || command === 'bring-back') {
+        if (command === 'spawn-worker' || command === 'bring-back') {
           const result = await parallelCommand(command, input.threadId, input.target, options);
           return { exitCode: result.ok ? 0 : 1, stdout: json ? JSON.stringify(result.data) : result.text };
         }
