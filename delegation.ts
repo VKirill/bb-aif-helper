@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 import { RESEARCH_ROLES } from './model.ts';
 import type { DelegationChoice, DelegationRole, DelegationState, ResearchRole } from './model.ts';
@@ -156,7 +156,10 @@ async function readImplement(root: string): Promise<Omit<DelegationState, Resear
 async function writeAtomic(path: string, content: string) {
   await mkdir(dirname(path), { recursive: true });
   const tmp = `${path}.${process.pid}.${randomUUID()}.tmp`;
-  await writeFile(tmp, content, 'utf8');
+  // A new file gets the umask's mode; an existing one keeps its own (a private 0600 file stays private).
+  const mode = await stat(path).then(s => s.mode & 0o777, () => undefined);
+  await writeFile(tmp, content, mode === undefined ? 'utf8' : { encoding: 'utf8', mode });
+  if (mode !== undefined) await chmod(tmp, mode); // writeFile's mode is masked by the umask
   await rename(tmp, path);
 }
 
@@ -224,33 +227,20 @@ bb thread spawn --project "$BB_PROJECT_ID" --environment "$BB_ENVIRONMENT_ID" --
 If \`bb thread spawn\` fails, say so and do that research yourself; do not repeat the same error. Use no \`node\` commands in this flow. In PowerShell the BB variables are \`$env:BB_PROJECT_ID\`, \`$env:BB_THREAD_ID\` and \`$env:BB_ENVIRONMENT_ID\`, not \`$BB_PROJECT_ID\`.`;
 }
 
-function parallelSection(n: number, flags: string): string {
+function parallelSection(n: number): string {
   return `## Parallel mode (managed by BB AIF Helper)
 
 The owner allowed up to ${n} workers at once. Run independent plan tasks in parallel, each worker in its own git worktree copy of the project:
 
 1. Get the groups: \`bb plugin run aif-chat groups --target "<plan path>" --max ${n} --json\`. It answers \`{ groups, coordinatorOnly }\` — groups of task ids in execution order — or \`{ error }\`. On \`error\`, or for a fix plan, ultra bundle or OpenSpec change, use the one-worker flow above. Tasks in \`coordinatorOnly\` (commit and deploy tasks) you do yourself, as the plan says. A group with one task also uses the one-worker flow.
-2. Before each group with two or more tasks, \`git -C "<top>" status --porcelain\` (\`<top>\` = \`git rev-parse --show-toplevel\` of this workspace; the paths it prints are relative to \`<top>\`) must show only your own changes from earlier tasks of this plan. Changes in \`.ai-factory/skill-context/\` are BB AIF Helper refreshing its own instructions after an update: neither yours nor foreign — leave them out of every commit and continue. If it shows other changes you did not make, stop and ask the owner; never commit them.
-3. Checkpoint: if there are changes from earlier tasks, commit exactly those files locally (no push), with the paths as step 2 printed them: \`git -C "<top>" --literal-pathspecs add -- <files>\`, then \`git -C "<top>" --literal-pathspecs commit -m 'chore(aif): <plan> · before group N' -- <files>\` (\`--literal-pathspecs\`: a name like \`todo[1].txt\` is a file, not a pattern that also matches \`todo1.txt\`). Never \`git commit -a\`: it would also take a file someone changed after step 2. The copies are built from a commit and would not see uncommitted work.
-4. For each task of the group spawn its worker on a fresh copy that BB makes from that commit (\`<base>\` = this workspace folder as an absolute path; \`<sha>\` = \`git rev-parse HEAD\`). \`<base>\` goes inside a JSON string: write it with forward slashes (\`C:/Users/me/repo\`, \`//server/share/repo\`), never with backslashes, and escape a \`"\` as \`\\"\`; the JSON is in single quotes, so a \`'\` in the path is written as \`'\\''\` in bash and \`''\` in PowerShell. Windows PowerShell 5.1 (\`$PSVersionTable.PSVersion.Major\` is 5) drops the double quotes inside a native argument: there write every \`"\` of this JSON as \`\\"\`; PowerShell 7 and bash need no such escaping. Quote \`<brief>\` too: \`--prompt-file "<brief>"\`. \`<try>\` is 1 for the first worker of a task and the next number for every retry: BB removes an archived worker's copy only after five minutes, and a name still in use is refused. The folder may be a section inside a larger repository: the copy is of the whole repository, and the worker starts in the same subfolder.
+2. Checkpoint before each group with two or more tasks: \`bb plugin run aif-chat checkpoint --target "<plan path>" --group <N> --json\`. It lists every changed file of this workspace (\`{ files: [{ status, path }], token }\`; the plugin's own \`.ai-factory/skill-context/\` is never listed). If every listed file is your own change from earlier tasks of this plan, run it again with \`--token <token>\`: the plugin commits exactly those files locally (no push) and refuses if anything changed since the list — then list again. If a file is not yours, stop and ask the owner; never commit it. The copies are built from the last commit and would not see uncommitted work.
+3. For each task of the group write its brief to a temporary file (as in step 1 of the one-worker flow) and start its worker: \`bb plugin run aif-chat spawn-worker --target "<plan path>" --task <taskId> --brief "<absolute brief path>" --json\`. It answers \`{ id }\`. The plugin starts the worker with the owner's model on a fresh copy of the project made from the checkpoint commit, as a child of this chat; the folder may be a section inside a larger repository (the copy is of the whole repository, the worker starts in the same subfolder). A retry is the same command: every launch gets its own copy.
+4. Wait for all workers of the group (step 4 of the one-worker flow for each id).
+5. Bring the results back one worker at a time: \`bb plugin run aif-chat bring-back --worker <id> --json\`. It moves everything the worker changed (new, changed, renamed and deleted files; ignored files such as \`node_modules\` stay out) into this workspace and answers \`{ applied: true, files }\`. \`{ applied: false, empty: true }\`: the worker changed nothing — treat the task as not done. \`{ applied: false, error }\`: the changes do not fit and nothing was changed, the results of earlier tasks are intact; apply nothing more for this group, do not run \`git apply\`, \`git checkout\`, \`git reset\` or \`git stash\` yourself — there is nothing to undo. Stop and report the task and the error to the owner. After a successful bring-back, review the diff and run that task's verification as in step 5 of the one-worker flow.
+6. Mark each task done only after its changes are brought back and verified. Then archive its worker (\`bb thread archive <id>\`); BB removes its copy five minutes later.
+7. Continue with the next group. The final commits stay as the plan describes; the local checkpoint commits are part of them and are never pushed without the owner's approval.
 
-\`\`\`bash
-bb thread spawn --project "$BB_PROJECT_ID" --environment-provider aif-chat-worktree --environment-inputs '{"basePath":"<base>","name":"<plan>-<taskId>-<try>","ref":"<sha>"}' --parent-self --lifecycle-owner-thread "$BB_THREAD_ID" --parent-notifications off ${flags} --title 'AIF · <plan> · <taskId>' --prompt-file "<brief>" --json
-\`\`\`
-
-   Add to each brief, after the worker rules: "You work in your own copy of the project: the folder BB opened this thread in. Before any change run \`git rev-parse --show-toplevel\`; if it fails, \`cd\` into that folder first. If dependencies are missing, install them first (\`<install command from the project's command catalog>\`). Do not commit."
-5. Wait for all workers of the group (step 4 of the one-worker flow for each id).
-6. Bring the results back one worker at a time. \`<copy>\` is \`environment.path\` from \`bb thread show <id> --json\`; \`<top>\` is \`git rev-parse --show-toplevel\` of this workspace; \`<patch>\` is the absolute path of a new file in your temporary folder, such as \`<tmp>/task-<taskId>.patch\` (\`-C\` changes the folder, so a relative path would point elsewhere). Run exactly these commands, in this order, each as its own command, keeping the double quotes around every path (paths may contain spaces). git writes the patch itself, so no shell redirection changes its encoding, and the diff flags keep the project's git settings (\`diff.relative\`, \`diff.noprefix\`, \`color.diff\`, external diff tools, text conversion) out of the patch:
-   - \`git -C "<copy>" add -A\`
-   - \`git -C "<copy>" diff --cached --binary --no-color --no-relative --no-ext-diff --no-textconv --src-prefix=a/ --dst-prefix=b/ HEAD --output="<patch>"\`
-   - \`git -C "<top>" apply --check "<patch>"\`
-   - \`git -C "<top>" apply "<patch>"\`
-
-   Ignored files such as \`node_modules\` and \`dist\` stay out of the patch. An empty patch means the worker changed nothing: skip both apply commands and treat the task as not done. Without \`--3way\`, \`git apply\` never touches the index and refuses a patch that does not fit before it writes anything, so a failed \`apply --check\` leaves this workspace and the results of earlier tasks exactly as they were. If \`apply --check\` fails, apply nothing more for this group: do not retry with \`--3way\`, and do not run \`git checkout\`, \`git reset\` or \`git stash\` — there is nothing to undo. Stop and report the task and the files named in the error to the owner. If \`apply\` itself fails after a passing check (a file could not be written: permissions, a locked file), some files of that patch may already be changed: do not try to undo it either; stop and report the error and \`git -C "<top>" status --porcelain\` to the owner. After a successful apply, review the diff and run that task's verification as in step 5 of the one-worker flow.
-7. Mark each task done only after its patch is applied and verified. Then archive its worker (\`bb thread archive <id>\`); BB removes its copy five minutes later.
-8. Continue with the next group. The final commits stay as the plan describes; the local checkpoint commits are part of them and are never pushed without the owner's approval.
-
-If \`bb thread spawn\` fails for a group, archive the workers it already started, report the error and run the rest of the plan with the one-worker flow.`;
+If \`spawn-worker\` fails for a group, archive the workers it already started, report the error and run the rest of the plan with the one-worker flow.`;
 }
 
 export function planRuleBlock(): string {
@@ -293,7 +283,7 @@ bb thread spawn --project "$BB_PROJECT_ID" --environment "$BB_ENVIRONMENT_ID" --
 
 If \`bb thread spawn\` returns an error, report it and implement that task yourself; do not repeat the same error. Use no \`node\` commands in this flow. In PowerShell the BB variables are \`$env:BB_PROJECT_ID\`, \`$env:BB_THREAD_ID\` and \`$env:BB_ENVIRONMENT_ID\`, not \`$BB_PROJECT_ID\`.`;
   if (!c.parallel) return base;
-  return base.replace('One worker at a time: workers share this workspace.', 'Outside parallel groups (below), run one worker at a time: workers in this workspace share it.') + '\n\n' + parallelSection(c.parallel, flags);
+  return base.replace('One worker at a time: workers share this workspace.', 'Outside parallel groups (below), run one worker at a time: workers in this workspace share it.') + '\n\n' + parallelSection(c.parallel);
 }
 
 export function writeDelegation(root: string, choice: DelegationChoice, role: DelegationRole = 'implement'): Promise<DelegationState> {

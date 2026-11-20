@@ -157,9 +157,11 @@ test('files that differ only in case or slash direction are one file', () => {
   assert.equal(parsePlanTasks('- [ ] Task 1: A. Files: `../outside.ts`.')[0].files, null, 'a file outside the project is unclear');
   const dup = ['## Tasks', '- [ ] Task 1: A. Files: `a.ts`. Depends on —', '- [ ] Task 01: B. Files: `b.ts`. Depends on —'].join('\n');
   assert.deepEqual(parallelGroups(dup, 4), { error: 'Номер задачи 1 встречается дважды (например, Task 1 и Task 01).' });
-  const many = ['## Tasks', ...Array.from({ length: 16000 }, (_, i) => `- [x] Task ${i + 1}: T. Files: \`f${i}.ts\`. Depends on 1`)].join('\n');
+  const many = ['## Tasks', ...Array.from({ length: 16000 }, (_, i) => `- [ ] Task ${i + 1}: T. Files: \`f${i}.ts\`. Depends on ${i === 5 ? '1-999999999' : i < 3 ? '—' : `${i - 2}-${i}`}`)].join('\n');
   const started = Date.now();
-  parsePlanTasks(many);
+  const parsed = parsePlanTasks(many);
+  assert.deepEqual(parsed[9].dependsOn, [7, 8, 9], 'a range in every line is resolved');
+  assert.ok((parsed[5].dependsOn as number[]).length <= 16002, 'a huge range stops at the first missing id');
   assert.ok(Date.now() - started < 2000, 'parsing stays linear in the number of tasks');
   const text = ['## Tasks', '- [ ] Task 1: A. Files: `src/Foo.ts`. Depends on —', '- [ ] Task 2: B. Files: `SRC\\foo.ts`. Depends on —'].join('\n');
   assert.deepEqual(parsePlanTasks(text)[1].files, ['SRC/foo.ts']);

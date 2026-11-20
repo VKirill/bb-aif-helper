@@ -5,7 +5,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, realpa
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { createWorktree, removeWorktree, worktreesRoot } from '../worktree.ts';
-import { contextBlock } from '../delegation.ts';
+import { bringBack, checkpoint, listChanges } from '../parallel-git.ts';
 
 const sandbox = realpathSync(mkdtempSync(path.join(tmpdir(), 'aif-wt-')));
 // os.homedir() reads HOME on POSIX and USERPROFILE on Windows.
@@ -81,21 +81,14 @@ test('a copy survives a failing checkout hook cleanly, and is removed even after
   assert.equal(won.length, 1, JSON.stringify(results.map(r => r.status === "rejected" ? String(r.reason) : "ok")));
   assert.equal(existsSync(path.join(won[0].value.path, 'a.txt')), true);
   // A copy deleted without git, while its base folder was renamed, does not block the next launch with that name.
-  rmSync(won[0].value.root, { recursive: true, force: true });
-  // Windows may finish a delete a moment after rmSync returns.
-  for (let i = 0; i < 50 && existsSync(won[0].value.root); i++) await new Promise(resolve => setTimeout(resolve, 100));
+  rmSync(won[0].value.root, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
+  // Windows may finish a delete a while after rmSync returns, while a scanner or indexer still holds a handle.
+  for (let i = 0; i < 300 && existsSync(won[0].value.root); i++) await new Promise(resolve => setTimeout(resolve, 100));
   const again = await createWorktree({ basePath: path.join(odd, 'sec-renamed'), name: 'race' });
   await removeWorktree({ basePath: path.join(odd, 'sec-renamed'), root: again.root });
 });
 
-// Runs step 6 of the parallel instructions exactly as the coordinator reads them: the same commands, in order.
 test('bringing results back: a conflicting patch changes nothing and earlier results survive', async () => {
-  const block = contextBlock({ mode: 'bb', providerId: 'codex', model: 'm', parallel: 2 });
-  const step = block.slice(block.indexOf('\n6. '), block.indexOf('\n7. '));
-  const commands = [...step.matchAll(/^ {3}- `(git -C "<(?:copy|top)>" [^`]+)`$/gm)].map(m => m[1]);
-  assert.deepEqual(commands.map(c => c.split(' ').slice(3, 5).join(' ')), ['add -A', 'diff --cached', 'apply --check', 'apply "<patch>"']);
-  // Every path placeholder is quoted, so a shell keeps a path with spaces as one argument.
-  for (const c of commands) assert.ok(!/(^|[^"])<(copy|top|patch)>/.test(c), c);
   const top = path.join(sandbox, 'apply-repo');
   const sh = (cwd: string, ...args: string[]) => execFileSync('git', ['-C', cwd, '-c', 'user.email=t@t', '-c', 'user.name=t', ...args], { encoding: 'utf8' }).trim();
   mkdirSync(path.join(top, 'sec'), { recursive: true });
@@ -112,30 +105,81 @@ test('bringing results back: a conflicting patch changes nothing and earlier res
   writeFileSync(path.join(two.path, 'a.txt'), 'one\nTASK2\nthree\n');
   writeFileSync(path.join(two.path, 'b.txt'), 'b changed\n');
   writeFileSync(path.join(two.path, 'new.txt'), 'new\n');
-  const bringBack = (copy: string, taskId: number) => {
-    const patch = path.join(sandbox, `task-${taskId}.patch`);
-    for (const command of commands) {
-      // Like a shell: split the template on spaces outside double quotes, then put each path in as one value.
-      // A replacer function keeps `$&` and other `$` sequences in a path literal.
-      const values: Record<string, string> = { '<copy>': copy, '<top>': top, '<patch>': patch };
-      const args = command.match(/(?:[^\s"]+|"[^"]*")+/g)!.slice(1)
-        .map(arg => arg.replace(/"/g, '').replace(/<copy>|<top>|<patch>/g, key => values[key]));
-      execFileSync('git', args, { encoding: 'utf8', stdio: 'pipe' });
-    }
-  };
-  bringBack(one.path, 1);
+  // The worker's copy refreshed the plugin's own blocks: that change must not travel, or it would collide.
+  mkdirSync(path.join(one.path, '.ai-factory', 'skill-context'), { recursive: true });
+  writeFileSync(path.join(one.path, '.ai-factory', 'skill-context', 'own.md'), 'refreshed\n');
+  assert.deepEqual((await bringBack({ root: base, copy: one.path })).applied, true);
+  assert.equal(existsSync(path.join(base, '.ai-factory')), false, 'the plugin\'s own blocks stay out of the patch');
   assert.equal(text(path.join(base, 'a.txt')), 'one\nTASK1\nthree\n');
   assert.equal(text(path.join(top, 'a.txt')), 'one\ntwo\nthree\n', 'the root file with the same contents is untouched');
   assert.deepEqual([...readFileSync(path.join(base, 'logo.bin'))], [0, 255, 1, 254, 0]);
   const snapshot = () => [sh(top, 'status', '--porcelain=v1', '-uall'), sh(top, 'ls-files', '-s'), sh(top, 'diff', '--binary'),
     readFileSync(path.join(base, 'a.txt'), 'utf8'), readFileSync(path.join(base, 'b.txt'), 'utf8')];
   const before = snapshot();
-  assert.throws(() => bringBack(two.path, 2), /patch does not apply|patch failed/);
-  // Even a plain apply without the check is all-or-nothing: b.txt and new.txt would apply, a.txt would not.
-  assert.throws(() => execFileSync('git', ['-C', top, 'apply', path.join(sandbox, 'task-2.patch')], { stdio: 'pipe' }));
+  const refused = await bringBack({ root: base, copy: two.path });
+  assert.equal(refused.applied, false);
+  assert.match(refused.error ?? '', /patch does not apply|patch failed/);
   assert.deepEqual(snapshot(), before);
   assert.equal(sh(top, 'diff', '--name-only', '--diff-filter=U'), '');
   assert.equal(existsSync(path.join(base, 'new.txt')), false);
   for (const made of [one, two]) await removeWorktree({ basePath: base, root: made.root });
   assert.equal(existsSync(one.root) || existsSync(two.root), false);
+});
+
+test('bring-back carries renames, deletions and awkward names, and refuses a folder that is not a copy', async () => {
+  const top = path.join(sandbox, 'names repo');
+  const sh = (cwd: string, ...args: string[]) => execFileSync('git', ['-C', cwd, '-c', 'user.email=t@t', '-c', 'user.name=t', ...args], { encoding: 'utf8' }).trim();
+  mkdirSync(path.join(top, 'раздел'), { recursive: true });
+  writeFileSync(path.join(top, 'раздел', 'old.txt'), 'old\n');
+  writeFileSync(path.join(top, 'раздел', 'gone.txt'), 'gone\n');
+  sh(top, 'init', '-q'); sh(top, 'add', '-A'); sh(top, 'commit', '-qm', 'init');
+  const base = path.join(top, 'раздел');
+  const copy = await createWorktree({ basePath: base, name: 'names-1' });
+  sh(copy.path, 'mv', 'old.txt', 'new name.txt');
+  rmSync(path.join(copy.path, 'gone.txt'));
+  writeFileSync(path.join(copy.path, 'todo[1].txt'), 'bracket\n');
+  writeFileSync(path.join(copy.path, "it's \"quoted\" тест.txt"), 'q\n');
+  const result = await bringBack({ root: base, copy: copy.path });
+  assert.equal(result.applied, true, JSON.stringify(result));
+  assert.equal(existsSync(path.join(base, 'old.txt')) || existsSync(path.join(base, 'gone.txt')), false);
+  for (const f of ['new name.txt', 'todo[1].txt', "it's \"quoted\" тест.txt"]) assert.equal(existsSync(path.join(base, f)), true, f);
+  assert.equal((await bringBack({ root: base, copy: copy.path })).applied, false, 'the same patch again does not fit');
+  await assert.rejects(bringBack({ root: base, copy: top }), /не копия AI Factory/);
+  await removeWorktree({ basePath: base, root: copy.root });
+});
+
+test('checkpoint lists each file, commits exactly the listed ones and refuses after a later change', async () => {
+  const top = path.join(sandbox, 'checkpoint repo');
+  const sh = (cwd: string, ...args: string[]) => execFileSync('git', ['-C', cwd, '-c', 'user.email=t@t', '-c', 'user.name=t', ...args], { encoding: 'utf8' }).trim();
+  mkdirSync(path.join(top, 'sec', '.ai-factory', 'skill-context'), { recursive: true });
+  writeFileSync(path.join(top, 'sec', 'old.txt'), 'old\n');
+  writeFileSync(path.join(top, 'sec', 'gone.txt'), 'gone\n');
+  writeFileSync(path.join(top, 'sec', '.ai-factory', 'skill-context', 'own.md'), 'v1\n');
+  writeFileSync(path.join(top, 'outside.txt'), 'outside\n');
+  sh(top, 'init', '-q'); sh(top, 'add', '-A'); sh(top, 'commit', '-qm', 'init');
+  sh(top, 'config', 'user.email', 't@t'); sh(top, 'config', 'user.name', 't');
+  const root = path.join(top, 'sec');
+  sh(top, 'mv', 'sec/old.txt', 'sec/renamed.txt');
+  rmSync(path.join(root, 'gone.txt'));
+  mkdirSync(path.join(root, 'new dir'));
+  writeFileSync(path.join(root, 'new dir', 'тест.txt'), 'mine\n');
+  writeFileSync(path.join(root, 'todo[1].txt'), 'mine\n');
+  writeFileSync(path.join(root, 'todo1.txt'), 'not listed later\n');
+  writeFileSync(path.join(root, '.ai-factory', 'skill-context', 'own.md'), 'v2\n');
+  writeFileSync(path.join(top, 'outside.txt'), 'outside changed\n');
+  const listed = await listChanges({ root });
+  // One entry per file (a new folder is not collapsed to `new dir/`), the plugin's blocks and other sections left out.
+  assert.deepEqual(listed.files.map(f => f.path), ['sec/gone.txt', 'sec/new dir/тест.txt', 'sec/old.txt', 'sec/renamed.txt', 'sec/todo1.txt', 'sec/todo[1].txt']);
+  writeFileSync(path.join(root, 'todo[1].txt'), 'edited after the list\n');
+  await assert.rejects(checkpoint({ root, token: listed.token, message: 'cp' }), /поменялись после проверки/);
+  rmSync(path.join(root, 'todo1.txt'));
+  const again = await listChanges({ root });
+  const done = await checkpoint({ root, token: again.token, message: 'chore(aif): plan · before group 2' });
+  assert.equal(done.committed, true);
+  assert.deepEqual(sh(top, '-c', 'core.quotepath=false', 'show', '--name-status', '--format=', 'HEAD').split('\n').sort(),
+    ['A\tsec/new dir/тест.txt', 'A\tsec/todo[1].txt', 'D\tsec/gone.txt', 'R100\tsec/old.txt\tsec/renamed.txt'].sort());
+  assert.deepEqual(sh(top, 'status', '--porcelain').split('\n').map(l => l.trim()).sort(), ['M outside.txt', 'M sec/.ai-factory/skill-context/own.md'], 'other sections and the plugin\'s blocks stay uncommitted');
+  const empty = await listChanges({ root });
+  assert.deepEqual(empty.files, []);
+  assert.deepEqual(await checkpoint({ root, token: empty.token, message: 'cp' }), { committed: false, files: [] });
 });

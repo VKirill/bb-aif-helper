@@ -8,6 +8,7 @@ import { readDelegation, writeDelegation } from './delegation.ts';
 import { savePlanDocument, markPlanVerified } from './plan-document.ts';
 import { WATCH_IGNORED, relevantChange } from './live-updates.ts';
 import { createWorktree, removeWorktree } from './worktree.ts';
+import { bringBack, checkpoint, headCommit, listChanges, readBrief } from './parallel-git.ts';
 
 type Subscription = { dispose(): Promise<void> };
 type HostContext = ExperimentalHostRpcContext<typeof hostSignals>;
@@ -85,6 +86,11 @@ export default experimental_defineHostEntry({
     markPlanVerified: input => markPlanVerified(input),
     createWorktree: input => createWorktree(input),
     removeWorktree: input => removeWorktree(input),
+    listChanges: input => listChanges(input),
+    checkpoint: input => checkpoint(input),
+    headCommit: input => headCommit(input),
+    bringBack: input => bringBack(input),
+    readBrief: input => readBrief(input),
     watch: async (input, context) => {
       const root = input.root;
       if (watches.has(root)) return { ok: true as const };
