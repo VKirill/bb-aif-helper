@@ -15,12 +15,12 @@ export function Section({ id, title, aside, label, className, highlight = false,
   const surface = useSurface();
   if (surface === 'panel') {
     return <section id={id} aria-label={label} className={cn('flex min-w-0 scroll-mt-4 flex-col gap-2', className)}>
-      {(title || aside) && <div className="flex min-w-0 items-center justify-between gap-2 px-1">
+      {(title || aside) && <div className="flex min-w-0 items-center justify-between gap-2 px-4">
         {title && <h3 className={cn('m-0 text-xs', highlight ? 'font-medium text-foreground' : 'text-muted-foreground')}>{title}</h3>}
         {aside}
       </div>}
       {/* highlight: a section that needs action now gets the accent ring until it is done. */}
-      <div className={cn('flex min-w-0 flex-col gap-3 rounded-xl bg-card p-4', highlight && 'ring-2 ring-primary/50')}>{children}</div>
+      <div className={cn('flex min-w-0 flex-col gap-3 rounded-xl bg-card px-4 py-3', highlight && 'ring-2 ring-primary/50')}>{children}</div>
     </section>;
   }
   return <section id={id} aria-label={label} className={cn('flex min-w-0 flex-col gap-3 rounded-lg border bg-card p-4', highlight ? 'border-primary/50' : 'border-border', className)}>

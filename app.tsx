@@ -321,7 +321,7 @@ function WorkflowCard({ threadId, initialTarget = '', phase = 'unknown', openFil
 
       {(!delegation || view === 'nav') && snapshot.checks.length > 0 && <Disclosure className="aif-checks" summary={<>Что проверить <span className="font-normal text-muted-foreground">· из чата: {snapshot.checks.filter(c => c.chat).length} · отчётов PASS: {snapshot.checks.filter(c => c.state === 'reported-pass').length}</span></>}>
         <p className="m-0 text-xs text-muted-foreground">Дополнительные проверки — по выбору. Правила проекта и обязательные gates могут требовать их перед завершением; блокирующий FAIL сохраняет силу. Галочки задач и результаты проверок независимы. Актуальность отчётов подтверждает владелец workflow.</p>
-        <ul className={cn('m-0 flex list-none flex-col divide-y divide-border p-0', surface === 'card' && 'rounded-lg border border-border')}>{snapshot.checks.map(c => <li key={c.id} className="flex flex-col gap-2 p-3">
+        <ul className={cn('m-0 flex list-none flex-col divide-y divide-border p-0', surface === 'card' && 'rounded-lg border border-border')}>{snapshot.checks.map(c => <li key={c.id} className={cn('flex flex-col gap-2 py-3', surface === 'card' && 'px-3')}>
           <div className="flex flex-wrap items-center gap-2">
             <strong className="font-medium">{c.label}{checkHelp[c.id] && <HelpMark label={`Что проверяет «${c.label}»`} open={help === c.id} onToggle={() => setHelp(help === c.id ? null : c.id)} />}</strong>
             {c.required ? <span className="text-xs text-muted-foreground">нужно для завершения</span> : supplementaryChecks.has(c.id) && <span className="text-xs text-muted-foreground" title="Дополнительный шаг flow; действующие правила проекта сохраняют приоритет">по выбору</span>}
@@ -672,7 +672,7 @@ function WorkingSection({ threadId }: { threadId: string }) {
   return <Section label="В работе" title="В работе">
     <ul className={cn('m-0 flex list-none flex-col divide-y divide-border p-0', surface === 'card' && 'rounded-md border border-border')}>{view.children.map(c => {
       const st = childStatus[c.status] ?? { label: c.status, tone: 'idle' as const };
-      return <li key={c.id} className="grid min-h-10 grid-cols-[8px_minmax(0,1fr)_auto] items-center gap-3 px-3 py-2">
+      return <li key={c.id} className={cn('grid min-h-11 grid-cols-[8px_minmax(0,1fr)_auto] items-center gap-3 py-2', surface === 'card' && 'px-3')}>
         <StatusDot tone={st.tone} />
         <span className="min-w-0"><span className="block truncate">{c.title || 'Без названия'}</span>
           <span className="block truncate text-xs text-muted-foreground" title="Модель, с которой BB запустил ход. Подмену провайдером BB видит только у Claude Code">
