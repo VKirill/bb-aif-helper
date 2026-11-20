@@ -379,8 +379,9 @@ test('checkpoint refuses what is only staged, never commits ignored files, names
   writeFileSync(path.join(top, 'a.txt'), 'A\n');
   let listed = await listChanges({ root: top });
   assert.deepEqual(listed.files.map(f => f.path), ['.gitignore', 'a.txt', 'config.txt', 'script.sh']);
-  await assert.rejects(checkpoint({ root: top, token: listed.token, message: 'cp' }), /В индексе уже есть изменения \(config\.txt, script\.sh\)/);
-  assert.equal(sh(top, 'rev-parse', 'HEAD^{tree}'), sh(top, 'rev-parse', 'HEAD~0^{tree}'));
+  const before = sh(top, 'rev-parse', 'HEAD');
+  await assert.rejects(checkpoint({ root: top, token: listed.token, message: 'cp' }), /В индексе уже есть изменения: "config\.txt" "script\.sh".*git restore --staged -- "config\.txt" "script\.sh"/);
+  assert.equal(sh(top, 'rev-parse', 'HEAD'), before, 'nothing is committed before the refusal');
   // The owner commits what they staged; then the checkpoint takes the rest.
   sh(top, 'commit', '-qm', 'owner');
   // A tracked file replaced by a folder holding an ignored file: the ignored file is never committed.
@@ -474,4 +475,49 @@ test('bring-back: a submodule move is refused, a renamed section still comes bac
     assert.equal(text(path.join(top, 'moved', 'a.md')), 'line  \nnext\n', 'nothing changed before the refusal');
     await removeWorktree({ basePath: top, root: three.root });
   }
+});
+
+test('bring-back keeps the chat folder: a later move out of it is undone, a deletion next to a new file is fine', async () => {
+  const top = path.join(sandbox, 'folder repo');
+  const sh = (cwd: string, ...args: string[]) => execFileSync('git', ['-C', cwd, '-c', 'user.email=t@t', '-c', 'user.name=t', ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
+  mkdirSync(path.join(top, 'sec'), { recursive: true });
+  writeFileSync(path.join(top, 'sec', 'a.txt'), 'a\n');
+  sh(top, 'init', '-q'); sh(top, 'config', 'core.autocrlf', 'false'); sh(top, 'add', '-A'); sh(top, 'commit', '-qm', 'init');
+  const base = path.join(top, 'sec');
+  // Two workers: one adds b.txt, the other deletes a.txt. Together the folder stays, so both come back.
+  const [one, two] = [await createWorktree({ basePath: base, name: 'folder-1' }), await createWorktree({ basePath: base, name: 'folder-2' })];
+  writeFileSync(path.join(one.path, 'b.txt'), 'b\n');
+  unlinkSync(path.join(two.path, 'a.txt'));
+  assert.equal((await bringBack({ root: base, copy: one.path })).applied, true);
+  assert.equal((await bringBack({ root: base, copy: two.path })).applied, true);
+  assert.deepEqual([existsSync(path.join(base, 'a.txt')), existsSync(path.join(base, 'b.txt'))], [false, true]);
+  // The first worker then moves b.txt out of the folder: that would empty it, so it is undone and refused.
+  renameSync(path.join(one.path, 'b.txt'), path.join(one.root, 'b.txt'));
+  const out = await bringBack({ root: base, copy: one.path });
+  assert.equal(out.applied, false);
+  assert.match(out.error ?? '', /переименовал или удалил папку sec\//);
+  assert.equal(text(path.join(base, 'b.txt')), 'b\n', 'everything is back');
+  assert.equal(existsSync(path.join(top, 'b.txt')), false);
+  for (const made of [one, two]) await removeWorktree({ basePath: base, root: made.root });
+});
+
+test('checkpoint: a staged edit hidden behind a block refresh is refused; a repository without commits gets a working command', async () => {
+  const top = path.join(sandbox, 'hidden repo');
+  const sh = (cwd: string, ...args: string[]) => execFileSync('git', ['-C', cwd, '-c', 'user.email=t@t', '-c', 'user.name=t', ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+  const skill = path.join(top, '.ai-factory', 'skill-context', 'aif-implement');
+  mkdirSync(skill, { recursive: true });
+  const file = (owner: string, block: string) => `${owner}\n<!-- bb-aif-helper:delegation:start -->\n${block}\n<!-- bb-aif-helper:delegation:end -->\n`;
+  writeFileSync(path.join(skill, 'SKILL.md'), file('owner', 'v1'));
+  sh(top, 'init', '-q'); sh(top, 'config', 'core.autocrlf', 'false'); sh(top, 'add', '-A'); sh(top, 'commit', '-qm', 'init');
+  writeFileSync(path.join(skill, 'SKILL.md'), file('owner edited', 'v1')); sh(top, 'add', '-A');
+  writeFileSync(path.join(skill, 'SKILL.md'), file('owner', 'v2'));
+  const listed = await listChanges({ root: top });
+  await assert.rejects(checkpoint({ root: top, token: listed.token, message: 'cp' }), /В индексе уже есть изменения/);
+  const fresh = path.join(sandbox, 'fresh repo');
+  mkdirSync(fresh, { recursive: true });
+  sh(fresh, 'init', '-q');
+  writeFileSync(path.join(fresh, 'file.txt'), 'x\n'); sh(fresh, 'add', 'file.txt');
+  await assert.rejects(checkpoint({ root: fresh, token: (await listChanges({ root: fresh })).token, message: 'cp' }), /git rm -q --cached -r -- "file\.txt"/);
+  sh(fresh, 'rm', '-q', '--cached', '-r', '--', 'file.txt'); // the command from the message works
+  assert.equal(sh(fresh, 'status', '--porcelain').trim(), '?? file.txt');
 });

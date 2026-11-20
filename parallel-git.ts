@@ -44,11 +44,14 @@ const exists = (p: string) => lstat(p).then(() => true, () => false); // a dangl
 
 /** A file of the plugin's folder whose change is only a refreshed managed block, not an edit by a task or the owner. */
 async function onlyBlockRefresh(top: string, file: string): Promise<boolean> {
+  // The plugin writes regular files: a symlink, a folder or a missing file is an edit by someone else.
+  if (!(await lstat(path.join(top, file)).then(s => s.isFile(), () => false))) return false;
+  if ((await git(top, ['--literal-pathspecs', 'ls-tree', 'HEAD', '--', file]).catch(() => '')).split(' ')[0] === '120000') return false;
   const now = await readFile(path.join(top, file), 'utf8').catch(() => null);
   const before = await git(top, ['show', `HEAD:${file}`]).catch(() => null);
   if (now === null || before === null || withoutManagedBlocks(now) !== withoutManagedBlocks(before)) return false;
   // A changed executable bit is an edit too.
-  const headMode = (await git(top, ['ls-tree', 'HEAD', '--', file]).catch(() => '')).split(' ')[0];
+  const headMode = (await git(top, ['--literal-pathspecs', 'ls-tree', 'HEAD', '--', file]).catch(() => '')).split(' ')[0];
   const exec = await stat(path.join(top, file)).then(s => (s.mode & 0o111) !== 0, () => false);
   const filemode = (await git(top, ['config', '--type=bool', 'core.filemode']).catch(() => 'true')).trim() !== 'false';
   return !filemode || (headMode === '100755') === exec;
@@ -98,7 +101,12 @@ async function refuseUnsafe(top: string, files: Change[], plugin: Change[]) {
   // Something staged by hand (a `git rm --cached`, an `add --chmod`, a partial `add -p`) is a decision the disk does
   // not show; the checkpoint does not guess it. The owner or the coordinator commits or unstages it first.
   const staged = [...files, ...plugin].filter(f => f.status[0] !== ' ' && f.status[0] !== '?').map(f => f.path);
-  if (staged.length) throw new Error(`В индексе уже есть изменения (${staged.slice(0, 5).join(', ')}${staged.length > 5 ? ', …' : ''}): закоммитьте их или уберите из индекса (git restore --staged), потом снова checkpoint.`);
+  if (staged.length) {
+    const named = staged.slice(0, 5).map(f => `"${f}"`).join(' ') + (staged.length > 5 ? ' …' : '');
+    const hasHead = await git(top, ['rev-parse', '--verify', '-q', 'HEAD^{commit}']).then(() => true, () => false);
+    const unstage = hasHead ? `git restore --staged -- ${named}` : `git rm -q --cached -r -- ${named}`;
+    throw new Error(`В индексе уже есть изменения: ${named}. Закоммитьте их или уберите из индекса (${unstage}), потом снова checkpoint.`);
+  }
 }
 
 /**
@@ -111,8 +119,8 @@ async function refuseUnsafe(top: string, files: Change[], plugin: Change[]) {
 export async function checkpoint(input: { root: string; token: string; message: string }) {
   const c = await changes(input.root);
   if (c.token !== input.token) throw new Error('Изменения в репозитории поменялись после проверки. Запустите checkpoint без --token и проверьте список заново.');
-  if (!c.files.length) return { committed: false as const, files: [] as string[] };
   await refuseUnsafe(c.top, c.files, c.plugin);
+  if (!c.files.length) return { committed: false as const, files: [] as string[] };
   // Nothing is staged (refuseUnsafe), so HEAD plus the listed working-tree changes is exactly the list. A path git
   // reports deleted is deleted even if a folder of that name appeared (its files are listed on their own), and
   // nothing is added with -f: an ignored file is never committed.
@@ -197,14 +205,6 @@ export async function bringBack(input: { root: string; copy: string }) {
   const tokens = raw.split('\0'), gitlinks: string[] = [];
   for (let i = 0; i + 1 < tokens.length; i += 2) if (/^:(160000 \S+|\S+ 160000) /.test(tokens[i])) gitlinks.push(tokens[i + 1]);
   if (gitlinks.length) return { applied: false as const, empty: false as const, files, error: `Исполнитель изменил подмодуль: ${gitlinks.join(', ')}. Его не перенести патчем — перенесите вручную.` };
-  // Bringing back a removal of the coordinator's own folder would leave it working in a folder that no longer exists.
-  if (mine.prefix) {
-    const status = (want: RegExp) => new Set(tokens.flatMap((t, i) => i % 2 === 0 && want.test(t) ? [tokens[i + 1]] : []));
-    const deleted = status(/ D$/), added = [...status(/ [AM]$/)].filter(f => f.startsWith(mine.prefix));
-    const own = (await git(mine.top, ['ls-files', '-z', '--', mine.prefix])).split('\0').filter(Boolean);
-    if (own.length && own.every(f => deleted.has(f)) && !added.length) return { applied: false as const, empty: false as const, files,
-      error: `Исполнитель переименовал или удалил папку ${mine.prefix}, в которой работает этот чат: перенесите это вручную, после остальных задач.` };
-  }
   // The receipt is written after the apply; a copy where it cannot be written is refused before anything changes.
   await writeFile(mark, last ? `${last}\n` : '').catch((cause: Error) => { throw new Error(`Копия исполнителя недоступна для записи: ${cause.message}`); });
   const dir = await mkdtemp(path.join(tmpdir(), 'aif-patch-'));
@@ -215,15 +215,18 @@ export async function bringBack(input: { root: string; copy: string }) {
     catch (cause) { return { applied: false as const, empty: false as const, files, error: (cause as Error).message }; }
     const saved = await Promise.all(files.map(f => save(mine.top, f)));
     // --whitespace=nowarn: `apply.whitespace=fix` in the project would strip the trailing spaces of a Markdown line break.
-    try { await git(mine.top, ['apply', '--whitespace=nowarn', patch]); }
-    catch (cause) {
+    const undo = async (error: string) => {
       const lost: string[] = [];
       for (const s of saved) await restore(mine.top, s).catch(() => lost.push(s.file));
-      const error = (cause as Error).message;
       return lost.length
         ? { applied: false as const, empty: false as const, partial: true as const, files: lost, error }
         : { applied: false as const, empty: false as const, files, error };
-    }
+    };
+    try { await git(mine.top, ['apply', '--whitespace=nowarn', patch]); }
+    catch (cause) { return undo((cause as Error).message); }
+    // The patch removed the folder this chat works in (the worker renamed or emptied it): put everything back.
+    if (!(await stat(path.resolve(input.root)).then(s => s.isDirectory(), () => false)))
+      return undo(`Исполнитель переименовал или удалил папку ${mine.prefix || '.'}, в которой работает этот чат: перенесите это вручную, после остальных задач.`);
     await writeFile(mark, `${tree}\n`);
     return { applied: true as const, files };
   } finally { await removePath(dir).catch(() => undefined); }
