@@ -243,6 +243,8 @@ bb plugin rpc call aif-chat status --input-file <input.json> --json
 
 Прямой HTTP RPC также возвращает `ok: true`. Native tool и кнопки используют SDK/RPC и не вызывают короткий alias. Его код BB в рамках этой работы не менялся; явный entrypoint указан в skill и подсказках агента.
 
+В 0.23.0 (20 ноября 2026, Linux, слияние с 0.8.28): полный suite — **414 passed, 0 failed, 0 skipped**, TypeScript и сборка прошли. Тесты разработчика на его функции (одна карточка, скрытие при ожидании ответа, документ плана, исследование, завершённые планы, SessionBrief, 2.22, «Применить всё», причины недоступности) включены и проходят на нашей панели; обновление в них идёт через `experimental_invalidateRpc`, а не событие `changed`. На сервере нет `realtime.publish`, в UI — `setInterval` и `useRealtime`. Тесты на OVH запускаются под `systemd-run --user --scope -p MemoryMax=4G -p MemorySwapMax=0`.
+
 ## Граница результата
 
 Это проверка plugin contracts, локального UI и live read-only status. Реальные inference, QA приложения, hosted CI, archive, commit, push или PR не запускались. Существующий AIFHub Flow не изменялся. Плагин не присваивает актуальный PASS по одному старому отчёту и не заменяет readiness/evidence-владельцев.
