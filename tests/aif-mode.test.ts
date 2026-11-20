@@ -33,7 +33,6 @@ async function setup() {
 const agentContext = (parentThreadId: string | null = null, projectId = 'proj_test') =>
   makePluginAgentConfigurationContext({ project: { id: projectId }, thread: { parentThreadId } });
 const turnRow = (seq: number) => ({ seq, type: 'client/turn/requested', data: { input: [] } });
-const compactedRow = (seq: number) => ({ seq, type: 'thread/compacted', data: {} });
 
 test('mode instructions reach only top-level threads of an enabled project', async () => {
   const h = await setup();
@@ -50,7 +49,7 @@ test('mode instructions reach only top-level threads of an enabled project', asy
   } finally { await h.harness.lifecycle.dispose(); }
 });
 
-test('aifMode and setAifMode require exactly one target and track the pill for threads with turns', async () => {
+test('aifMode and setAifMode require exactly one target; the view carries no pill flag', async () => {
   const h = await setup();
   try {
     const rpc = h.harness.behavior.callRpc.bind(h.harness.behavior);
@@ -58,52 +57,16 @@ test('aifMode and setAifMode require exactly one target and track the pill for t
     await assert.rejects(rpc('aifMode', { threadId: 'thr_test', projectId: 'proj_test' }));
     await assert.rejects(rpc('setAifMode', { on: true }));
     await assert.rejects(rpc('setAifMode', { threadId: 'thr_test', projectId: 'proj_test', on: true }));
-    let view = await rpc('setAifMode', { threadId: 'thr_test', on: true }) as any;
-    assert.deepEqual({ projectId: view.projectId, on: view.on, configured: view.configured, pill: view.pill },
-      { projectId: 'proj_test', on: true, configured: true, pill: false });
+    // The owner asked for no «AI Factory» tag in the chat input: turning the mode on in a running chat inserts nothing.
     h.setEvents([turnRow(1)]);
-    view = await rpc('setAifMode', { threadId: 'thr_test', on: true }) as any;
-    assert.equal(view.pill, true);
+    let view = await rpc('setAifMode', { threadId: 'thr_test', on: true }) as any;
+    assert.deepEqual(view, { projectId: 'proj_test', on: true, configured: true });
     view = await rpc('setAifMode', { threadId: 'thr_test', on: false }) as any;
-    assert.equal(view.on, false); assert.equal(view.pill, false);
+    assert.equal(view.on, false);
     view = await rpc('aifMode', { projectId: 'proj_test' }) as any;
-    assert.deepEqual({ on: view.on, configured: view.configured, pill: view.pill }, { on: false, configured: null, pill: false });
+    assert.deepEqual(view, { projectId: 'proj_test', on: false, configured: null });
     view = await rpc('aifMode', { threadId: 'thr_test' }) as any;
     assert.equal(view.configured, true);
-  } finally { await h.harness.lifecycle.dispose(); }
-});
-
-test('ackAifPill clears the pill flag', async () => {
-  const h = await setup();
-  try {
-    h.setEvents([turnRow(1)]);
-    await h.harness.behavior.callRpc('setAifMode', { threadId: 'thr_test', on: true });
-    assert.equal((await h.harness.behavior.callRpc('aifMode', { threadId: 'thr_test' }) as any).pill, true);
-    assert.deepEqual(await h.harness.behavior.callRpc('ackAifPill', { threadId: 'thr_test' }), { ok: true });
-    assert.equal((await h.harness.behavior.callRpc('aifMode', { threadId: 'thr_test' }) as any).pill, false);
-  } finally { await h.harness.lifecycle.dispose(); }
-});
-
-test('compaction raises the pill only for top-level threads of an enabled project, after the first cursor sighting', async () => {
-  const h = await setup();
-  try {
-    const emit = (id: string, sequence: number, parentThreadId: string | null = null) =>
-      h.harness.behavior.emitThreadEvent('experimental_thread.events',
-        { thread: makeThreadResponse({ id, projectId: 'proj_test', parentThreadId }), sequence });
-    const pill = async (id: string) => (await h.harness.behavior.callRpc('aifMode', { threadId: id }) as any).pill;
-    h.setEvents([compactedRow(5), compactedRow(15)]);
-    await emit('thr_off', 10); await emit('thr_off', 20);
-    assert.equal(await pill('thr_off'), false);
-    await h.harness.behavior.callRpc('setAifMode', { projectId: 'proj_test', on: true });
-    await emit('thr_new', 10);
-    assert.equal(await pill('thr_new'), false);
-    await emit('thr_new', 20);
-    assert.equal(await pill('thr_new'), true);
-    await emit('thr_child', 10, 'thr_parent'); await emit('thr_child', 25, 'thr_parent');
-    assert.equal(await pill('thr_child'), false);
-    h.setEvents([compactedRow(5)]);
-    await emit('thr_stale', 30); await emit('thr_stale', 40);
-    assert.equal(await pill('thr_stale'), false);
   } finally { await h.harness.lifecycle.dispose(); }
 });
 

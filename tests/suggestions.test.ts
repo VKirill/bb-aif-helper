@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { extractAifCommands, extractAifInvocations, analyzeReply, chipDraft, isCommandDraft, nextStepItems, withTopic } from '../suggestions.ts';
+import { extractAifCommands, extractAifInvocations, analyzeReply, chipDraft, nextStepItems, withTopic } from '../suggestions.ts';
 
 test('last-answer command names are extracted in order, without arguments or duplicates', () => {
   assert.deepEqual(extractAifCommands('Далее `$aif-architecture`, затем `$aif-roadmap`. Повтор: $aif-architecture; $aif-plan full #177; $aif.'), ['aif-architecture', 'aif-roadmap', 'aif-plan', 'aif']);
@@ -155,15 +155,6 @@ test('chipDraft prepends when a mention overlaps the leading command instead of 
   assert.equal(result.submit, true);
   assert.equal(result.text, '/aif-verify /aif-plan fix this');
   assert.deepEqual(result.mentions, [{ ...mention, from: 13, to: 16 }]);
-});
-test('isCommandDraft detects leading / and $ commands and ignores the pill', () => {
-  const pill = { from: 0, to: 11, kind: 'plugin', provider: 'aif-mode', id: 'aif-mode' };
-  assert.equal(isCommandDraft({ text: '/aif-plan fix', mentions: [] }), true);
-  assert.equal(isCommandDraft({ text: '  $aif-verify', mentions: [] }), true);
-  assert.equal(isCommandDraft({ text: 'fix /aif-plan', mentions: [] }), false);
-  assert.equal(isCommandDraft({ text: '@AI Factory /aif-plan', mentions: [pill] }), true);
-  assert.equal(isCommandDraft({ text: '@AI Factory', mentions: [pill] }), false);
-  assert.equal(isCommandDraft({ text: '', mentions: [] }), false);
 });
 test('chipDraft drops the AI Factory pill: a draft holding only it counts as empty', () => {
   const pill = { from: 0, to: 10, kind: 'plugin', provider: 'aif-mode', id: 'aif-mode' };

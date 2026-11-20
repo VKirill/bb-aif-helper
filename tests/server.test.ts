@@ -1308,14 +1308,6 @@ test('documentation counts as done only after /aif-docs was launched from the re
   } finally { await h.harness.lifecycle.dispose(); }
 });
 
-test('ackAifPill invalidates the thread tag', async () => {
-  const h = await setup(); try {
-    await h.harness.behavior.callRpc('ackAifPill', { threadId: 'thr_test' });
-    const tags = h.harness.inspection.experimental_rpcInvalidations.flatMap(entry => entry ?? []);
-    assert.ok(tags.includes('thread:thr_test'));
-  } finally { await h.harness.lifecycle.dispose(); }
-});
-
 test('setAifMode invalidates the project tag and the thread tag when a thread is given', async () => {
   const h = await setup(); try {
     await h.harness.behavior.callRpc('setAifMode', { projectId: 'proj_test', on: true });

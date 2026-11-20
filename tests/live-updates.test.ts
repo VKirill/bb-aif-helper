@@ -10,7 +10,7 @@ test('tag helpers build the only tag strings', () => {
 });
 
 test('aifMode tags carry the project tag plus the thread tag when threadId is given', () => {
-  const output = { projectId: 'p1', on: true, configured: true, pill: false };
+  const output = { projectId: 'p1', on: true, configured: true };
   assert.deepEqual(rpcContract.aifMode.tags?.({ threadId: 't1' }, output), ['project:p1', 'thread:t1']);
   assert.deepEqual(rpcContract.aifMode.tags?.({}, output), ['project:p1']);
 });

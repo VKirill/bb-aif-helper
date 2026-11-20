@@ -15,7 +15,7 @@ export const delegationViewSchema = delegationStateSchema.extend({
   defaults: delegationDefaultsSchema.nullable(),
   appliedDefaults: z.string().nullable(),
 });
-export const aifModeViewSchema = z.object({ projectId: z.string(), on: z.boolean(), configured: z.boolean().nullable(), pill: z.boolean() });
+export const aifModeViewSchema = z.object({ projectId: z.string(), on: z.boolean(), configured: z.boolean().nullable() });
 export type DelegationView = z.infer<typeof delegationViewSchema>;
 export const chipScoringViewSchema = z.object({
   enabled: z.boolean(), source: z.enum(['catalog', 'manual']), catalogName: z.string().nullable(),
@@ -70,5 +70,4 @@ export const rpcContract = defineRpcContract({
   aifMode: { input: z.object({ threadId: z.string().min(1).max(200).optional(), projectId: z.string().min(1).max(200).optional() }).strict(), output: aifModeViewSchema, experimental_retryable: true,
     tags: (input, output) => [projectTag(output.projectId), ...(input.threadId ? [threadTag(input.threadId)] : [])] },
   setAifMode: { input: z.object({ threadId: z.string().min(1).max(200).optional(), projectId: z.string().min(1).max(200).optional(), on: z.boolean() }).strict(), output: aifModeViewSchema },
-  ackAifPill: { input: z.object({ threadId: z.string().min(1).max(200) }).strict(), output: z.object({ ok: z.literal(true) }) },
 });

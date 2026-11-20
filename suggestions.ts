@@ -119,13 +119,6 @@ const stripRanges = (text: string, ranges: readonly { from: number; to: number }
 const isModePill = (m: { kind?: string; provider?: string; id?: string }) =>
   m.kind === 'plugin' && m.provider === 'aif-mode' && m.id === 'aif-mode';
 
-/** True when the draft text, ignoring the AI Factory pill, starts with a `/` or `$` command. */
-export function isCommandDraft(draft: { text: string; mentions: readonly { from: number; to: number; kind?: string; provider?: string; id?: string }[] }): boolean {
-  const pills = draft.mentions.filter(isModePill).sort((a, b) => a.from - b.from);
-  const text = stripRanges(draft.text, pills).trimStart();
-  return text.startsWith('/') || text.startsWith('$');
-}
-
 export function chipDraft<M extends { from: number; to: number; kind?: string; provider?: string; id?: string }>(
   draft: { text: string; mentions: readonly M[] },
   command: string,

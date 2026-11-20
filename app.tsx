@@ -8,7 +8,7 @@ import { parseReplyGate } from './gate.ts';
 import { checkHelp, rowActions, supplementaryChecks, toolHelp } from './check-actions.ts';
 import { updateInVersionDetails, VERSION_TTL } from './versions.ts';
 import { contextSetupInDetails } from './workflow.ts';
-import { chipDraft, isCommandDraft } from './suggestions.ts';
+import { chipDraft } from './suggestions.ts';
 import { AIF_MENTION } from './aif-mode.ts';
 import { isBasicPlanPath, usesBasicWorkflow, isCompletedPlan } from './basic-workflow.ts';
 import { mountPlanPresentation } from './plan-presentation.ts';
@@ -931,40 +931,12 @@ function AifModeAction() {
   </button>;
 }
 
-/** Composer banner (invisible): inserts the AI Factory pill into the draft once per server flag. */
-function AifPillController() {
-  const composer = useComposer();
-  const rpc = useRpc<typeof rpcContract>();
-  const threadId = composer.scope.kind === 'thread' ? composer.scope.threadId : null;
-  // Shares the AifModeAction read of the same thread; a failed read keeps the pill off until the next invalidation.
-  const query = experimental_useRpcQuery({ contract: rpcContract, method: 'aifMode', input: aifModeInput(threadId, null), enabled: !!threadId });
-  const pill = !!threadId && !!query.data?.pill;
-  const handled = useRef(false);
-  useEffect(() => { if (!pill) handled.current = false; }, [pill]);
-  const commandDraft = isCommandDraft(composer.draft);
-  // The pill's text would reach a `/aif-…` skill as arguments; commands read
-  // the mode from skill-context instead, so a command draft never keeps it.
-  useEffect(() => {
-    if (commandDraft && composer.draft.mentions.some(isAifPill)) removeAifPill(composer);
-  }, [composer, commandDraft, composer.draft]);
-  useEffect(() => {
-    if (!threadId || !pill || handled.current || commandDraft) return;
-    handled.current = true;
-    try {
-      if (!composer.draft.mentions.some(isAifPill)) composer.insert(AIF_MENTION, { at: 'end' });
-    } catch { handled.current = false; return; } // composer gone; the next invalidation of this thread retries
-    void rpc.call('ackAifPill', { threadId }).catch(() => undefined); // the flag stays; the pill is already in the draft
-  }, [composer, rpc, threadId, pill, commandDraft]);
-  return null;
-}
-
 export default definePluginApp(app => {
   app.slots.experimental_codeFenceRenderer({ id: 'gate-data', languages: ['aif-gate-result'], component: GateData });
   app.slots.experimental_codeFenceRenderer({ id: 'plan-document', languages: ['aif-plan'], component: PlanDocument });
   app.contentScripts.register({ id: 'plan-presentation', mount: mountPlanPresentation });
   app.composer.customize({ id: 'suggested-commands', scopes: ['thread'], banners: [{ id: 'commands', chrome: 'bare', component: SuggestedCommands }] });
   app.composer.customize({ id: 'aif-mode', scopes: ['new-thread', 'thread'], actions: [{ id: 'aif-mode', component: AifModeAction }] });
-  app.composer.customize({ id: 'aif-mode-pill', scopes: ['thread'], banners: [{ id: 'aif-pill', chrome: 'bare', component: AifPillController }] });
   app.slots.messageDirective({ id: 'aif-chat', component: Directive });
   app.slots.experimental_threadContextCardSection({ id: 'workflow', title: 'AI Factory', group: '9_aif', order: 10, component: ContextCard });
   app.experimental_icons.register({ name: 'aif-factory', component: FactoryIcon });

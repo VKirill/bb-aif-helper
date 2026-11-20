@@ -559,8 +559,7 @@ export default async function plugin(bb: BbPluginApi) {
   }
   async function aifModeView(threadId: string | undefined, projectId: string, on: boolean) {
     const configured = threadId ? await status({ threadId, target: '', phase: 'unknown' }).then(s => s.configured).catch(() => null) : null;
-    const pill = threadId ? await bb.storage.kv.get<boolean>(`aif-pill:${threadId}`) === true : false;
-    return { projectId, on, configured, pill };
+    return { projectId, on, configured };
   }
   const CHIP_SCORING_KV = 'chip-scoring';
   const scoringState = async (): Promise<ChipScoringState> => {
@@ -855,21 +854,10 @@ export default async function plugin(bb: BbPluginApi) {
     setAifMode: input => serial(`aif-mode:${input.projectId ?? input.threadId}`, async () => {
       const { threadId, projectId } = await aifModeTarget(input);
       setMode(projectId, input.on);
-      if (threadId) {
-        if (input.on) {
-          const turns = await bb.sdk.threads.events.list({ threadId, order: 'desc', limit: '1', types: ['client/turn/requested'] }).catch(() => []);
-          if (turns.length) await bb.storage.kv.set(`aif-pill:${threadId}`, true);
-        } else await bb.storage.kv.delete(`aif-pill:${threadId}`);
-      }
       bb.log.info(`aif-chat: aif-mode set projectId=${projectId} on=${input.on}`);
       bb.rpc.experimental_invalidate([projectTag(projectId), ...(threadId ? [threadTag(threadId)] : [])]);
       return aifModeView(threadId, projectId, input.on);
     }),
-    ackAifPill: async input => {
-      await bb.storage.kv.delete(`aif-pill:${input.threadId}`);
-      bb.rpc.experimental_invalidate([threadTag(input.threadId)]);
-      return { ok: true as const };
-    },
   });
   const liveRoots = new Map<string, { hostId: string; root: string; refs: number; retriedAt: number }>();
   // A loss within this window of the last retry counts as consecutive: give up instead of looping.
@@ -1127,26 +1115,6 @@ export default async function plugin(bb: BbPluginApi) {
     await bb.storage.kv.delete(`session-brief:${thread.id}`);
     await bb.storage.kv.delete(`suggestions-dismissed:${thread.id}`);
     await bb.storage.kv.delete(`updating-versions:${thread.id}`); versionScopes.delete(thread.id);
-  });
-  bb.events.on('experimental_thread.events', async ({ thread, sequence }) => {
-    try {
-      if (!enabled || thread.parentThreadId !== null || !getMode(thread.projectId)) return;
-      await serial(`aif-events:${thread.id}`, async () => {
-        const cursorKey = `aif-events-cursor:${thread.id}`;
-        const cursor = await bb.storage.kv.get<number>(cursorKey);
-        if (cursor === undefined) { await bb.storage.kv.set(cursorKey, sequence); return; }
-        if (sequence <= cursor) return;
-        const rows = await bb.sdk.threads.events.list({ threadId: thread.id, order: 'asc', afterSeq: String(cursor), limit: '100', types: ['thread/compacted'] });
-        await bb.storage.kv.set(cursorKey, sequence);
-        if (rows.some(row => row.type === 'thread/compacted' && row.seq > cursor)) {
-          await bb.storage.kv.set(`aif-pill:${thread.id}`, true);
-          bb.rpc.experimental_invalidate([threadTag(thread.id)]);
-          bb.log.info(`aif-chat: compaction seen threadId=${thread.id}`);
-        }
-      });
-    } catch (error) {
-      bb.log.warn(`aif-chat: compaction watch failed threadId=${thread.id}: ${error instanceof Error ? error.message : String(error)}`);
-    }
   });
   bb.onDispose(() => { disposed = true; liveRoots.clear(); offFilesChanged(); offWatchLost(); offWorkerExit(); cache.dispose(); histories.clear(); historyLoads.clear(); historyEpochs.clear(); watchers.clear(); versionScopes.clear(); queues.clear(); });
 }
