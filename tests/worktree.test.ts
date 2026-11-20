@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 // On Windows rmSync can silently keep a file whose path has Cyrillic in it; tests delete files with unlinkSync.
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, realpathSync, renameSync, rmSync, unlinkSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, realpathSync, renameSync, rmSync, unlinkSync, chmodSync, statSync, readdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { createWorktree, removeWorktree, worktreesRoot } from '../worktree.ts';
@@ -380,7 +380,7 @@ test('checkpoint refuses what is only staged, never commits ignored files, names
   let listed = await listChanges({ root: top });
   assert.deepEqual(listed.files.map(f => f.path), ['.gitignore', 'a.txt', 'config.txt', 'script.sh']);
   const before = sh(top, 'rev-parse', 'HEAD');
-  await assert.rejects(checkpoint({ root: top, token: listed.token, message: 'cp' }), /В индексе уже есть изменения \(пути от корня репозитория\): config\.txt, script\.sh\. Пусть владелец/);
+  await assert.rejects(checkpoint({ root: top, token: listed.token, message: 'cp' }), /В индексе уже есть изменения\. Пусть владелец.*\n"config\.txt"\n"script\.sh"$/);
   assert.equal(sh(top, 'rev-parse', 'HEAD'), before, 'nothing is committed before the refusal');
   // The owner commits what they staged; then the checkpoint takes the rest.
   sh(top, 'commit', '-qm', 'owner');
@@ -493,7 +493,13 @@ test('bring-back keeps the chat folder: a later move out of it is undone, a dele
   assert.deepEqual([existsSync(path.join(base, 'a.txt')), existsSync(path.join(base, 'b.txt'))], [false, true]);
   // The first worker then moves b.txt out of the folder: that would empty it, so it is undone and refused.
   renameSync(path.join(one.path, 'b.txt'), path.join(one.root, 'b.txt'));
+  if (process.platform !== 'win32') chmodSync(base, 0o700);
+  const folder = statSync(base);
   const out = await bringBack({ root: base, copy: one.path });
+  if (process.platform !== 'win32') {
+    assert.equal(statSync(base).ino, folder.ino, 'the refused patch did not recreate the folder');
+    assert.equal(statSync(base).mode & 0o777, 0o700);
+  }
   assert.equal(out.applied, false);
   assert.match(out.error ?? '', /переименовал или удалил папку sec\//);
   assert.equal(text(path.join(base, 'b.txt')), 'b\n', 'nothing was touched');
@@ -503,6 +509,60 @@ test('bring-back keeps the chat folder: a later move out of it is undone, a dele
   assert.equal((await bringBack({ root: base, copy: one.path })).applied, true);
   assert.equal(existsSync(path.join(top, 'b.txt')), true);
   for (const made of [one, two]) await removeWorktree({ basePath: base, root: made.root });
+});
+
+test('bring-back keeps the chat folder in place: renaming its only file, an empty subfolder, an untouched empty folder', async () => {
+  const top = path.join(sandbox, 'keep repo');
+  const sh = (cwd: string, ...args: string[]) => execFileSync('git', ['-C', cwd, '-c', 'user.email=t@t', '-c', 'user.name=t', ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
+  mkdirSync(path.join(top, 'sec'), { recursive: true });
+  writeFileSync(path.join(top, 'sec', 'old.txt'), 'a\n');
+  writeFileSync(path.join(top, 'root.txt'), 'r\n');
+  sh(top, 'init', '-q'); sh(top, 'config', 'core.autocrlf', 'false'); sh(top, 'add', '-A'); sh(top, 'commit', '-qm', 'init');
+  const base = path.join(top, 'sec');
+  // Renaming the only file: the folder is the same folder afterwards (same inode, same mode), not a new one.
+  if (process.platform !== 'win32') chmodSync(base, 0o700);
+  const before = statSync(base);
+  const one = await createWorktree({ basePath: base, name: 'keep-1' });
+  renameSync(path.join(one.path, 'old.txt'), path.join(one.path, 'new.txt'));
+  assert.equal((await bringBack({ root: base, copy: one.path })).applied, true);
+  assert.deepEqual(readdirSync(base), ['new.txt'], 'no placeholder left behind');
+  if (process.platform !== 'win32') {
+    assert.equal(statSync(base).ino, before.ino);
+    assert.equal(statSync(base).mode & 0o777, 0o700);
+  }
+  sh(top, 'add', '-A'); sh(top, 'commit', '-qm', 'renamed');
+  // The owner has emptied the folder on disk; a worker that only edits a root file did not remove it.
+  const three = await createWorktree({ basePath: base, name: 'keep-3' });
+  unlinkSync(path.join(base, 'new.txt'));
+  writeFileSync(path.join(three.root, 'root.txt'), 'r2\n');
+  assert.equal((await bringBack({ root: base, copy: three.path })).applied, true);
+  assert.equal(text(path.join(top, 'root.txt')), 'r2\n');
+  sh(top, 'checkout', '--', 'sec'); sh(top, 'commit', '-qam', 'root');
+  // An empty subfolder the patch does not touch keeps the folder: moving the file out is fine.
+  mkdirSync(path.join(base, 'empty'));
+  const two = await createWorktree({ basePath: base, name: 'keep-2' });
+  renameSync(path.join(two.path, 'new.txt'), path.join(two.root, 'moved.txt'));
+  assert.equal((await bringBack({ root: base, copy: two.path })).applied, true);
+  assert.equal(existsSync(path.join(top, 'moved.txt')), true);
+  for (const made of [one, two, three]) await removeWorktree({ basePath: base, root: made.root });
+});
+
+test('checkpoint: the staged refusal puts the instruction first, caps the list and quotes each path on its own line', async () => {
+  const top = path.join(sandbox, 'many staged repo');
+  const sh = (cwd: string, ...args: string[]) => execFileSync('git', ['-C', cwd, '-c', 'user.email=t@t', '-c', 'user.name=t', ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+  const deep = path.join(top, 'packages', 'workspace-tools', 'src', 'runtime-daemon', 'fixtures');
+  mkdirSync(deep, { recursive: true });
+  sh(top, 'init', '-q'); writeFileSync(path.join(top, 'a.txt'), 'a\n'); sh(top, 'add', '-A'); sh(top, 'commit', '-qm', 'init', '-q');
+  for (let i = 1; i <= 18; i++) writeFileSync(path.join(deep, `fixture-${String(i).padStart(2, '0')}.test.ts`), 'x\n');
+  writeFileSync(path.join(top, 'a, b.txt'), 'x\n');
+  sh(top, 'add', '-A');
+  await assert.rejects(checkpoint({ root: top, token: (await listChanges({ root: top })).token, message: 'cp' }), (e: Error) => {
+    assert.ok(e.message.length < 1000, `${e.message.length} characters`);
+    assert.match(e.message.slice(0, 200), /закоммитит их или уберёт из индекса/);
+    assert.match(e.message, /\n"a, b\.txt"\n/);
+    assert.match(e.message, /и ещё 11$/);
+    return true;
+  });
 });
 
 test('checkpoint: a staged edit hidden behind a block refresh is refused, and the message names files, not commands', async () => {

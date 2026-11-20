@@ -102,7 +102,9 @@ async function refuseUnsafe(top: string, files: Change[], plugin: Change[]) {
   // not show; the checkpoint does not guess it. The owner or the coordinator commits or unstages it first.
   const staged = [...files, ...plugin].filter(f => f.status[0] !== ' ' && f.status[0] !== '?').map(f => f.path);
   // No ready-made command: which version to keep is the owner's decision, and a pasted command could lose one.
-  if (staged.length) throw new Error(`В индексе уже есть изменения (пути от корня репозитория): ${staged.slice(0, 20).join(', ')}${staged.length > 20 ? ` и ещё ${staged.length - 20}` : ''}. Пусть владелец закоммитит их или уберёт из индекса, потом снова checkpoint.`);
+  // The instruction goes first and the list is capped: the CLI cuts stderr at about 1,000 characters. One quoted path
+  // per line, so a comma in a file name cannot be read as two files.
+  if (staged.length) throw new Error(`В индексе уже есть изменения. Пусть владелец закоммитит их или уберёт из индекса, потом снова checkpoint. Файлы (пути от корня репозитория):\n${staged.slice(0, 8).map(f => JSON.stringify(f)).join('\n')}${staged.length > 8 ? `\nи ещё ${staged.length - 8}` : ''}`);
 }
 
 /**
@@ -202,21 +204,23 @@ export async function bringBack(input: { root: string; copy: string }) {
   for (let i = 0; i + 1 < tokens.length; i += 2) if (/^:(160000 \S+|\S+ 160000) /.test(tokens[i])) gitlinks.push(tokens[i + 1]);
   if (gitlinks.length) return { applied: false as const, empty: false as const, files, error: `Исполнитель изменил подмодуль: ${gitlinks.join(', ')}. Его не перенести патчем — перенесите вручную.` };
   // A patch that would empty the folder this chat works in (the worker renamed or removed it) is refused before
-  // anything changes: the folder survives if a file on disk stays in it or the patch adds one.
+  // anything changes. Only a patch that deletes something in the folder can empty it; the folder survives if an entry
+  // on disk stays (a file the patch does not delete, a subfolder it does not touch) or the patch adds a file to it.
   if (mine.prefix) {
     const deleted = new Set<string>(), added: string[] = [];
     for (let i = 0; i + 1 < tokens.length; i += 2) {
       if (/ D$/.test(tokens[i])) deleted.add(tokens[i + 1]); else added.push(tokens[i + 1]);
     }
+    const touches = (rel: string) => [...deleted].some(f => f.startsWith(rel));
     const keeps = async (dir: string, rel: string): Promise<boolean> => {
       for (const entry of await readdir(dir, { withFileTypes: true }).catch(() => [])) {
         const r = rel + entry.name;
-        if (entry.isDirectory() && !entry.isSymbolicLink()) { if (await keeps(path.join(dir, entry.name), r + '/')) return true; }
+        if (entry.isDirectory() && !entry.isSymbolicLink()) { if (!touches(r + '/') || await keeps(path.join(dir, entry.name), r + '/')) return true; }
         else if (!deleted.has(r)) return true;
       }
       return false;
     };
-    if (!added.some(f => f.startsWith(mine.prefix)) && !(await keeps(path.resolve(input.root), mine.prefix)))
+    if (touches(mine.prefix) && !added.some(f => f.startsWith(mine.prefix)) && !(await keeps(path.resolve(input.root), mine.prefix)))
       return { applied: false as const, empty: false as const, files,
         error: `Исполнитель переименовал или удалил папку ${mine.prefix}, в которой работает этот чат: перенесите это вручную, после остальных задач.` };
   }
@@ -237,8 +241,13 @@ export async function bringBack(input: { root: string; copy: string }) {
         ? { applied: false as const, empty: false as const, partial: true as const, files: lost, error }
         : { applied: false as const, empty: false as const, files, error };
     };
+    // git apply removes a folder that a deletion leaves empty and makes it again for an added file, with default
+    // permissions. A placeholder file keeps the chat folder itself in place while the patch goes in.
+    const keeper = mine.prefix ? path.join(path.resolve(input.root), `.aif-keep-${randomUUID()}`) : null;
+    if (keeper) await writeFile(keeper, '').catch(() => undefined);
     try { await git(mine.top, ['apply', '--whitespace=nowarn', patch]); }
     catch (cause) { return undo((cause as Error).message); }
+    finally { if (keeper) await removePath(keeper).catch(() => undefined); }
     await writeFile(mark, `${tree}\n`);
     return { applied: true as const, files };
   } finally { await removePath(dir).catch(() => undefined); }
