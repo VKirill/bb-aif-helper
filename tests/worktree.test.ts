@@ -11,6 +11,8 @@ const sandbox = realpathSync(mkdtempSync(path.join(tmpdir(), 'aif-wt-')));
 // os.homedir() reads HOME on POSIX and USERPROFILE on Windows.
 process.env.HOME = process.env.USERPROFILE = path.join(sandbox, 'home');
 const repo = path.join(sandbox, 'repo');
+// Windows runners check out with core.autocrlf=true; the flow must work with it, so text is compared without CR.
+const text = (file: string) => readFileSync(file, 'utf8').replace(/\r\n/g, '\n');
 const git = (...args: string[]) => execFileSync('git', ['-C', repo, ...args], { encoding: 'utf8' }).trim();
 mkdirSync(path.join(repo, 'plugins', 'section'), { recursive: true });
 writeFileSync(path.join(repo, 'plugins', 'section', 'a.txt'), 'A\n');
@@ -23,7 +25,7 @@ test('a section inside a larger repository gets a copy of the repository and its
   // No trailing separator on any OS: git prints the prefix as `plugins/section/`.
   assert.equal(made.path, path.join(made.root, 'plugins', 'section'));
   assert.ok(!/[\\/]$/.test(made.path), made.path);
-  assert.equal(readFileSync(path.join(made.path, 'a.txt'), 'utf8'), 'A\n');
+  assert.equal(text(path.join(made.path, 'a.txt')), 'A\n');
   assert.equal(made.sha, git('rev-parse', 'HEAD'));
   await assert.rejects(createWorktree({ basePath: repo, name: 'plan-1' }), /уже существует/);
   assert.deepEqual(await removeWorktree({ basePath: repo, root: made.root }), { removed: true });
@@ -50,8 +52,8 @@ test('a repository root is copied at the requested commit; foreign folders and b
 
 // Runs step 6 of the parallel instructions exactly as the coordinator reads them: the same commands, in order.
 test('bringing results back: a conflicting patch changes nothing and earlier results survive', async () => {
-  const text = contextBlock({ mode: 'bb', providerId: 'codex', model: 'm', parallel: 2 });
-  const step = text.slice(text.indexOf('\n6. '), text.indexOf('\n7. '));
+  const block = contextBlock({ mode: 'bb', providerId: 'codex', model: 'm', parallel: 2 });
+  const step = block.slice(block.indexOf('\n6. '), block.indexOf('\n7. '));
   const commands = [...step.matchAll(/^ {3}- `(git -C <(?:copy|top)> [^`]+)`$/gm)].map(m => m[1]);
   assert.deepEqual(commands.map(c => c.split(' ').slice(3, 5).join(' ')), ['add -A', 'diff --cached', 'apply --check', 'apply <patch>']);
   const top = path.join(sandbox, 'apply-repo');
@@ -76,7 +78,7 @@ test('bringing results back: a conflicting patch changes nothing and earlier res
     }
   };
   bringBack(one.path, 1);
-  assert.equal(readFileSync(path.join(base, 'a.txt'), 'utf8'), 'one\nTASK1\nthree\n');
+  assert.equal(text(path.join(base, 'a.txt')), 'one\nTASK1\nthree\n');
   assert.deepEqual([...readFileSync(path.join(base, 'logo.bin'))], [0, 255, 1, 254, 0]);
   const snapshot = () => [sh(top, 'status', '--porcelain=v1', '-uall'), sh(top, 'ls-files', '-s'), sh(top, 'diff', '--binary'),
     readFileSync(path.join(base, 'a.txt'), 'utf8'), readFileSync(path.join(base, 'b.txt'), 'utf8')];
