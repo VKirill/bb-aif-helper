@@ -28,6 +28,13 @@ jobs:
           node-version: '24'
           cache: npm
       - run: npm ci --include=dev
+      # Real machines have temp folders and profiles with spaces and non-Latin letters; tests run in one such folder.
+      - name: Use a temp folder with a space and Cyrillic
+        shell: bash
+        run: |
+          dir="$RUNNER_TEMP/aif temp ё"
+          mkdir -p "$dir"
+          { echo "TMPDIR=$dir"; echo "TMP=$dir"; echo "TEMP=$dir"; } >> "$GITHUB_ENV"
       - run: npm run typecheck
       - run: npm test
       # A pinned BB CLI can build a plugin without starting a server.

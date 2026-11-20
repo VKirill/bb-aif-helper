@@ -73,7 +73,8 @@ test('bringing results back: a conflicting patch changes nothing and earlier res
   const bringBack = (copy: string, taskId: number) => {
     const patch = path.join(sandbox, `task-${taskId}.patch`);
     for (const command of commands) {
-      const args = command.replace('<copy>', copy).replace('<top>', top).replace('<patch>', patch).split(' ').slice(1);
+      // Split the template first: a path with a space must stay one argument.
+      const args = command.split(' ').slice(1).map(arg => arg.replace('<copy>', copy).replace('<top>', top).replace('<patch>', patch));
       execFileSync('git', args, { encoding: 'utf8', stdio: 'pipe' });
     }
   };
