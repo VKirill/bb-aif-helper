@@ -18,7 +18,7 @@ export type PlanTask = {
 
 const TASK_LINE = /^\s*- \[([ xX])\] Task (\d+):\s*(.*)$/;
 const COMMIT_MARKER = '<!-- aif:task-kind:commit -->';
-const DEPLOY_PREFIXES = ['выкатка', 'deploy', 'publish', 'release', 'push'];
+const DEPLOY_PREFIXES = ['выкатка', 'выкатить', 'отправить', 'deploy', 'publish', 'release', 'push'];
 const FILES_END = /Depends on|Логи:|Logs:/;
 const FILE_RANGE = /(\d+)\s*[-–]\s*(\d+)/g;
 const FILE_SINGLE = /\d+/g;
@@ -29,7 +29,8 @@ type DependsHint = { ids: number[]; ranges: [number, number][] } | 'none' | null
 
 function parseDependsOn(line: string): DependsHint {
   // The hint is the last occurrence: a task description may mention `Depends on` earlier.
-  const all = [...line.matchAll(/Depends on\s+([^.;`]*)/g)];
+  // AI Factory writes `(depends on 1, 2)` in the task line; hand-written plans use `Depends on: Task 3` below it.
+  const all = [...line.matchAll(/depends on\s*:?\s*([^.;`\n]*)/gi)];
   const m = all[all.length - 1];
   if (!m) return null;
   const cap = m[1].trim();
@@ -63,17 +64,25 @@ function resolveDependsOn(hint: DependsHint, known: ReadonlySet<number>): PlanTa
   return [...ids].sort((x, y) => x - y);
 }
 
-function parseFiles(line: string): string[] | null {
-  // The hint is the last occurrence: a task description may mention `Files:` earlier.
-  const at = line.lastIndexOf('Files:');
+function parseFiles(text: string): string[] | null {
+  // The hint is the last `Files:` line: a task description may mention `Files:` earlier.
+  const at = text.lastIndexOf('Files:');
   if (at === -1) return null;
-  let sub = line.slice(at + 'Files:'.length);
+  let sub = text.slice(at + 'Files:'.length).split('\n')[0];
   const end = sub.search(FILES_END);
   if (end !== -1) sub = sub.slice(0, end);
+  // A note after a file (`(delete)`, `(секция \`name\`)`) is not a file.
+  sub = sub.replace(/\([^()]*\)/g, ' ');
+  const quoted = sub.includes('`');
+  const tokens = quoted ? [...sub.matchAll(FILE_TOKEN)].map(m => m[1])
+    : sub.split(',').map(t => t.trim().replace(/[.;]$/, '')).filter(Boolean);
   const files: string[] = [];
-  for (const m of sub.matchAll(FILE_TOKEN)) {
-    const token = m[1];
+  for (const token of tokens) {
     if (BAD_FILE.test(token)) return null;
+    // Without backticks a word is a file only if it looks like a path (`Files: перечисленные` is not a list).
+    if (!quoted && !/[./\\]/.test(token)) return null;
+    // A path outside the project (`/home/…`, `C:\\…`) is not in the worker's copy: the task runs alone.
+    if (token.startsWith('/') || token.startsWith('\\') || /^[A-Za-z]:/.test(token) || token.startsWith('~')) return null;
     // One spelling per file: `SRC\\a.ts`, `src//a.ts` and `src/x/../a.ts` all name `src/a.ts`.
     let f = path.posix.normalize(token.replace(/\\/g, '/'));
     if (f === '..' || f.startsWith('../')) return null;
@@ -102,31 +111,33 @@ export function parsePlanTasks(text: string): PlanTask[] {
   const hints: DependsHint[] = [];
   let headings = 0;
   let prev = '';
+  // A task is its line plus the indented lines under it (AI Factory puts `Files:` there); a heading, a line that is
+  // not indented or the next task ends it.
+  const bodies: string[] = [];
+  let open = false;
   for (const line of scan) {
     if (!line.trim()) continue;
-    if (line.trimStart().startsWith('### ')) {
-      headings++;
+    const m = TASK_LINE.exec(line);
+    if (m) {
+      const title = m[3];
+      const kind: PlanTaskKind = prev.trim() === COMMIT_MARKER ? 'commit'
+        : DEPLOY_PREFIXES.some(p => title.toLowerCase().startsWith(p)) ? 'deploy' : 'code';
+      tasks.push({ id: Number(m[2]), done: m[1].toLowerCase() === 'x', title, files: null, dependsOn: null,
+        phase: Math.max(1, headings), order: tasks.length, kind });
+      bodies.push(line);
+      open = true;
+    } else if (open && /^\s/.test(line)) {
+      bodies[bodies.length - 1] += `\n${line}`;
     } else {
-      const m = TASK_LINE.exec(line);
-      if (m) {
-        const title = m[3];
-        const kind: PlanTaskKind = prev.trim() === COMMIT_MARKER ? 'commit'
-          : DEPLOY_PREFIXES.some(p => title.toLowerCase().startsWith(p)) ? 'deploy' : 'code';
-        tasks.push({
-          id: Number(m[2]),
-          done: m[1].toLowerCase() === 'x',
-          title,
-          files: parseFiles(line),
-          dependsOn: null,
-          phase: Math.max(1, headings),
-          order: tasks.length,
-          kind,
-        });
-        hints.push(parseDependsOn(line));
-      }
+      open = false;
+      if (line.trimStart().startsWith('### ')) headings++;
     }
     prev = line;
   }
+  tasks.forEach((t, i) => {
+    t.files = parseFiles(bodies[i] ?? '');
+    hints.push(parseDependsOn(bodies[i] ?? ''));
+  });
   const known = new Set(tasks.map(t => t.id));
   tasks.forEach((t, i) => { t.dependsOn = resolveDependsOn(hints[i], known); });
   return tasks;

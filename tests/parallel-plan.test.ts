@@ -167,3 +167,35 @@ test('files that differ only in case or slash direction are one file', () => {
   assert.deepEqual(parsePlanTasks(text)[1].files, ['SRC/foo.ts']);
   assert.deepEqual(parallelGroups(text, 4), { groups: [[1], [2]], coordinatorOnly: [] });
 });
+
+test('the AI Factory plan format: (depends on …) in the task line, Files: on an indented line below, plain or quoted', () => {
+  const plan = [
+    '## Tasks',
+    '### Phase 1',
+    '- [ ] Task 1: Storage',
+    '  - Change the store.',
+    '  - Files: src/store.ts, src/index.ts',
+    '- [ ] Task 2: Pipeline',
+    '    Files: `src/pipeline.ts` (new)',
+    '- [ ] Task 3: Wire it (depends on 1, 2)',
+    '  - Files: `src/server.ts`, `workflows/x.json` (delete)',
+    '- [ ] Task 4: Notes',
+    '  - Files: перечисленные',
+    '- [ ] Task 5: Outside the project',
+    '  - Files: `/home/me/other/file.ts`',
+    '- [ ] Task 6: Hand-written',
+    '  - Files: `src/six.ts`',
+    '  - Depends on: Task 3',
+    '- [ ] Task 7: Отправить релиз в origin (depends on 6)',
+    'Not indented: closes the task. Files: `src/not-a-task-file.ts`',
+  ].join('\n');
+  const t = parsePlanTasks(plan);
+  assert.deepEqual(t.map(x => x.files), [
+    ['src/store.ts', 'src/index.ts'], ['src/pipeline.ts'], ['src/server.ts', 'workflows/x.json'], null, null, ['src/six.ts'], null,
+  ]);
+  assert.deepEqual(t.map(x => x.dependsOn), [null, null, [1, 2], null, null, [3], [6]]);
+  assert.equal(t[6].kind, 'deploy');
+  const groups = parallelGroups(plan, 4);
+  assert.ok(!('error' in groups));
+  assert.deepEqual(groups.groups[0], [1, 2], 'tasks 1 and 2 run together');
+});
