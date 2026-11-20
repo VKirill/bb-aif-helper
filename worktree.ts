@@ -1,6 +1,6 @@
 import { execFile } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { lstat, mkdir, mkdtemp, readdir, rm, rmdir, stat, unlink, writeFile } from 'node:fs/promises';
+import { copyFile, lstat, mkdir, mkdtemp, readdir, rm, rmdir, stat, unlink, writeFile } from 'node:fs/promises';
 import { homedir, tmpdir } from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
@@ -50,6 +50,11 @@ export type CreatedWorktree = { root: string; path: string; sha: string };
 /** In a copy's own git folder: the tree of its last bring-back, or of the coordinator's work it was seeded with. */
 export const BROUGHT_BACK = 'aif-brought-back';
 
+/** A per-worktree ref keeps the baseline tree out of `git gc`: unreachable, it could be pruned while a worker runs. */
+export async function keepTree(copyTop: string, tree: string) {
+  await git(copyTop, ['update-ref', 'refs/worktree/aif-brought-back', tree]).catch(() => '');
+}
+
 /**
  * Gives a fresh copy the coordinator's uncommitted work: changed, new (not ignored) and deleted files, so a worker
  * sees the results of earlier tasks without a commit. The tree is built in a temporary index, so the coordinator's
@@ -61,12 +66,17 @@ async function seed(top: string, root: string, sha: string) {
   const env = { ...process.env, GIT_INDEX_FILE: path.join(dir, 'index') };
   const inTemp = (args: string[]) => run('git', ['-C', top, ...args], { timeout: 120_000, maxBuffer: 4 << 20, env });
   try {
-    await inTemp(['read-tree', sha]);
-    await inTemp(['add', '-A']);
+    if ((await git(top, ['ls-files', '-u'])).length) throw new Error('В рабочей папке не разрешён конфликт слияния: разрешите его до запуска исполнителей');
+    // The temporary index starts as a copy of the coordinator's own: what it staged by hand (a force-added ignored
+    // file, a case-only rename, a removal from the index) is part of its work too.
+    const index = await git(top, ['rev-parse', '--path-format=absolute', '--git-path', 'index']);
+    await copyFile(index, env.GIT_INDEX_FILE).catch(() => inTemp(['read-tree', sha]));
+    await inTemp(['-c', 'core.fsmonitor=false', 'add', '-A']);
     const tree = (await inTemp(['write-tree'])).stdout.trim();
     await git(root, ['read-tree', '-m', '-u', sha, tree]);
     await git(root, ['reset', '-q']);
     await writeFile(await git(root, ['rev-parse', '--path-format=absolute', '--git-path', BROUGHT_BACK]), `${tree}\n`);
+    await keepTree(root, tree);
   } finally { await removePath(dir).catch(() => undefined); }
 }
 

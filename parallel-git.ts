@@ -3,7 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { chmod, lstat, mkdir, mkdtemp, readdir, readFile, readlink, stat, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { BROUGHT_BACK, removePath, worktreesRoot } from './worktree.ts';
+import { BROUGHT_BACK, keepTree, removePath, worktreesRoot } from './worktree.ts';
 
 // Git steps of parallel /aif-implement that the coordinator used to type by hand. Paths never pass through a shell or
 // an agent's copy and paste: git prints them NUL-separated and reads them back NUL-separated, so spaces, Cyrillic,
@@ -81,12 +81,20 @@ export async function bringBack(input: { root: string; copy: string }) {
   const mark = line(await git(theirs.top, ['rev-parse', '--path-format=absolute', '--git-path', BROUGHT_BACK]));
   const last = (await readFile(mark, 'utf8').catch(() => '')).trim();
   const base = /^[0-9a-f]{40,64}$/.test(last) && await git(theirs.top, ['cat-file', '-e', `${last}^{tree}`]).then(() => true, () => false) ? last : 'HEAD';
-  await git(theirs.top, ['add', '-A']);
-  const tree = line(await git(theirs.top, ['write-tree']));
-  const files = (await git(theirs.top, ['diff', '--cached', '--name-only', '-z', '--no-relative', '--no-renames', '--ignore-submodules=none', base])).split('\0').filter(Boolean);
+  // The worker's state is staged in a temporary index that starts from the base tree: a file of the base stays
+  // tracked even if the worker's .gitignore now matches it, and a submodule the copy never checked out keeps the
+  // base's commit, so neither reads as a change of the worker. The copy's own index is not touched.
+  const dir = await mkdtemp(path.join(tmpdir(), 'aif-patch-'));
+  try {
+  const env = { GIT_INDEX_FILE: path.join(dir, 'index') };
+  const inCopy = (args: string[]) => git(theirs.top, args, undefined, env);
+  await inCopy(['read-tree', base]);
+  await inCopy(['add', '-A']);
+  const tree = line(await inCopy(['write-tree']));
+  const files = (await inCopy(['diff', '--cached', '--name-only', '-z', '--no-relative', '--no-renames', '--ignore-submodules=none', base])).split('\0').filter(Boolean);
   if (!files.length) return { applied: false as const, empty: true as const, files };
   // `git apply` without --index cannot move a submodule: say so instead of reporting a transfer that did not happen.
-  const raw = await git(theirs.top, ['diff', '--cached', '--raw', '-z', '--no-renames', '--no-abbrev', '--ignore-submodules=none', base]);
+  const raw = await inCopy(['diff', '--cached', '--raw', '-z', '--no-renames', '--no-abbrev', '--ignore-submodules=none', base]);
   const tokens = raw.split('\0'), gitlinks: string[] = [];
   for (let i = 0; i + 1 < tokens.length; i += 2) if (/^:(160000 \S+|\S+ 160000) /.test(tokens[i])) gitlinks.push(tokens[i + 1]);
   if (gitlinks.length) return { applied: false as const, empty: false as const, files, error: `Исполнитель изменил подмодуль: ${gitlinks.join(', ')}. Его не перенести патчем — перенесите вручную.` };
@@ -113,10 +121,9 @@ export async function bringBack(input: { root: string; copy: string }) {
   }
   // The receipt is written after the apply; a copy where it cannot be written is refused before anything changes.
   await writeFile(mark, last ? `${last}\n` : '').catch((cause: Error) => { throw new Error(`Копия исполнителя недоступна для записи: ${cause.message}`); });
-  const dir = await mkdtemp(path.join(tmpdir(), 'aif-patch-'));
   const patch = path.join(dir, `${randomUUID()}.patch`);
-  try {
-    await git(theirs.top, [...DIFF, base, `--output=${patch}`]);
+  {
+    await inCopy([...DIFF, base, `--output=${patch}`]);
     try { await git(mine.top, ['apply', '--check', '--whitespace=nowarn', patch]); }
     catch (cause) { return { applied: false as const, empty: false as const, files, error: (cause as Error).message }; }
     const saved = await Promise.all(files.map(f => save(mine.top, f)));
@@ -135,7 +142,9 @@ export async function bringBack(input: { root: string; copy: string }) {
     catch (cause) { return undo((cause as Error).message); }
     if (folder) await chmod(path.resolve(input.root), folder.mode & 0o7777).catch(() => undefined);
     await writeFile(mark, `${tree}\n`);
+    await keepTree(theirs.top, tree);
     return { applied: true as const, files };
+  }
   } finally { await removePath(dir).catch(() => undefined); }
 }
 

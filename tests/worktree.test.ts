@@ -421,3 +421,30 @@ test('a seeded copy works for a section that exists only as uncommitted files; w
   assert.equal(text(path.join(copy.path, 'a.txt')), 'a\n');
   await removeWorktree({ basePath: base, root: copy.root });
 });
+
+test('review of e497ba0: an ignore rule, a force-added file, a submodule the copy never checked out, and gc', async () => {
+  const top = path.join(sandbox, 'seed-review');
+  const sh = (cwd: string, ...args: string[]) => execFileSync('git', ['-C', cwd, '-c', 'user.email=t@t', '-c', 'user.name=t', '-c', 'protocol.file.allow=always', ...args], { encoding: 'utf8' }).trim();
+  const lib = path.join(sandbox, 'seed-review-lib');
+  mkdirSync(lib, { recursive: true }); writeFileSync(path.join(lib, 'l.txt'), 'A\n');
+  sh(lib, 'init', '-q'); sh(lib, 'add', '-A'); sh(lib, 'commit', '-qm', 'A');
+  writeFileSync(path.join(lib, 'l.txt'), 'B\n'); sh(lib, 'commit', '-qam', 'B');
+  mkdirSync(top, { recursive: true });
+  writeFileSync(path.join(top, '.gitignore'), '*.env\n');
+  sh(top, 'init', '-q'); sh(top, 'submodule', 'add', '-q', lib, 'lib'); sh(path.join(top, 'lib'), 'checkout', '-q', 'HEAD~1');
+  sh(top, 'add', '-A'); sh(top, 'commit', '-qm', 'init');
+  // Coordinator's work: an untracked file, a force-added ignored file, a submodule moved without a commit.
+  writeFileSync(path.join(top, 'local.txt'), 'mine\n');
+  writeFileSync(path.join(top, 'config.env'), 'KEY=1\n'); sh(top, 'add', '-f', 'config.env');
+  sh(path.join(top, 'lib'), 'checkout', '-q', 'master');
+  const copy = await createWorktree({ basePath: top, name: 'seed-review-1', seed: true });
+  assert.equal(text(path.join(copy.path, 'config.env')), 'KEY=1\n', 'a force-added file is part of the work');
+  // The worker ignores the coordinator's file and adds its own: only its own file comes back.
+  writeFileSync(path.join(copy.path, '.gitignore'), '*.env\nlocal.txt\n');
+  writeFileSync(path.join(copy.path, 'worker.txt'), 'w\n');
+  sh(copy.root, 'gc', '-q', '--prune=now');
+  const back = await bringBack({ root: top, copy: copy.path });
+  assert.deepEqual([back.error, back.applied, [...back.files].sort()], [undefined, true, ['.gitignore', 'worker.txt']]);
+  assert.equal(text(path.join(top, 'local.txt')), 'mine\n', 'the coordinator\'s file survives');
+  await removeWorktree({ basePath: top, root: copy.root });
+});
