@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, realpathSync, renameSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, realpathSync, renameSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { createWorktree, removeWorktree, worktreesRoot } from '../worktree.ts';
@@ -74,6 +74,16 @@ test('a copy survives a failing checkout hook cleanly, and is removed even after
   renameSync(path.join(odd, 'sec'), path.join(odd, 'sec-renamed'));
   await removeWorktree({ basePath: path.join(odd, 'sec'), root: made.root });
   assert.equal(existsSync(made.root), false);
+  sh(odd, 'add', '-A'); sh(odd, 'commit', '-qm', 'rename');
+  // Two launches with one name: exactly one copy, and the losing launch does not remove the winner's.
+  const results = await Promise.allSettled([1, 2].map(() => createWorktree({ basePath: path.join(odd, 'sec-renamed'), name: 'race' })));
+  const won = results.filter(r => r.status === 'fulfilled') as PromiseFulfilledResult<{ root: string; path: string }>[];
+  assert.equal(won.length, 1, JSON.stringify(results.map(r => r.status === "rejected" ? String(r.reason) : "ok")));
+  assert.equal(existsSync(path.join(won[0].value.path, 'a.txt')), true);
+  // A copy deleted without git, while its base folder was renamed, does not block the next launch with that name.
+  rmSync(won[0].value.root, { recursive: true, force: true });
+  const again = await createWorktree({ basePath: path.join(odd, 'sec-renamed'), name: 'race' });
+  await removeWorktree({ basePath: path.join(odd, 'sec-renamed'), root: again.root });
 });
 
 // Runs step 6 of the parallel instructions exactly as the coordinator reads them: the same commands, in order.
@@ -91,7 +101,7 @@ test('bringing results back: a conflicting patch changes nothing and earlier res
   writeFileSync(path.join(top, 'sec', 'b.txt'), 'b\n');
   // Same contents at the root: with diff.relative a patch made in `sec/` would name the root file instead.
   writeFileSync(path.join(top, 'a.txt'), 'one\ntwo\nthree\n');
-  sh(top, 'init', '-q'); sh(top, 'config', 'diff.relative', 'true'); sh(top, 'add', '-A'); sh(top, 'commit', '-qm', 'init');
+  sh(top, 'init', '-q'); sh(top, 'config', 'diff.relative', 'true'); sh(top, 'config', 'diff.noprefix', 'true'); sh(top, 'add', '-A'); sh(top, 'commit', '-qm', 'init');
   const base = path.join(top, 'sec');
   const sha = sh(top, 'rev-parse', 'HEAD');
   const [one, two] = [await createWorktree({ basePath: base, name: 'apply-1', ref: sha }), await createWorktree({ basePath: base, name: 'apply-2', ref: sha })];

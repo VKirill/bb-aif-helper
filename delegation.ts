@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { RESEARCH_ROLES } from './model.ts';
@@ -100,14 +101,18 @@ export async function readDelegation(root: string): Promise<DelegationState> {
  * block that differs from what this version generates. Text outside the markers is never touched.
  */
 async function refreshImplementBlocks(root: string, choice: Extract<DelegationChoice, { mode: 'bb' }>) {
-  const contextFile = join(root, CONTEXT_PATH);
-  const context = await readText(contextFile);
-  const nextContext = mergeContextBlock(context, contextBlock(choice));
-  if (nextContext !== context) await writeAtomic(contextFile, nextContext);
-  const planFile = join(root, PLAN_CONTEXT_PATH);
-  const planText = await readText(planFile);
-  const nextPlan = mergeContextBlock(planText, choice.parallel ? planRuleBlock() : null, PLAN_START, PLAN_END);
-  if (nextPlan !== planText) { if (nextPlan) await writeAtomic(planFile, nextPlan); else await rm(planFile, { force: true }); }
+  await replaceBetweenMarkers(join(root, CONTEXT_PATH), contextBlock(choice), START, END);
+  if (choice.parallel) await replaceBetweenMarkers(join(root, PLAN_CONTEXT_PATH), planRuleBlock(), PLAN_START, PLAN_END);
+}
+
+/** Only the text between existing markers changes: a BOM, indentation and everything else of the owner stay byte for byte. */
+async function replaceBetweenMarkers(file: string, block: string, start_: string, end_: string) {
+  const text = await readText(file);
+  const start = text.indexOf(start_);
+  const end = text.indexOf(end_, start);
+  if (start < 0 || end < 0) return;
+  const next = `${text.slice(0, start)}${start_}\n${block.trim()}\n${text.slice(end)}`;
+  if (next !== text) await writeAtomic(file, next);
 }
 
 async function readImplement(root: string): Promise<Omit<DelegationState, ResearchRole>> {
@@ -127,7 +132,7 @@ async function readImplement(root: string): Promise<Omit<DelegationState, Resear
 
 async function writeAtomic(path: string, content: string) {
   await mkdir(dirname(path), { recursive: true });
-  const tmp = `${path}.${process.pid}.${Date.now()}.tmp`;
+  const tmp = `${path}.${process.pid}.${randomUUID()}.tmp`;
   await writeFile(tmp, content, 'utf8');
   await rename(tmp, path);
 }
@@ -187,7 +192,7 @@ Finish with a concise structured report: the relevant files and symbols with pat
 2. Spawn all research workers at once — they only read, so they may run in parallel — with that worker's spawn flags, and take each thread id from the JSON answer:
 
 \`\`\`bash
-bb thread spawn --project "$BB_PROJECT_ID" --environment "$BB_ENVIRONMENT_ID" --parent-self --lifecycle-owner-thread "$BB_THREAD_ID" --parent-notifications off <spawn flags> --title 'AIF research · <skill> · <topic>' --prompt-file <prompt> --json
+bb thread spawn --project "$BB_PROJECT_ID" --environment "$BB_ENVIRONMENT_ID" --parent-self --lifecycle-owner-thread "$BB_THREAD_ID" --parent-notifications off <spawn flags> --title 'AIF research · <skill> · <topic>' --prompt-file "<prompt>" --json
 \`\`\`
 
 3. Wait for each: \`bb thread wait <id> --status idle --timeout 8m\`, repeating while it still works. The report is \`bb thread output <id>\`.
@@ -203,18 +208,18 @@ The owner allowed up to ${n} workers at once. Run independent plan tasks in para
 
 1. Get the groups: \`bb plugin run aif-chat groups --target <plan path> --max ${n} --json\`. It answers \`{ groups, coordinatorOnly }\` — groups of task ids in execution order — or \`{ error }\`. On \`error\`, or for a fix plan, ultra bundle or OpenSpec change, use the one-worker flow above. Tasks in \`coordinatorOnly\` (commit and deploy tasks) you do yourself, as the plan says. A group with one task also uses the one-worker flow.
 2. Before each group with two or more tasks, \`git status --porcelain\` must show only your own changes from earlier tasks of this plan. If it shows changes you did not make, stop and ask the owner; never commit them.
-3. Checkpoint: if there are changes from earlier tasks, commit exactly those files locally (no push): \`git add -- <files>\`, then \`git commit -m 'chore(aif): <plan> · before group N' -- <files>\`. Never \`git commit -a\`: it would also take a file someone changed after step 2. The copies are built from a commit and would not see uncommitted work.
-4. For each task of the group spawn its worker on a fresh copy that BB makes from that commit (\`<base>\` = this workspace folder as an absolute path; \`<sha>\` = \`git rev-parse HEAD\`). \`<base>\` goes inside a JSON string: write it with forward slashes (\`C:/Users/me/repo\`, \`//server/share/repo\`), never with backslashes, and escape a \`"\` as \`\\"\`. The folder may be a section inside a larger repository: the copy is of the whole repository, and the worker starts in the same subfolder.
+3. Checkpoint: if there are changes from earlier tasks, commit exactly those files locally (no push): \`git --literal-pathspecs add -- <files>\`, then \`git --literal-pathspecs commit -m 'chore(aif): <plan> · before group N' -- <files>\` (\`--literal-pathspecs\`: a name like \`todo[1].txt\` is a file, not a pattern that also matches \`todo1.txt\`). Never \`git commit -a\`: it would also take a file someone changed after step 2. The copies are built from a commit and would not see uncommitted work.
+4. For each task of the group spawn its worker on a fresh copy that BB makes from that commit (\`<base>\` = this workspace folder as an absolute path; \`<sha>\` = \`git rev-parse HEAD\`). \`<base>\` goes inside a JSON string: write it with forward slashes (\`C:/Users/me/repo\`, \`//server/share/repo\`), never with backslashes, and escape a \`"\` as \`\\"\`; the JSON is in single quotes, so a \`'\` in the path is written as \`'\\''\`. Quote \`<brief>\` too: \`--prompt-file "<brief>"\`. The folder may be a section inside a larger repository: the copy is of the whole repository, and the worker starts in the same subfolder.
 
 \`\`\`bash
-bb thread spawn --project "$BB_PROJECT_ID" --environment-provider aif-chat-worktree --environment-inputs '{"basePath":"<base>","name":"<plan>-<taskId>","ref":"<sha>"}' --parent-self --lifecycle-owner-thread "$BB_THREAD_ID" --parent-notifications off ${flags} --title 'AIF · <plan> · <taskId>' --prompt-file <brief> --json
+bb thread spawn --project "$BB_PROJECT_ID" --environment-provider aif-chat-worktree --environment-inputs '{"basePath":"<base>","name":"<plan>-<taskId>","ref":"<sha>"}' --parent-self --lifecycle-owner-thread "$BB_THREAD_ID" --parent-notifications off ${flags} --title 'AIF · <plan> · <taskId>' --prompt-file "<brief>" --json
 \`\`\`
 
    Add to each brief, after the worker rules: "You work in your own copy of the project: the folder BB opened this thread in. Before any change run \`git rev-parse --show-toplevel\`; if it fails, \`cd\` into that folder first. If dependencies are missing, install them first (\`<install command from the project's command catalog>\`). Do not commit."
 5. Wait for all workers of the group (step 4 of the one-worker flow for each id).
-6. Bring the results back one worker at a time. \`<copy>\` is \`environment.path\` from \`bb thread show <id> --json\`; \`<top>\` is \`git rev-parse --show-toplevel\` of this workspace; \`<patch>\` is the absolute path of a new file in your temporary folder, such as \`<tmp>/task-<taskId>.patch\` (\`-C\` changes the folder, so a relative path would point elsewhere). Run exactly these commands, in this order, each as its own command, keeping the double quotes around every path (paths may contain spaces). git writes the patch itself, so no shell redirection changes its encoding, and the diff flags keep the project's git settings (\`diff.relative\`, external diff tools, text conversion) out of the patch:
+6. Bring the results back one worker at a time. \`<copy>\` is \`environment.path\` from \`bb thread show <id> --json\`; \`<top>\` is \`git rev-parse --show-toplevel\` of this workspace; \`<patch>\` is the absolute path of a new file in your temporary folder, such as \`<tmp>/task-<taskId>.patch\` (\`-C\` changes the folder, so a relative path would point elsewhere). Run exactly these commands, in this order, each as its own command, keeping the double quotes around every path (paths may contain spaces). git writes the patch itself, so no shell redirection changes its encoding, and the diff flags keep the project's git settings (\`diff.relative\`, \`diff.noprefix\`, external diff tools, text conversion) out of the patch:
    - \`git -C "<copy>" add -A\`
-   - \`git -C "<copy>" diff --cached --binary --no-relative --no-ext-diff --no-textconv HEAD --output="<patch>"\`
+   - \`git -C "<copy>" diff --cached --binary --no-relative --no-ext-diff --no-textconv --src-prefix=a/ --dst-prefix=b/ HEAD --output="<patch>"\`
    - \`git -C "<top>" apply --check "<patch>"\`
    - \`git -C "<top>" apply "<patch>"\`
 
@@ -256,7 +261,7 @@ Run the verification commands the task names. Finish with a short report: what c
 3. Spawn the worker and take the thread id from the JSON answer:
 
 \`\`\`bash
-bb thread spawn --project "$BB_PROJECT_ID" --environment "$BB_ENVIRONMENT_ID" --parent-self --lifecycle-owner-thread "$BB_THREAD_ID" --parent-notifications off ${flags} --title 'AIF · <plan> · <taskId>' --prompt-file <brief> --json
+bb thread spawn --project "$BB_PROJECT_ID" --environment "$BB_ENVIRONMENT_ID" --parent-self --lifecycle-owner-thread "$BB_THREAD_ID" --parent-notifications off ${flags} --title 'AIF · <plan> · <taskId>' --prompt-file "<brief>" --json
 \`\`\`
 
 4. Wait: \`bb thread wait <id> --status idle --timeout 8m\`, repeating while the thread still works. The report is \`bb thread output <id>\`.

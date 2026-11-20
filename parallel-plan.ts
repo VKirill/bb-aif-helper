@@ -52,6 +52,8 @@ function resolveDependsOn(hint: DependsHint, taskIds: number[]): PlanTask['depen
     // Walks up only while the ids exist and stops at the first gap, which stays in the list and fails the
     // reference check: `1-999999999` costs no more than the plan is long, and `1-3` without task 2 is an error.
     const lo = Math.min(a, b), hi = Math.max(a, b);
+    // Above 2^53 `id++` stops changing the number; parallelGroups rejects such ids anyway.
+    if (!Number.isSafeInteger(lo) || !Number.isSafeInteger(hi)) continue;
     for (let id = lo; id <= hi; id++) {
       ids.add(id);
       if (!known.has(id)) break;
@@ -71,7 +73,7 @@ function parseFiles(line: string): string[] | null {
   for (const m of sub.matchAll(FILE_TOKEN)) {
     const token = m[1];
     if (BAD_FILE.test(token)) return null;
-    let f = token.replace(/\\/g, '/');
+    let f = token.replace(/\\/g, '/').replace(/\/{2,}/g, '/');
     if (f.startsWith('./')) f = f.slice(2);
     if (f.endsWith('/')) f = f.slice(0, -1);
     files.push(f);

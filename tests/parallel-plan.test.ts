@@ -146,10 +146,14 @@ test('Depends on ranges expand over the plan tasks only, so a huge range is chea
   assert.deepEqual(parallelGroups(plan('1-999999999999'), 4), { error: 'Задача 7 зависит от несуществующей задачи 3.' });
   assert.ok(Date.now() - started < 1000, 'ranges stop at the first gap instead of counting to the end');
   assert.deepEqual(parallelGroups(plan('9007199254740993-9007199254740993'), 4), { error: 'Слишком большой номер задачи: 9007199254740992.' });
+  // A task id above 2^53 inside a range used to spin forever: `id++` no longer changes such a number.
+  const unsafe = ['## Tasks', '- [ ] Task 9007199254740992: A. Files: `a.ts`. Depends on 9007199254740992-9007199254740992'].join('\n');
+  assert.deepEqual(parallelGroups(unsafe, 4), { error: 'Слишком большой номер задачи: 9007199254740992.' });
 });
 
 test('files that differ only in case or slash direction are one file', () => {
   assert.equal(filesOverlap(['src/Foo.ts'], ['SRC/foo.ts']), true);
+  assert.deepEqual(parsePlanTasks('- [ ] Task 1: A. Files: `src//a.ts`.')[0].files, ['src/a.ts']);
   const text = ['## Tasks', '- [ ] Task 1: A. Files: `src/Foo.ts`. Depends on —', '- [ ] Task 2: B. Files: `SRC\\foo.ts`. Depends on —'].join('\n');
   assert.deepEqual(parsePlanTasks(text)[1].files, ['SRC/foo.ts']);
   assert.deepEqual(parallelGroups(text, 4), { groups: [[1], [2]], coordinatorOnly: [] });

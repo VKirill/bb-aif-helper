@@ -44,8 +44,8 @@ test('contextBlock with parallel spawns workers on BB-made copies and keeps prov
   for (const part of [
     'Parallel mode', '--max 3', '--environment-provider aif-chat-worktree', '"basePath":"<base>"', '"ref":"<sha>"', 'git rev-parse HEAD',
     'environment.path', 'git rev-parse --show-toplevel', 'BB removes its copy',
-    'git status --porcelain', 'git -C "<top>" apply --check "<patch>"', '--output="<patch>"', '--no-relative', 'C:/Users/me/repo',
-    "git commit -m 'chore(aif): <plan> · before group N' -- <files>", 'there is nothing to undo',
+    'git status --porcelain', 'git -C "<top>" apply --check "<patch>"', '--output="<patch>"', '--no-relative', '--src-prefix=a/ --dst-prefix=b/', '--literal-pathspecs', '--prompt-file "<brief>"', 'C:/Users/me/repo',
+    "git --literal-pathspecs commit -m 'chore(aif): <plan> · before group N' -- <files>", 'there is nothing to undo',
     "--provider 'codex'", "--model 'gpt-6.2-sol'", "--reasoning-level 'high'", "--service-tier 'fast'",
     'bb plugin run aif-chat groups', 'Do not commit',
     'stop and ask the owner; never commit them',
@@ -134,13 +134,13 @@ test('a block saved by an older version is rewritten on read; the owner text and
   const file = join(root, CONTEXT_PATH);
   const current = await readFile(file, 'utf8');
   // What a project saved before the update holds: the three-way apply that can leave an unmerged index.
-  const stale = '# Owner notes\n\n' + current.replace('git -C "<top>" apply --check "<patch>"', 'git apply --3way <tmp>/task-<taskId>.patch');
+  const stale = '\uFEFF    indented owner code\n# Owner notes\n\n' + current.replace('git -C "<top>" apply --check "<patch>"', 'git apply --3way <tmp>/task-<taskId>.patch');
   await writeFile(file, stale);
   await readDelegation(root);
   const refreshed = await readFile(file, 'utf8');
   assert.ok(!refreshed.includes('--3way <tmp>'), 'the old command is gone');
   assert.ok(refreshed.includes('git -C "<top>" apply --check "<patch>"'));
-  assert.ok(refreshed.startsWith('# Owner notes\n'), 'text outside the markers is kept');
+  assert.ok(refreshed.startsWith('\uFEFF    indented owner code\n# Owner notes\n'), 'text outside the markers is kept byte for byte');
   const again = await readFile(file, 'utf8');
   await readDelegation(root);
   assert.equal(await readFile(file, 'utf8'), again, 'a current block is not rewritten');

@@ -30,8 +30,14 @@ export async function createWorktree(input: { basePath: string; name: string; re
   const sha = await git(top, ['rev-parse', '--verify', `${input.ref || 'HEAD'}^{commit}`]);
   const repoKey = `${path.basename(top)}-${createHash('sha256').update(top).digest('hex').slice(0, 8)}`;
   const root = path.join(worktreesRoot(), repoKey, input.name);
-  if (await exists(root)) throw new Error(`Копия ${root} уже существует`);
   await mkdir(path.dirname(root), { recursive: true });
+  // mkdir without `recursive` claims the name atomically: of two launches with one name only one gets past here,
+  // so the cleanup below never removes a copy another launch made.
+  await mkdir(root).catch((cause: NodeJS.ErrnoException) => {
+    throw cause.code === 'EEXIST' ? new Error(`Копия ${root} уже существует`) : cause;
+  });
+  // A copy deleted earlier without git may still be registered and would block `worktree add` for this name.
+  await git(top, ['worktree', 'prune']).catch(() => '');
   // A copy that fails after git registered it (a post-checkout hook, a full disk, a missing section) is removed:
   // nothing else would ever remove it, and the next try with the same name would say it already exists.
   const discard = async () => {
@@ -44,7 +50,7 @@ export async function createWorktree(input: { basePath: string; name: string; re
   } catch (cause) { await discard(); throw cause; }
   // git prints the prefix with `/` and a trailing slash; resolve gives the machine's own separators without it.
   const worker = path.resolve(root, prefix);
-  if (!(await exists(worker))) {
+  if (!(await stat(worker).then(s => s.isDirectory(), () => false))) {
     await discard();
     throw new Error(`Папки ${prefix} нет в коммите ${sha.slice(0, 12)}: закоммитьте раздел перед запуском исполнителей`);
   }
@@ -64,7 +70,13 @@ export async function removeWorktree(input: { basePath: string; root: string }):
   // The copy names its main repository, so a renamed or deleted base folder does not leak it. The removing git runs
   // with --git-dir, not inside the copy: on Windows a git whose folder is the copy cannot delete it (Permission denied).
   const common = await git(root, ['rev-parse', '--path-format=absolute', '--git-common-dir']).catch(() => null);
-  if (common) await run('git', ['--git-dir', common, 'worktree', 'remove', '--force', root], { timeout: 120_000 });
-  else await git(input.basePath, ['worktree', 'remove', '--force', root]);
+  if (common) {
+    await run('git', ['--git-dir', common, 'worktree', 'remove', '--force', root], { timeout: 120_000 }).catch(async cause => {
+      // git may drop the registration and fail on a file it cannot delete; a later retry would get
+      // "is not a working tree". Once git no longer knows the folder, it is ours to delete.
+      if (await git(root, ['rev-parse', '--git-dir']).then(() => true, () => false)) throw cause;
+    });
+  } else await git(input.basePath, ['worktree', 'remove', '--force', root]).catch(() => '');
+  await rm(root, { recursive: true, force: true });
   return { removed: true };
 }

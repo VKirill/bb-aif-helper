@@ -164,6 +164,10 @@ test('isCommandDraft detects leading / and $ commands and ignores the pill', () 
   assert.equal(isCommandDraft({ text: '@AI Factory /aif-plan', mentions: [pill] }), true);
   assert.equal(isCommandDraft({ text: '@AI Factory', mentions: [pill] }), false);
   assert.equal(isCommandDraft({ text: '', mentions: [] }), false);
+  // Paths and prices are plain text: a typed @AI Factory stays in them.
+  assert.equal(isCommandDraft({ text: '/tmp/build.log failed', mentions: [] }), false);
+  assert.equal(isCommandDraft({ text: '$20 is the budget', mentions: [] }), false);
+  assert.equal(isCommandDraft({ text: '/aif-verify', mentions: [] }), true);
 });
 test('chipDraft drops the AI Factory pill: a draft holding only it counts as empty', () => {
   const pill = { from: 0, to: 10, kind: 'plugin', provider: 'aif-mode', id: 'aif-mode' };
