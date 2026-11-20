@@ -31,7 +31,8 @@ export async function createWorktree(input: { basePath: string; name: string; re
   const top = await git(input.basePath, ['rev-parse', '--show-toplevel']).catch(() => {
     throw new Error(`${input.basePath} не в git-репозитории`);
   });
-  const prefix = await git(input.basePath, ['rev-parse', '--show-prefix']);
+  // `git` trims its answer; a section name may start with a space, so the prefix is read untrimmed.
+  const prefix = (await run('git', ['-C', input.basePath, 'rev-parse', '--show-prefix'], { timeout: 120_000 })).stdout.replace(/\r?\n$/, '');
   const sha = await git(top, ['rev-parse', '--verify', `${input.ref || 'HEAD'}^{commit}`]);
   const repoKey = `${path.basename(top)}-${createHash('sha256').update(top).digest('hex').slice(0, 8)}`;
   const root = path.join(worktreesRoot(), repoKey, input.name);

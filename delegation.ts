@@ -26,6 +26,16 @@ const PLAN_END = '<!-- bb-aif-helper:plan:end -->';
 export const RESEARCH_PATH = '.ai-factory/skill-context/global-skill-context.md';
 const RESEARCH_START = '<!-- bb-aif-helper:research:start -->';
 const RESEARCH_END = '<!-- bb-aif-helper:research:end -->';
+const MARKERS: [string, string][] = [[START, END], [PLAN_START, PLAN_END], [RESEARCH_START, RESEARCH_END]];
+/** The text with every managed block emptied: two versions that differ only inside the plugin's blocks become equal. */
+export function withoutManagedBlocks(text: string): string {
+  let out = text.replace(/\r\n/g, '\n');
+  for (const [a, b] of MARKERS) {
+    const i = out.indexOf(a), j = out.indexOf(b, i);
+    if (i >= 0 && j >= 0) out = out.slice(0, i + a.length) + out.slice(j);
+  }
+  return out;
+}
 const RESEARCH_MARK: Record<ResearchRole, string> = { research: 'research-model', research2: 'research-model-2', research3: 'research-model-3' };
 const AGENT = 'bb';
 const TIMEOUT_MS = 4 * 60 * 60 * 1000;
@@ -217,6 +227,8 @@ Investigate the current workspace and answer the question below. Do not create, 
 Finish with a concise structured report: the relevant files and symbols with paths, the patterns and integration points you found, and open questions. No full file contents.
 \`\`\`
 
+Write each prompt file in UTF-8 (in Windows PowerShell 5.1 use \`Set-Content -Encoding utf8\`, not \`Out-File\` or \`>\`).
+
 2. Spawn all research workers at once — they only read, so they may run in parallel — with that worker's spawn flags, and take each thread id from the JSON answer:
 
 \`\`\`bash
@@ -238,7 +250,7 @@ The owner allowed up to ${n} workers at once. Run independent plan tasks in para
 2. Checkpoint before each group with two or more tasks: \`bb plugin run aif-chat checkpoint --target "<plan path>" --group <N> --json\`. It lists every changed file of the repository (\`{ files: [{ status, path }], plugin, token }\`; the whole repository, because a task may change a file above this folder, such as a root lockfile). \`plugin\` lists BB AIF Helper's own instruction files in \`.ai-factory/skill-context/\`: they are never committed here and need no decision. If every listed file is your own change from earlier tasks of this plan, run it again with \`--token <token>\`: the plugin commits exactly those files locally (no push) and refuses if anything changed since the list — then list again. If a file is not yours, stop and ask the owner; never commit it. The copies are built from the last commit and would not see uncommitted work.
 3. For each task of the group write its brief to a temporary file (as in step 1 of the one-worker flow) and start its worker: \`bb plugin run aif-chat spawn-worker --target "<plan path>" --task <taskId> --brief "<absolute brief path>" --json\`. It answers \`{ id }\`. The plugin starts the worker with the owner's model on a fresh copy of the project made from the checkpoint commit, as a child of this chat; the folder may be a section inside a larger repository (the copy is of the whole repository, the worker starts in the same subfolder). A retry is the same command: every launch gets its own copy.
 4. Wait for all workers of the group (step 4 of the one-worker flow for each id).
-5. Bring the results back one worker at a time: \`bb plugin run aif-chat bring-back --worker <id> --json\`. It moves everything the worker changed (new, changed, renamed and deleted files; ignored files such as \`node_modules\` stay out) into this workspace and answers \`{ applied: true, files }\`. \`{ applied: false, empty: true }\`: the worker changed nothing — treat the task as not done. \`{ applied: false, error }\`: the changes do not fit and nothing was changed, the results of earlier tasks are intact; apply nothing more for this group, do not run \`git apply\`, \`git checkout\`, \`git reset\` or \`git stash\` yourself — there is nothing to undo. Stop and report the task and the error to the owner. \`{ applied: false, partial: true, error }\`: writing stopped half way (a locked or read-only file); report it, and once the cause is fixed run the same \`bring-back\` again — files already brought back are skipped. After a successful bring-back, review the diff and run that task's verification as in step 5 of the one-worker flow.
+5. Bring the results back one worker at a time: \`bb plugin run aif-chat bring-back --worker <id> --json\`. It moves everything the worker changed (new, changed, renamed and deleted files; ignored files such as \`node_modules\` stay out) into this workspace and answers \`{ applied: true, files }\`. \`{ applied: false, empty: true }\`: the worker changed nothing — treat the task as not done. \`{ applied: false, error }\`: the changes do not fit and nothing was changed, the results of earlier tasks are intact; apply nothing more for this group, do not run \`git apply\`, \`git checkout\`, \`git reset\` or \`git stash\` yourself — there is nothing to undo. Stop and report the task and the error to the owner. If writing fails half way (a locked or read-only file), the plugin puts back what it already wrote and answers \`{ applied: false, error }\` too; once the cause is fixed, run the same \`bring-back\` again. \`{ applied: false, partial: true, files, error }\`: those files could not be put back — stop and report them to the owner. \`bring-back\` takes only what the worker changed since its last bring-back, so a worker asked to fix its work is brought back again with just the fix. After a successful bring-back, review the diff and run that task's verification as in step 5 of the one-worker flow.
 6. Mark each task done only after its changes are brought back and verified. Then archive its worker (\`bb thread archive <id>\`); BB removes its copy five minutes later.
 7. Continue with the next group. The final commits stay as the plan describes; the local checkpoint commits are part of them and are never pushed without the owner's approval.
 
@@ -262,7 +274,7 @@ The project owner chose \`${modelSpec(c)}\` (BB provider/model?reasoning&tier) t
 
 You stay the coordinator: you own the plan, its checkboxes, verification and commits. For each plan task, instead of editing the code yourself:
 
-1. Write the task brief to a temporary file. It starts with the worker rules below, then gives the plan path, the task id and its full text, the relevant files and project rules, the verification commands, and what done means for this task.
+1. Write the task brief to a temporary file in UTF-8 (in Windows PowerShell 5.1 \`Out-File\` and \`>\` write UTF-16: use \`Set-Content -Encoding utf8\` there). It starts with the worker rules below, then gives the plan path, the task id and its full text, the relevant files and project rules, the verification commands, and what done means for this task.
 
 The worker rules — the mandatory start of every brief (replace \`<thread-id>\` with your own \`BB_THREAD_ID\`):
 

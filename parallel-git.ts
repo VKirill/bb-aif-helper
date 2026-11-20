@@ -1,8 +1,9 @@
 import { execFile } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
-import { mkdtemp, readFile, rm, stat } from 'node:fs/promises';
+import { lstat, mkdir, mkdtemp, readFile, readlink, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
+import { withoutManagedBlocks } from './delegation.ts';
 import { worktreesRoot } from './worktree.ts';
 
 // Git steps of parallel /aif-implement that the coordinator used to type by hand. Paths never pass through a shell or
@@ -22,8 +23,9 @@ const nul = (list: string[]) => list.map(p => `${p}\0`).join('');
 const FROM_STDIN = ['--pathspec-from-file=-', '--pathspec-file-nul'];
 
 /**
- * The plugin rewrites its own instruction blocks here after an update. A checkpoint never commits them (the owner
- * decides), and worker copies never refresh them (see readDelegation), so a worker's patch carries only real edits.
+ * The plugin rewrites its own instruction blocks here after an update. A checkpoint does not commit a file whose only
+ * change is such a refresh (the owner decides), and worker copies never refresh them (see readDelegation), so a
+ * worker's patch carries only real edits.
  */
 export const OWN_DIR = '.ai-factory/skill-context/';
 
@@ -38,24 +40,33 @@ async function repo(root: string) {
 
 export type Change = { status: string; path: string };
 const byPath = (a: Change, b: Change) => a.path < b.path ? -1 : a.path > b.path ? 1 : 0;
+const exists = (p: string) => lstat(p).then(() => true, () => false); // a dangling symlink exists too
+
+/** A file of the plugin's folder whose change is only a refreshed managed block, not an edit by a task or the owner. */
+async function onlyBlockRefresh(top: string, file: string): Promise<boolean> {
+  const now = await readFile(path.join(top, file), 'utf8').catch(() => null);
+  const before = await git(top, ['show', `HEAD:${file}`]).catch(() => null);
+  return now !== null && before !== null && withoutManagedBlocks(now) === withoutManagedBlocks(before);
+}
 
 /**
  * Every change of the repository, one entry per file (`-uall`: a new folder is its files, not `dir/`). The whole
  * repository, not only this section: the copies are of the whole repository, and a section's task may change a file
- * above it (a root lockfile).
+ * above it (a root lockfile). A file in the plugin's folder whose only change is a refreshed block is listed apart.
  */
 async function changes(root: string) {
   const r = await repo(root);
   const raw = await git(r.top, ['status', '--porcelain=v1', '-z', '-uall', '--no-renames']);
   const all: Change[] = raw.split('\0').filter(Boolean).map(entry => ({ status: entry.slice(0, 2), path: entry.slice(3) })).sort(byPath);
-  const files = all.filter(c => !c.path.startsWith(r.own)), plugin = all.filter(c => c.path.startsWith(r.own));
+  const files: Change[] = [], plugin: Change[] = [];
+  for (const c of all) (c.path.startsWith(r.own) && await onlyBlockRefresh(r.top, c.path) ? plugin : files).push(c);
   // The token pins the exact content and the executable bit: a file someone edits after the list makes the commit refuse.
   const hash = createHash('sha256').update(line(await git(r.top, ['rev-parse', '--verify', 'HEAD^{commit}']).catch(() => 'none')));
   for (const c of files) {
     const full = path.join(r.top, c.path);
-    const mode = await stat(full).then(s => s.mode & 0o111 ? 'x' : '-', () => 'deleted');
+    const mode = await lstat(full).then(s => s.isSymbolicLink() ? 'l' : s.mode & 0o111 ? 'x' : '-', () => 'deleted');
     hash.update(`\0${c.status}\0${c.path}\0${mode}\0`);
-    hash.update((await readFile(full).catch(() => null)) ?? '');
+    hash.update((await (mode === 'l' ? readlink(full).then(t => Buffer.from(t)) : readFile(full)).catch(() => null)) ?? '');
   }
   return { ...r, files, plugin, token: hash.digest('hex').slice(0, 32) };
 }
@@ -63,6 +74,21 @@ async function changes(root: string) {
 export async function listChanges(input: { root: string }) {
   const c = await changes(input.root);
   return { files: c.files, plugin: c.plugin, token: c.token };
+}
+
+/** States in which a commit would not be the coordinator's checkpoint, or would silently drop someone's work. */
+async function refuseUnsafe(top: string, files: Change[]) {
+  for (const name of ['MERGE_HEAD', 'CHERRY_PICK_HEAD', 'REVERT_HEAD', 'REBASE_HEAD', 'rebase-merge', 'rebase-apply']) {
+    if (await exists(line(await git(top, ['rev-parse', '--path-format=absolute', '--git-path', name]))))
+      throw new Error('В репозитории не завершено слияние, rebase или cherry-pick: завершите его, потом снова checkpoint.');
+  }
+  if (await exists(line(await git(top, ['rev-parse', '--path-format=absolute', '--git-path', 'index.lock']))))
+    throw new Error('Индекс занят другим процессом git (index.lock). Дождитесь его завершения и повторите checkpoint.');
+  const conflict = files.find(f => f.status.includes('U') || f.status === 'AA' || f.status === 'DD');
+  if (conflict) throw new Error(`В файле ${conflict.path} не разрешён конфликт слияния.`);
+  // Staged and working versions differ: committing either one would silently lose the other.
+  const both = files.find(f => f.status[0] !== ' ' && f.status[0] !== '?' && f.status[1] !== ' ');
+  if (both) throw new Error(`Файл ${both.path} изменён и в индексе, и в рабочей папке по-разному: решите, какая версия нужна (git add или git restore --staged), потом снова checkpoint.`);
 }
 
 /**
@@ -76,8 +102,9 @@ export async function checkpoint(input: { root: string; token: string; message: 
   const c = await changes(input.root);
   if (c.token !== input.token) throw new Error('Изменения в репозитории поменялись после проверки. Запустите checkpoint без --token и проверьте список заново.');
   if (!c.files.length) return { committed: false as const, files: [] as string[] };
+  await refuseUnsafe(c.top, c.files);
   const present: string[] = [], missing: string[] = [];
-  for (const f of c.files) (await stat(path.join(c.top, f.path)).then(() => true, () => false) ? present : missing).push(f.path);
+  for (const f of c.files) (await exists(path.join(c.top, f.path)) ? present : missing).push(f.path);
   const gitDir = line(await git(c.top, ['rev-parse', '--path-format=absolute', '--git-dir']));
   const index = path.join(gitDir, `aif-checkpoint-${randomUUID()}.index`);
   const env = { GIT_INDEX_FILE: index };
@@ -88,27 +115,46 @@ export async function checkpoint(input: { root: string; token: string; message: 
     if (present.length) await git(c.top, ['--literal-pathspecs', 'add', '-A', ...FROM_STDIN], nul(present), env);
     await git(c.top, ['commit', '-q', '-m', input.message], undefined, env);
   } finally { await rm(index, { force: true }); }
+  const sha = line(await git(c.top, ['rev-parse', 'HEAD']));
   // The real index catches up for these paths only: they now match HEAD.
-  await git(c.top, ['--literal-pathspecs', 'reset', '-q', ...FROM_STDIN], nul(c.files.map(f => f.path)));
-  return { committed: true as const, sha: line(await git(c.top, ['rev-parse', 'HEAD'])), files: c.files.map(f => f.path) };
+  await git(c.top, ['--literal-pathspecs', 'reset', '-q', ...FROM_STDIN], nul(c.files.map(f => f.path))).catch((cause: Error) => {
+    throw new Error(`Коммит ${sha.slice(0, 12)} создан, но индекс не обновился (${cause.message.slice(0, 300)}). Выполните git reset -q -- <эти файлы>, затем продолжайте.`);
+  });
+  return { committed: true as const, sha, files: c.files.map(f => f.path) };
 }
 
 export async function headCommit(input: { root: string }) {
   return { sha: line(await git(input.root, ['rev-parse', '--verify', 'HEAD^{commit}'])) };
 }
 
-// The project's own git settings (diff.relative, diff.noprefix, color.diff, renames, external diff tools, text
-// conversion) stay out of the patch. Without renames every path is its own entry, so one can be applied alone.
-const DIFF = ['diff', '--cached', '--binary', '--no-color', '--no-relative', '--no-renames', '--no-ext-diff', '--no-textconv', '--src-prefix=a/', '--dst-prefix=b/', 'HEAD'];
-// `git apply --include` takes a glob: `[`, `*`, `?` and `\` in a file name are matched literally.
-const literalGlob = (file: string) => file.replace(/[\\*?[\]]/g, '\\$&');
+// The project's own git settings (diff.relative, diff.noprefix, diff.context, color.diff, renames, external diff
+// tools, text conversion) stay out of the patch.
+const DIFF = ['diff', '--cached', '--binary', '-U3', '--no-color', '--no-relative', '--no-renames', '--no-ext-diff', '--no-textconv', '--src-prefix=a/', '--dst-prefix=b/'];
+
+type Saved = { file: string; data: Buffer | null; mode: number; link: string | null };
+async function save(top: string, file: string): Promise<Saved> {
+  const full = path.join(top, file);
+  const info = await lstat(full).catch(() => null);
+  if (!info) return { file, data: null, mode: 0, link: null };
+  if (info.isSymbolicLink()) return { file, data: null, mode: 0, link: await readlink(full) };
+  return { file, data: info.isFile() ? await readFile(full) : null, mode: info.mode & 0o777, link: null };
+}
+const same = (a: Saved, b: Saved) => a.link === b.link && a.mode === b.mode
+  && (a.data === null ? b.data === null : b.data !== null && a.data.equals(b.data));
+async function restore(top: string, s: Saved) {
+  if (same(s, await save(top, s.file))) return; // untouched by the failed apply
+  const full = path.join(top, s.file);
+  await rm(full, { force: true });
+  if (s.link !== null) { await mkdir(path.dirname(full), { recursive: true }); await symlink(s.link, full); }
+  else if (s.data !== null) { await mkdir(path.dirname(full), { recursive: true }); await writeFile(full, s.data, { mode: s.mode }); }
+}
 
 /**
- * Brings one worker's result into the coordinator's workspace: everything the worker changed in its copy (tracked,
- * new and deleted files; ignored files such as node_modules stay out). Without --3way `git apply` never touches the
- * index and refuses a patch that does not fit before writing anything, so a refused patch leaves the workspace and
- * the results of earlier tasks exactly as they were. If writing stopped half way (a locked or read-only file), a
- * retry applies only the files that are not there yet.
+ * Brings one worker's result into the coordinator's workspace: what the worker changed in its copy since the last
+ * bring-back of this worker (tracked, new and deleted files; ignored files such as node_modules stay out), so a
+ * worker asked to fix its work is brought back again with just the fix. Without --3way `git apply` never touches the
+ * index and refuses a patch that does not fit before writing anything; if writing then fails (a locked or read-only
+ * file), the files it already touched are put back, so the workspace stays as it was and a retry is a normal one.
  */
 export async function bringBack(input: { root: string; copy: string }) {
   const copy = path.resolve(input.copy);
@@ -118,33 +164,31 @@ export async function bringBack(input: { root: string; copy: string }) {
   const theirs = await repo(copy);
   const common = async (dir: string) => path.resolve(line(await git(dir, ['rev-parse', '--path-format=absolute', '--git-common-dir'])));
   if (await common(mine.top) !== await common(theirs.top)) throw new Error(`${copy} — копия другого репозитория`);
+  // The copy's own git folder (one per worktree) remembers the tree that was brought back last.
+  const mark = line(await git(theirs.top, ['rev-parse', '--path-format=absolute', '--git-path', 'aif-brought-back']));
+  const last = (await readFile(mark, 'utf8').catch(() => '')).trim();
+  const base = /^[0-9a-f]{40,64}$/.test(last) && await git(theirs.top, ['cat-file', '-e', `${last}^{tree}`]).then(() => true, () => false) ? last : 'HEAD';
   await git(theirs.top, ['add', '-A']);
-  const files = (await git(theirs.top, ['diff', '--cached', '--name-only', '-z', '--no-relative', '--no-renames', 'HEAD'])).split('\0').filter(Boolean);
+  const tree = line(await git(theirs.top, ['write-tree']));
+  const files = (await git(theirs.top, ['diff', '--cached', '--name-only', '-z', '--no-relative', '--no-renames', base])).split('\0').filter(Boolean);
   if (!files.length) return { applied: false as const, empty: true as const, files };
   const dir = await mkdtemp(path.join(tmpdir(), 'aif-patch-'));
   const patch = path.join(dir, `${randomUUID()}.patch`);
-  const fits = (args: string[]) => git(mine.top, ['apply', '--check', ...args, patch]).then(() => null, (cause: Error) => cause.message);
   try {
-    await git(theirs.top, [...DIFF, `--output=${patch}`]);
-    const whole = await fits([]);
-    let only: string[] | null = null;
-    if (whole) {
-      // Does not fit as a whole: either a real conflict, or an earlier try stopped half way. Each file is either
-      // still to apply, already applied (its reverse fits) or in conflict; one conflict refuses everything.
-      const pending: string[] = [];
-      for (const f of files) {
-        const include = [`--include=${literalGlob(f)}`];
-        if (!await fits(include)) pending.push(f);
-        else if (await fits(['-R', ...include])) return { applied: false as const, empty: false as const, files, error: whole };
-      }
-      only = pending;
+    await git(theirs.top, [...DIFF, base, `--output=${patch}`]);
+    try { await git(mine.top, ['apply', '--check', patch]); }
+    catch (cause) { return { applied: false as const, empty: false as const, files, error: (cause as Error).message }; }
+    const saved = await Promise.all(files.map(f => save(mine.top, f)));
+    try { await git(mine.top, ['apply', patch]); }
+    catch (cause) {
+      const lost: string[] = [];
+      for (const s of saved) await restore(mine.top, s).catch(() => lost.push(s.file));
+      const error = (cause as Error).message;
+      return lost.length
+        ? { applied: false as const, empty: false as const, partial: true as const, files: lost, error }
+        : { applied: false as const, empty: false as const, files, error };
     }
-    try {
-      if (!only) await git(mine.top, ['apply', patch]);
-      else if (only.length) await git(mine.top, ['apply', ...only.map(f => `--include=${literalGlob(f)}`), patch]);
-    } catch (cause) {
-      return { applied: false as const, empty: false as const, partial: true as const, files, error: (cause as Error).message };
-    }
+    await writeFile(mark, `${tree}\n`);
     return { applied: true as const, files };
   } finally { await rm(dir, { recursive: true, force: true }); }
 }

@@ -1037,7 +1037,7 @@ export default async function plugin(bb: BbPluginApi) {
     bb.log.info(`aif-chat: bring-back threadId=${threadId} worker=${workerId} applied=${result.applied} files=${result.files.length}`);
     const text = result.applied ? `Перенесено файлов: ${result.files.length}\n${result.files.join('\n')}`
       : result.empty ? 'Исполнитель ничего не изменил.'
-      : result.partial ? `Запись прервалась, часть файлов уже перенесена. Устраните причину и повторите bring-back: перенесённые файлы пропускаются.\n${result.error}`
+      : result.partial ? `Запись прервалась, и эти файлы не удалось вернуть как было: ${result.files.join(', ')}\n${result.error}`
       : `Патч не ложится, рабочая папка не изменена:\n${result.error}`;
     return { ok: result.applied || !!result.empty, data: result, text };
   }
