@@ -65,8 +65,8 @@ test('«Параллельно» is hidden while «Код» runs on «Этот �
   try {
     fireEvent.click(await slot.findByRole('tab', { name: /Настройки/ }));
     await slot.findByText('Код');
-    assert.equal(slot.queryByText('Параллельно'), null);
-    assert.equal(slot.queryByRole('group', { name: 'Параллельность' }), null);
+    assert.ok(slot.queryByText('Параллельно') === null, 'element should be absent');
+    assert.ok(slot.queryByRole('group', { name: 'Параллельность' }) === null, 'element should be absent');
   } finally { slot.lifecycle.unmount(); }
 });
 

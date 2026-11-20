@@ -154,7 +154,7 @@ test('«В работе» shows the requested model and warns on fallback and mi
     within(aifRow).getByText(/Ожидалась модель codex · gpt-6\.2-luna/);
     const plainRow = (await slot.findByText('Прочее')).closest('li')!;
     within(plainRow).getByText('готово');
-    assert.equal(within(plainRow).queryByText(/⚠/), null);
+    assert.ok(within(plainRow).queryByText(/⚠/) === null, 'element should be absent');
     assert.equal([...slot.container.querySelectorAll('span')].filter(el => el.textContent?.trim().startsWith('⚠')).length, 2);
   } finally { slot.lifecycle.unmount(); }
 });

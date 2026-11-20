@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
 import { definePluginApp, useRpc, experimental_useRpcQuery, useComposer, useBbNavigate, experimental_useAppPanel, experimental_ProviderModelPicker as ProviderModelPicker, type ExperimentalProviderModelPickerValue as PickerValue, type PluginMessageDirectiveProps, type ExperimentalThreadContextCardProps, type ExperimentalThreadTabProps, type ExperimentalCodeFenceRendererProps, type PluginComposerApi } from '@get-bb/plugin-sdk/app';
 import { rpcContract, type ChipScoringView, type DelegationView } from './contract.ts';
 import type { DelegationChoice, DelegationRole } from './delegation.ts';
-import { phaseSchema, type Snapshot, type Phase, type Action, type ReadinessStep, type Suggestions } from './model.ts';
+import { phaseSchema, cardIdSchema, type Snapshot, type Phase, type Action, type ReadinessStep, type Suggestions } from './model.ts';
 import { readinessComplete, readinessCoreComplete, nextReadinessStep, readinessHelp, type SkippableStepId } from './readiness.ts';
 import { parseReplyGate } from './gate.ts';
 import { checkHelp, rowActions, supplementaryChecks, toolHelp } from './check-actions.ts';
@@ -47,8 +47,8 @@ function GateData({ code, status, Original }: ExperimentalCodeFenceRendererProps
   </div>;
 }
 
-function WorkflowCard({ threadId, initialTarget = '', phase = 'unknown', openFile, compact = false, delegation = false, environmentId = null }: {
-  threadId: string; initialTarget?: string; phase?: Phase; openFile?: ((path: string) => boolean) | null; compact?: boolean; delegation?: boolean; environmentId?: string | null;
+function WorkflowCard({ threadId, initialTarget = '', phase = 'unknown', openFile, compact = false, delegation = false, environmentId = null, inline = false }: {
+  threadId: string; initialTarget?: string; phase?: Phase; openFile?: ((path: string) => boolean) | null; compact?: boolean; delegation?: boolean; environmentId?: string | null; inline?: boolean;
 }) {
   const surface = useSurface();
   const rpc = useRpc<typeof rpcContract>();
@@ -103,7 +103,7 @@ function WorkflowCard({ threadId, initialTarget = '', phase = 'unknown', openFil
     catch (e) { setError(e instanceof Error ? e.message : String(e)); return; }
     await refresh();
   };
-  const busy = !!snapshot && !['idle', 'error'].includes(snapshot.threadState);
+  const busy = !!snapshot && (!['idle', 'error'].includes(snapshot.threadState) || !!snapshot.pendingQuestions || snapshot.pendingConfirmation !== false);
   const tasks = snapshot?.target?.tasks ?? [];
   const completed = tasks.filter(t => t.done).length;
   const nextVersionCheck = snapshot?.upstream.checkedAt ? Date.parse(snapshot.upstream.checkedAt) + VERSION_TTL : 0;
@@ -116,7 +116,7 @@ function WorkflowCard({ threadId, initialTarget = '', phase = 'unknown', openFil
     disabled={sending || busy || !a.available} onClick={() => void run(a)}>
     {a.label}{!a.available && (a.disabledReason === 'unchanged' ? ' · без изменений' : ' · не установлен')}</Button></Hint>;
   const renderActions = (actions: Action[]) => actions.length ? <div className="flex flex-wrap gap-2">{actions.map(renderAction)}</div> : null;
-  const stateText = snapshot ? snapshot.pendingQuestions ? `ожидаю ответы: ${snapshot.pendingQuestions}` : busy ? 'агент занят' : snapshot.threadState === 'error' ? 'ошибка выполнения BB' : 'агент свободен' : '';
+  const stateText = snapshot ? snapshot.pendingQuestions ? `ожидаю ответы: ${snapshot.pendingQuestions}` : snapshot.pendingConfirmation ? 'ожидается подтверждение пользователя' : snapshot.pendingConfirmation === null ? 'ожидание подтверждения не проверено' : busy ? 'агент занят' : snapshot.threadState === 'error' ? 'ошибка выполнения BB' : 'агент свободен' : '';
   const checkTone = (c: Snapshot['checks'][number]) => {
     const state = c.chat ? c.chat.result.status : c.state;
     return state === 'fail' ? 'destructive' : state === 'pass' || state === 'reported-pass' ? 'default' : 'secondary';
@@ -135,6 +135,8 @@ function WorkflowCard({ threadId, initialTarget = '', phase = 'unknown', openFil
     {snapshot.versions.sourceVersion && <span>Git <b className="font-semibold text-foreground">{snapshot.versions.sourceVersion}</b> @{snapshot.versions.sourceSha?.slice(0, 7)}{snapshot.versions.sourceDirty ? ' · изменён' : ''}</span>}
     {snapshot.extensions.map(e => <span key={e.name} title={e.installedVersion ? 'Установленная версия расширения' : 'Записанная версия; установленные файлы не подтверждены'}>{e.name} <b className="font-semibold text-foreground">{e.installedVersion ?? e.recordedVersion ?? 'неизвестна'}</b>{!e.installedVersion && ' · не подтверждена'}</span>)}
   </div>;
+  // The transcript card hides while the agent waits for the user; the tab and context card keep their state visible.
+  if (inline && (loading && !snapshot || snapshot && (snapshot.pendingConfirmation || snapshot.pendingQuestions))) return null;
   return <section aria-label="AI Factory workflow" className={cn('aif-card flex min-w-0 flex-col gap-4 text-sm text-foreground [overflow-wrap:anywhere]',
     compact ? '' : 'my-3 rounded-xl border border-border bg-card p-4')}>
     <header className={cn('flex min-h-8 flex-wrap items-center gap-2', delegation && 'sticky -top-3 z-10 -mx-3 -mt-3 border-b border-border bg-background/90 px-3 py-3 backdrop-blur')}>
@@ -260,7 +262,7 @@ function WorkflowCard({ threadId, initialTarget = '', phase = 'unknown', openFil
         <ul className="m-0 flex list-none flex-col gap-2 p-0 text-xs text-muted-foreground">{snapshot.diagnostics.map((d, i) => <li key={i}>{d}</li>)}</ul>
       </Disclosure>}
       <footer className="border-t border-border pt-3 text-xs text-muted-foreground">{snapshot.cache?.source === 'saved' ? 'Сохранённые данные' : snapshot.cache?.source === 'memory' ? 'Данные из кэша' : 'Локальный статус'} · {new Date(snapshot.collectedAt).toLocaleTimeString()}
-        {snapshot.cache?.refreshing && ' · обновляются в фоне…'}{snapshot.cache?.refreshError && ' · обновление не удалось; нажмите обновить для повторного чтения'} · {busy ? 'действия доступны после завершения работы' : 'кнопки отправляют выбранную команду в этот чат'}</footer>
+        {snapshot.cache?.refreshing && ' · обновляются в фоне…'}{snapshot.cache?.refreshError && ' · обновление не удалось; нажмите обновить для повторного чтения'} · {snapshot.pendingConfirmation || snapshot.pendingQuestions ? 'действия доступны после ответа пользователя' : busy ? 'действия доступны после завершения работы' : 'кнопки отправляют выбранную команду в этот чат'}</footer>
     </>}
   </section>;
 }
@@ -645,9 +647,27 @@ function ReadinessSection({ snapshot, run, busy, sending, setReadinessSkip }: {
 }
 
 function Directive(props: PluginMessageDirectiveProps) {
+  // Legacy directives have no identity; hide their historical output as well.
+  const cardId = cardIdSchema.safeParse(props.attributes.card);
+  if (!cardId.success) return null;
   const parsed = phaseSchema.safeParse(props.attributes.phase ?? 'unknown');
   if (!parsed.success || (props.attributes.target?.length ?? 0) > 1000) return <p className="aif-error">Некорректная карточка AI Factory.</p>;
-  return <WorkflowCard threadId={props.message.threadId} initialTarget={props.attributes.target ?? ''} phase={parsed.data} openFile={props.openWorkspaceFile} />;
+  return <InlineCard key={`${props.message.threadId}:${cardId.data}`} cardId={cardId.data} threadId={props.message.threadId}
+    initialTarget={props.attributes.target ?? ''} phase={parsed.data} openFile={props.openWorkspaceFile} />;
+}
+type InlineCardProps = { cardId: string; threadId: string; initialTarget: string; phase: Phase; openFile: PluginMessageDirectiveProps['openWorkspaceFile'] };
+function InlineCard(props: InlineCardProps) {
+  // Once superseded, the visibility query unmounts for good: an old card makes no further reads.
+  const [superseded, setSuperseded] = useState(false);
+  const retire = useCallback(() => setSuperseded(true), []);
+  return superseded ? null : <CardVisibility {...props} onSuperseded={retire} />;
+}
+function CardVisibility({ cardId, threadId, initialTarget, phase, openFile, onSuperseded }: InlineCardProps & { onSuperseded: () => void }) {
+  // A failed answer hides the card but keeps the query, so a later tag invalidation brings it back.
+  const query = experimental_useRpcQuery({ contract: rpcContract, method: 'cardVisibility', input: { threadId, cardId } });
+  const state = query.error ? null : query.data?.state;
+  useEffect(() => { if (state === 'superseded') onSuperseded(); }, [state, onSuperseded]);
+  return state === 'current' ? <WorkflowCard threadId={threadId} initialTarget={initialTarget} phase={phase} openFile={openFile} inline /> : null;
 }
 function ContextCard({ threadId }: ExperimentalThreadContextCardProps) { return <WorkflowCard threadId={threadId} compact />; }
 function WorkflowPanel({ threadId, environment }: ExperimentalThreadTabProps) { return <SurfaceProvider value="panel"><div className="aif-panel h-full min-h-0 overflow-y-auto overscroll-contain bg-muted/40 @container/aif px-3 pt-3 pb-[max(1rem,env(safe-area-inset-bottom))]"><WorkflowCard key={threadId} threadId={threadId} environmentId={environment?.id ?? null} compact delegation /></div></SurfaceProvider>; }

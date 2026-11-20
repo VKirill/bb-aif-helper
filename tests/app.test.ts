@@ -40,7 +40,7 @@ test('2.22 plan controls, skipped tasks and version-gated diagnostics remain exp
   } finally { slot.lifecycle.unmount(); }
 });
 
-test('only the latest inline card stays mounted; superseded cards stop reading workflow status', { skip: 'Task 8' }, async () => {
+test('only the latest inline card stays mounted; superseded cards stop reading workflow status', async () => {
   const nextId = '22222222-2222-4222-8222-222222222222';
   let latest = cardId; let oldReads = 0;
   let reveal!: () => void;
@@ -63,7 +63,7 @@ test('only the latest inline card stays mounted; superseded cards stop reading w
     const fresh = within(slot.getByTestId('fresh'));
     await fresh.findByRole('button', { name: 'Улучшить план' });
     await slot.behavior.experimental_invalidateRpc(['thread:thr_test']);
-    await waitFor(() => assert.equal(old.queryByLabelText('AI Factory workflow'), null));
+    await waitFor(() => assert.ok(old.queryByLabelText('AI Factory workflow') === null, 'element should be absent'));
     const readsAfterHide = oldReads;
     await slot.behavior.experimental_invalidateRpc(['thread:thr_test']);
     assert.equal(oldReads, readsAfterHide);
@@ -71,16 +71,16 @@ test('only the latest inline card stays mounted; superseded cards stop reading w
   } finally { slot.lifecycle.unmount(); }
 });
 
-test('legacy cards without an identity render nothing and perform no workflow reads', { skip: 'Task 8' }, async () => {
+test('legacy cards without an identity render nothing and perform no workflow reads', async () => {
   let reads = 0;
   const legacy = renderSlot(app.messageDirectives[0], { ...props, attributes: { phase: 'plan' } }, { rpc: {
     status: () => { reads++; return data(); }, cardVisibility: () => { reads++; return { state: 'current' }; },
   } });
-  try { assert.equal(legacy.queryByLabelText('AI Factory workflow'), null); assert.equal(reads, 0); }
+  try { assert.ok(legacy.queryByLabelText('AI Factory workflow') === null, 'element should be absent'); assert.equal(reads, 0); }
   finally { legacy.lifecycle.unmount(); }
 });
 
-test('unavailable visibility never exposes an old card and recovers on a later update', { skip: 'Task 8' }, async () => {
+test('unavailable visibility never exposes an old card and recovers on a later update', async () => {
   let failed = true; let reads = 0;
   const slot = renderSlot(app.messageDirectives[0], props, { rpc: {
     cardVisibility: () => { if (failed) throw new Error('unavailable'); return { state: 'current' }; },
@@ -88,7 +88,7 @@ test('unavailable visibility never exposes an old card and recovers on a later u
   } });
   try {
     await waitFor(() => assert(slot.inspection.rpcCalls.some(c => c.method === 'cardVisibility')));
-    assert.equal(slot.queryByLabelText('AI Factory workflow'), null); assert.equal(reads, 0);
+    assert.ok(slot.queryByLabelText('AI Factory workflow') === null, 'element should be absent'); assert.equal(reads, 0);
     failed = false; await slot.behavior.experimental_invalidateRpc(['thread:thr_test']);
     await slot.findByRole('button', { name: 'Улучшить план' });
   } finally { slot.lifecycle.unmount(); }
@@ -117,8 +117,8 @@ test('configuration errors do not hide the installation update button', async ()
   const slot = renderSlot(app.messageDirectives[0], props, { rpc: { status: () => s } });
   try {
     assert.equal((await slot.findByRole('button', { name: 'Обновить AI Factory' }) as HTMLButtonElement).disabled, false);
-    assert.equal(slot.queryByRole('button', { name: 'Выполнить план' }), null);
-    assert.equal(slot.queryByRole('button', { name: 'Запустить aif' }), null);
+    assert.ok(slot.queryByRole('button', { name: 'Выполнить план' }) === null, 'element should be absent');
+    assert.ok(slot.queryByRole('button', { name: 'Запустить aif' }) === null, 'element should be absent');
   } finally { slot.lifecycle.unmount(); }
 });
 
@@ -134,7 +134,7 @@ test('without AI Factory the card shows a separate installer and usable bundled 
     assert.match(slot.getByLabelText('Базовый workflow').textContent!, /исследование → Plan BB → выполнение → проверка → коммит/);
     const explore = slot.getByRole('button', { name: 'Исследовать задачу' }) as HTMLButtonElement;
     assert.equal(explore.disabled, false); assert.equal(runs, 0);
-    assert.equal(slot.queryByRole('button', { name: /Запустить aif/ }), null);
+    assert.ok(slot.queryByRole('button', { name: /Запустить aif/ }) === null, 'element should be absent');
     fireEvent.click(explore);
     const field = await slot.findByRole('textbox', { name: 'Что исследовать?' });
     assert.equal(runs, 0);
@@ -142,7 +142,7 @@ test('without AI Factory the card shows a separate installer and usable bundled 
     assert.equal(start.disabled, true);
     fireEvent.change(field, { target: { value: '  Почему форма не принимает завтрашнюю дату?  ' } });
     fireEvent.click(start); fireEvent.click(start); await waitFor(() => assert.equal(runs, 1));
-    await waitFor(() => assert.equal(slot.queryByRole('form', { name: 'Описание исследования' }), null));
+    await waitFor(() => assert.ok(slot.queryByRole('form', { name: 'Описание исследования' }) === null, 'element should be absent'));
   } finally { slot.lifecycle.unmount(); }
 });
 
@@ -160,7 +160,7 @@ test('the document renders before its form and only a completed saved plan expos
   } });
   try {
     assert(slot.getByLabelText('Документ плана'));
-    assert.equal(slot.queryByLabelText('Действия после плана'), null); assert.equal(saves, 0);
+    assert.ok(slot.queryByLabelText('Действия после плана') === null, 'element should be absent'); assert.equal(saves, 0);
     slot.rerender(createElement(renderer.component, { ...base, status: 'closed' }));
     const controls = await slot.findByLabelText('Действия после плана');
     const document = slot.getByLabelText('Документ плана');
@@ -169,7 +169,7 @@ test('the document renders before its form and only a completed saved plan expos
     await slot.findByRole('button', { name: 'Выполнить план' });
   } finally { slot.lifecycle.unmount(); }
   const interrupted = renderSlot(renderer, { ...base, status: 'unclosed' }, { rpc: { planDocument: () => { throw Error('must not save'); } } });
-  try { assert.equal(interrupted.queryByLabelText('Действия после плана'), null); assert(interrupted.getByText(/Неполный план/)); }
+  try { assert.ok(interrupted.queryByLabelText('Действия после плана') === null, 'element should be absent'); assert(interrupted.getByText(/Неполный план/)); }
   finally { interrupted.lifecycle.unmount(); }
 });
 
@@ -231,8 +231,8 @@ test('a proposed native plan shows an explicit execution button instead of askin
   } } });
   try {
     const execute = await slot.findByRole('button', { name: 'Выполнить предложенный план' });
-    assert(slot.getByLabelText('План из чата')); assert.equal(slot.queryByRole('progressbar'), null);
-    assert(slot.getByRole('button', { name: 'Уточнить план' })); assert.equal(slot.queryByRole('button', { name: 'Составить план' }), null);
+    assert(slot.getByLabelText('План из чата')); assert.ok(slot.queryByRole('progressbar') === null, 'element should be absent');
+    assert(slot.getByRole('button', { name: 'Уточнить план' })); assert.ok(slot.queryByRole('button', { name: 'Составить план' }) === null, 'element should be absent');
     assert.equal(runs, 0); fireEvent.click(execute); fireEvent.click(execute); await waitFor(() => assert.equal(runs, 1));
   } finally { slot.lifecycle.unmount(); }
 });
@@ -258,7 +258,7 @@ test('a completed plan keeps its actions and opens a separate new-task research 
     fireEvent.click(slot.getByRole('button', { name: 'Начать исследование' }));
     await waitFor(() => assert.equal(runs, 1));
     await slot.findByRole('button', { name: 'Составить план' });
-    assert.equal(slot.queryByRole('progressbar'), null); assert.equal(slot.queryByRole('form', { name: 'Описание исследования' }), null);
+    assert.ok(slot.queryByRole('progressbar') === null, 'element should be absent'); assert.ok(slot.queryByRole('form', { name: 'Описание исследования' }) === null, 'element should be absent');
     assert.equal((slot.getByRole('combobox', { name: 'Выбранный план или change' }) as HTMLSelectElement).value, '');
   } finally { slot.lifecycle.unmount(); }
 });
@@ -273,7 +273,7 @@ test('research description can be cancelled and survives refresh and failed disp
     fireEvent.change(field, { target: { value: '   \n  ' } });
     assert.equal((slot.getByRole('button', { name: 'Начать исследование' }) as HTMLButtonElement).disabled, true);
     fireEvent.click(slot.getByRole('button', { name: 'Отмена' }));
-    assert.equal(slot.queryByRole('textbox'), null); assert.equal(attempts, 0);
+    assert.ok(slot.queryByRole('textbox') === null, 'element should be absent'); assert.equal(attempts, 0);
     fireEvent.click(slot.getByRole('button', { name: 'Исследовать задачу' }));
     const draft = 'Исследовать #213\nПроверить ограничения дат.';
     fireEvent.change(slot.getByRole('textbox'), { target: { value: draft } });
@@ -305,9 +305,9 @@ test('a stale SessionBrief displays recovery next to a disabled execution button
     assert.equal(sends, 0);
     s.sessionBrief = { ...s.sessionBrief!, seq: 4, status: 'valid' }; s.actions = workflowActions(s);
     await slot.behavior.experimental_invalidateRpc(['thread:thr_test']);
-    await waitFor(() => assert.equal(slot.queryByLabelText('Блокировка SessionBrief'), null));
+    await waitFor(() => assert.ok(slot.queryByLabelText('Блокировка SessionBrief') === null, 'element should be absent'));
     assert.equal((slot.getByRole('button', { name: 'Продолжить выполнение' }) as HTMLButtonElement).disabled, false);
-    assert.equal(slot.queryByRole('button', { name: 'Пересобрать SessionBrief' }), null);
+    assert.ok(slot.queryByRole('button', { name: 'Пересобрать SessionBrief' }) === null, 'element should be absent');
     assert.equal(sends, 0);
   } finally { slot.lifecycle.unmount(); }
 });
@@ -365,7 +365,7 @@ test('registered extensions have a separate update button even with an invalid s
   const slot = renderSlot(app.messageDirectives[0], props, { rpc: { status: () => s } });
   try {
     assert.equal((await slot.findByRole('button', { name: 'Обновить расширения' }) as HTMLButtonElement).disabled, false);
-    assert.equal(slot.queryByRole('button', { name: 'Выполнить план' }), null);
+    assert.ok(slot.queryByRole('button', { name: 'Выполнить план' }) === null, 'element should be absent');
   } finally { slot.lifecycle.unmount(); }
 });
 
@@ -424,7 +424,7 @@ test('only gate JSON gets a collapsed renderer; original code remains available 
     const details = summary.closest('details')!;
     assert.equal(details.open, false); assert(details.textContent?.includes(code));
     fireEvent.click(summary); assert.equal(details.open, true);
-    assert.equal(slot.queryByRole('alert'), null);
+    assert.ok(slot.queryByRole('alert') === null, 'element should be absent');
   } finally { slot.lifecycle.unmount(); }
 });
 
@@ -464,7 +464,7 @@ test('streaming partial gate stays collapsed without a premature JSON error', ()
   const slot = renderSlot(app.codeFenceRenderers[0], { code: '{', status: 'streaming', language: 'aif-gate-result', index: 0, message: props.message, Original: () => '{' });
   try {
     assert.equal(slot.getByText('Данные gate · формируются…').closest('details')!.open, false);
-    assert.equal(slot.queryByRole('alert'), null);
+    assert.ok(slot.queryByRole('alert') === null, 'element should be absent');
   } finally { slot.lifecycle.unmount(); }
 });
 
@@ -533,7 +533,7 @@ test('panel uses the BB provider/model picker and saves exactly its selection', 
   try {
     await slot.findByText('Задача 1');
     assert.ok(slot.getByText(/Codex · работает/));
-    assert.equal(slot.queryByRole('button', { name: 'Сохранить' }), null);
+    assert.ok(slot.queryByRole('button', { name: 'Сохранить' }) === null, 'element should be absent');
     fireEvent.click(slot.getByRole('tab', { name: /Настройки/ }));
     await slot.findByRole('button', { name: 'Изменить: Код' });
     for (const title of ['Код', 'Разведчик 1', 'Разведчик 2', 'Разведчик 3'])
@@ -605,7 +605,7 @@ test('dirty files show commit without an active plan and busy state disables it 
     } finally { slot.lifecycle.unmount(); }
   }
 });
-test('persistent panel keeps native questions visible and disables action buttons', { skip: 'Task 8' }, async () => {
+test('persistent panel keeps native questions visible and disables action buttons', async () => {
   const s = data(); s.threadState = 'awaiting_input'; s.pendingQuestions = 2;
   const slot = renderSlot(app.threadContextCardSections[0], { threadId: 'thr_test' } as any, { rpc: { status: () => s } });
   try {
@@ -614,22 +614,22 @@ test('persistent panel keeps native questions visible and disables action button
   } finally { slot.lifecycle.unmount(); }
 });
 
-test('transcript cards hide while confirmation or native answers are pending and return after a reply', { skip: 'Task 8' }, async () => {
+test('transcript cards hide while confirmation or native answers are pending and return after a reply', async () => {
   let s = data();
   const slot = renderSlot(app.messageDirectives[0], props, { rpc: { status: () => s } });
   try {
     await slot.findByRole('button', { name: 'Улучшить план' });
     s.pendingConfirmation = true; await slot.behavior.experimental_invalidateRpc(['thread:thr_test']);
-    await waitFor(() => assert.equal(slot.queryByLabelText('AI Factory workflow'), null));
+    await waitFor(() => assert.ok(slot.queryByLabelText('AI Factory workflow') === null, 'element should be absent'));
     s = data(); await slot.behavior.experimental_invalidateRpc(['thread:thr_test']);
     await slot.findByRole('button', { name: 'Улучшить план' });
     s.pendingQuestions = 1; await slot.behavior.experimental_invalidateRpc(['thread:thr_test']);
-    await waitFor(() => assert.equal(slot.queryByLabelText('AI Factory workflow'), null));
+    await waitFor(() => assert.ok(slot.queryByLabelText('AI Factory workflow') === null, 'element should be absent'));
     assert.equal(slot.inspection.rpcCalls.filter(c => c.method === 'run').length, 0);
   } finally { slot.lifecycle.unmount(); }
 });
 
-test('persistent panel names a prose confirmation and prevents navigation without hiding progress', { skip: 'Task 8' }, async () => {
+test('persistent panel names a prose confirmation and prevents navigation without hiding progress', async () => {
   const s = data(); s.pendingConfirmation = true;
   const slot = renderSlot(app.threadContextCardSections[0], { threadId: 'thr_test' } as any, { rpc: { status: () => s } });
   try {
@@ -646,7 +646,7 @@ test('metadata failure removes stale actions instead of keeping executable old s
     await slot.findByRole('button', { name: 'Улучшить план' }); fails = true;
     fireEvent.click(slot.getByRole('button', { name: 'Обновить статус AI Factory' }));
     await slot.findByText('metadata unavailable');
-    assert.equal(slot.queryByRole('button', { name: 'Улучшить план' }), null);
+    assert.ok(slot.queryByRole('button', { name: 'Улучшить план' }) === null, 'element should be absent');
   } finally { slot.lifecycle.unmount(); }
 });
 test('maintenance buttons are visible before plan selection and update dispatch is click-only', async () => {
@@ -682,7 +682,7 @@ test('apply-all can answer an improve confirmation while ordinary navigation sta
     assert.equal((slot.getByRole('button', { name: '$aif-architecture' }) as HTMLButtonElement).disabled, true);
     assert.equal(sends, 0); fireEvent.click(apply); fireEvent.click(apply);
     await waitFor(() => assert.equal(sends, 1));
-    await waitFor(() => assert.equal(slot.queryByRole('button', { name: 'Применить всё' }), null));
+    await waitFor(() => assert.ok(slot.queryByRole('button', { name: 'Применить всё' }) === null, 'element should be absent'));
     assert.equal(slot.inspection.composer.text, 'Мой черновик');
   } finally { slot.lifecycle.unmount(); }
 });
@@ -691,14 +691,14 @@ test('PASS with a null command renders without an error and labels its reason as
   const gate = { schema_version: 1, gate: 'rules', status: 'pass', blocking: false, blockers: [], affected_files: [],
     suggested_next: { command: null, reason: 'No explicit rule violations or rule updates required.' } };
   const fence = renderSlot(app.codeFenceRenderers[0], { code: JSON.stringify(gate), language: 'aif-gate-result', status: 'closed', index: 0, message: props.message, Original: () => JSON.stringify(gate) });
-  try { fence.getByText('Данные gate · rules · PASS'); assert.equal(fence.queryByRole('alert'), null); }
+  try { fence.getByText('Данные gate · rules · PASS'); assert.ok(fence.queryByRole('alert') === null, 'element should be absent'); }
   finally { fence.lifecycle.unmount(); }
   const slot = renderSlot(banner, {}, { composer: { scope: { kind: 'thread', threadId: 'thr_test' } },
     rpc: { suggestions: () => ({ ...suggestedData(), items: [], gateError: null, gate }) } });
   try {
     await slot.findByText('rules · PASS в ответе'); slot.getByText('Пояснение:');
-    assert.equal(slot.queryByText('Следующий шаг:'), null); assert.equal(slot.queryByRole('alert'), null);
-    assert.equal(slot.queryByText('Из ответа агента'), null);
+    assert.ok(slot.queryByText('Следующий шаг:') === null, 'element should be absent'); assert.ok(slot.queryByRole('alert') === null, 'element should be absent');
+    assert.ok(slot.queryByText('Из ответа агента') === null, 'element should be absent');
   } finally { slot.lifecycle.unmount(); }
 });
 test('composer suggestions have a separate dismiss control and never dispatch during discovery or removal', async () => {
@@ -716,7 +716,7 @@ test('composer suggestions have a separate dismiss control and never dispatch du
     await waitFor(() => assert(!slot.queryByRole('button', { name: '$aif-architecture + ваш текст из поля' })));
     assert(slot.getByRole('button', { name: '$aif-roadmap + ваш текст из поля' })); assert.equal(sends, 0);
     await slot.behavior.experimental_invalidateRpc(['thread:thr_test']);
-    assert.equal(slot.queryByRole('button', { name: '$aif-architecture + ваш текст из поля' }), null);
+    assert.ok(slot.queryByRole('button', { name: '$aif-architecture + ваш текст из поля' }) === null, 'element should be absent');
     assert.equal(slot.inspection.composer.text, 'Мой черновик');
   } finally { slot.lifecycle.unmount(); }
 });
@@ -814,7 +814,7 @@ test('suggestion banner follows composer scope and rejects an old thread respons
     finishOld(suggestedData());
     await waitFor(() => assert(!slot.queryByRole('button', { name: '$aif-roadmap' })));
     await slot.behavior.setComposerScope({ kind: 'new-thread', projectId: 'proj_test' });
-    assert.equal(slot.queryByRole('button', { name: '$aif-plan' }), null);
+    assert.ok(slot.queryByRole('button', { name: '$aif-plan' }) === null, 'element should be absent');
   } finally { slot.lifecycle.unmount(); }
 });
 
@@ -826,7 +826,7 @@ test('string blocker gates render valid collapsed JSON and show both blocking fi
   const document = renderSlot(renderer, { code, language: 'aif-gate-result', status: 'closed', index: 0, message: props.message, Original: () => code });
   try {
     assert(document.getByText('Данные gate · review · FAIL'));
-    assert.equal(document.queryByRole('alert'), null);
+    assert.ok(document.queryByRole('alert') === null, 'element should be absent');
   } finally { document.lifecycle.unmount(); }
   const parsed = parseReplyGate('```aif-gate-result\n' + code + '\n```');
   const slot = renderSlot(banner, {}, { composer: { scope: { kind: 'thread', threadId: 'thr_test' } }, rpc: {
@@ -838,7 +838,7 @@ test('string blocker gates render valid collapsed JSON and show both blocking fi
     assert(slot.getByText('Worker drops read_only restrictions.')); assert(slot.getByText('Deleted review target is accepted.'));
     assert(slot.getByText('Блокирующие проблемы · 2')); assert(slot.getByText('Блокирует следующий этап'));
     assert.equal((slot.getByRole('button', { name: '$aif-fix' }) as HTMLButtonElement).disabled, false);
-    assert.equal(slot.queryByRole('alert'), null);
+    assert.ok(slot.queryByRole('alert') === null, 'element should be absent');
   } finally { slot.lifecycle.unmount(); }
 });
 
@@ -875,14 +875,14 @@ test('a valid FAIL with trailing summary shows a format note, both blockers and 
     await slot.findByText('review · FAIL в ответе');
     assert(slot.getByText('Windows paths do not match.')); assert(slot.getByText('Sibling attempts are consumed.'));
     assert.match(slot.getByRole('note').textContent!, /^Формат ответа: После gate/);
-    assert.equal(slot.queryByRole('alert'), null);
+    assert.ok(slot.queryByRole('alert') === null, 'element should be absent');
     assert.equal((slot.getByRole('button', { name: '$aif-fix' }) as HTMLButtonElement).disabled, false);
   } finally { slot.lifecycle.unmount(); }
   const pass = renderSlot(banner, {}, { composer: { scope: { kind: 'thread', threadId: 'thr_test' } }, rpc: {
     suggestions: () => ({ ...suggestedData(), gate: { ...gate, status: 'pass', blocking: false, blockers: [], suggested_next: null },
       gateError: null, gateWarning: parsed.warning, items: [] }),
   } });
-  try { await pass.findByText('Переход не подтверждён'); assert.equal(pass.queryByText('Не блокирует'), null); }
+  try { await pass.findByText('Переход не подтверждён'); assert.ok(pass.queryByText('Не блокирует') === null, 'element should be absent'); }
   finally { pass.lifecycle.unmount(); }
 });
 
@@ -893,7 +893,7 @@ test('gate problems remain visible even with no suggested command', async () => 
     await slot.findByText('verify · FAIL в ответе');
     await slot.findByText('Required behavior is missing.');
     assert(slot.getByText('Блокирует следующий этап')); assert(slot.getByText('Блокирующие проблемы · 1'));
-    assert.equal(slot.queryByText('Из ответа агента'), null);
+    assert.ok(slot.queryByText('Из ответа агента') === null, 'element should be absent');
   } finally { slot.lifecycle.unmount(); }
 });
 test('non-blocking gate reason and command render independently; dismiss does not hide the report', async () => {
@@ -924,8 +924,8 @@ test('readiness block in the tab: one run button on the first todo step, skip RP
     const run = await slot.findByRole('button', { name: /^Запустить: Описать проект/ });
     assert.equal(slot.getAllByRole('button', { name: /^Запустить: / }).length, s.readiness.filter(step => step.state === 'todo').length, 'every unfinished step can be run');
     await slot.findByRole('button', { name: 'Запустить: Настроить CI' });
-    assert.equal(slot.queryByText('Настройка контекста проекта'), null);
-    assert.equal(slot.queryByText('Дополнительно'), null);
+    assert.ok(slot.queryByText('Настройка контекста проекта') === null, 'element should be absent');
+    assert.ok(slot.queryByText('Дополнительно') === null, 'element should be absent');
     assert.equal(slot.queryByText(/^Не найдено:/), null, 'missing files stay behind «?» to keep rows one line high');
     fireEvent.click(await slot.findByRole('button', { name: 'Что делает шаг «Описать проект (/aif или aif-analyze)»' }));
     await slot.findByText('Не найдено: .ai-factory/DESCRIPTION.md, .ai-factory/config.yaml, .ai-factory/rules/base.md, AGENTS.md');
@@ -941,13 +941,13 @@ test('readiness block in the tab: one run button on the first todo step, skip RP
   try {
     fireEvent.click(await slot.findByRole('tab', { name: /Настройки/ }));
     await slot.findByText('Проект готов к работе через AI Factory');
-    assert.equal(slot.queryByText('Выполните шаги по порядку, чтобы AI Factory работал полностью'), null);
+    assert.ok(slot.queryByText('Выполните шаги по порядку, чтобы AI Factory работал полностью') === null, 'element should be absent');
   } finally { slot.lifecycle.unmount(); }
   const card = renderSlot(app.messageDirectives[0] as any, props as any, { rpc });
   try {
     await card.findByRole('button', { name: 'Улучшить план' });
-    assert.equal(card.queryByText('Подготовка проекта'), null);
-    assert.equal(card.queryByText('Проект готов к работе через AI Factory'), null);
+    assert.ok(card.queryByText('Подготовка проекта') === null, 'element should be absent');
+    assert.ok(card.queryByText('Проект готов к работе через AI Factory') === null, 'element should be absent');
   } finally { card.lifecycle.unmount(); }
 });
 
@@ -959,12 +959,12 @@ test('each check row has a «?» button that toggles a plain explanation without
   const slot = renderSlot(app.messageDirectives[0], props, { rpc: { status: () => s, run: () => { runs++; return { sent: true, message: 'Отправлено' }; } } });
   try {
     const button = await slot.findByRole('button', { name: 'Что проверяет «Соответствие плану»', hidden: true });
-    assert.equal(slot.queryByText(checkHelp.verify), null);
+    assert.ok(slot.queryByText(checkHelp.verify) === null, 'element should be absent');
     fireEvent.click(button);
     await slot.findByText(checkHelp.verify);
     assert.equal(button.getAttribute('aria-expanded'), 'true');
     fireEvent.click(button);
-    await waitFor(() => assert.equal(slot.queryByText(checkHelp.verify), null));
+    await waitFor(() => assert.ok(slot.queryByText(checkHelp.verify) === null, 'element should be absent'));
     assert.equal(runs, 0);
   } finally { slot.lifecycle.unmount(); }
 });
@@ -978,11 +978,11 @@ test('each readiness step has a «?» button that explains the step without runn
   try {
     for (const step of s.readiness) assert.ok(readinessHelp[step.id], `help for ${step.id}`);
     const button = await slot.findByRole('button', { name: 'Что делает шаг «Настроить CI»' });
-    assert.equal(slot.queryByText(readinessHelp.ci), null);
+    assert.ok(slot.queryByText(readinessHelp.ci) === null, 'element should be absent');
     fireEvent.click(button);
     await slot.findByText(readinessHelp.ci);
     fireEvent.click(button);
-    await waitFor(() => assert.equal(slot.queryByText(readinessHelp.ci), null));
+    await waitFor(() => assert.ok(slot.queryByText(readinessHelp.ci) === null, 'element should be absent'));
     assert.equal(runs, 0);
   } finally { slot.lifecycle.unmount(); }
 });
@@ -1023,12 +1023,12 @@ test('the panel tab splits navigation and settings between current work and one-
   try {
     slot.getByRole('tablist', { name: 'Раздел панели' });
     await slot.findByText('Сейчас');
-    assert.equal(slot.queryByText('Исполнители'), null);
+    assert.ok(slot.queryByText('Исполнители') === null, 'element should be absent');
     fireEvent.click(slot.getByRole('tab', { name: /Настройки/ }));
     await slot.findByRole('button', { name: 'Изменить: Код' });
     await slot.findByText('Модели по умолчанию для новых проектов');
     slot.getByText(/Версии и расширения/);
-    assert.equal(slot.queryByText('Сейчас'), null);
+    assert.ok(slot.queryByText('Сейчас') === null, 'element should be absent');
   } finally { slot.lifecycle.unmount(); }
 });
 
@@ -1037,8 +1037,8 @@ test('a message card has no navigation/settings switcher', async () => {
   const slot = renderSlot(app.messageDirectives[0], props, { rpc: { status: () => s } });
   try {
     await slot.findByText('Сейчас');
-    assert.equal(slot.queryByRole('tablist'), null);
-    assert.equal(slot.queryByRole('tab'), null);
+    assert.ok(slot.queryByRole('tablist') === null, 'element should be absent');
+    assert.ok(slot.queryByRole('tab') === null, 'element should be absent');
   } finally { slot.lifecycle.unmount(); }
 });
 
@@ -1055,8 +1055,8 @@ test('«В работе» lists child threads on navigation and hides when there
   try {
     await idle.findByRole('tab', { name: /Навигация/ });
     await waitFor(() => assert(idle.inspection.rpcCalls.some(c => c.method === 'delegation')));
-    assert.equal(idle.queryByText('В работе'), null);
-    assert.equal(idle.queryByText('Задача 1'), null);
+    assert.ok(idle.queryByText('В работе') === null, 'element should be absent');
+    assert.ok(idle.queryByText('Задача 1') === null, 'element should be absent');
   } finally { idle.lifecycle.unmount(); }
 });
 
@@ -1087,7 +1087,7 @@ test('auto-applied defaults appear as a status callout inside settings', async (
   } });
   try {
     await slot.findByText('Сейчас');
-    assert.equal(slot.queryByText(/Применены модели по умолчанию/), null);
+    assert.ok(slot.queryByText(/Применены модели по умолчанию/) === null, 'element should be absent');
     fireEvent.click(slot.getByRole('tab', { name: /Настройки/ }));
     const found = await slot.findAllByText(applied);
     assert(found.some(el => el.closest('[role="status"]')));
@@ -1141,7 +1141,7 @@ test('an executor row is a single button that toggles aria-expanded and reveals 
     await slot.findByTestId('bb-provider-model-picker');
     fireEvent.click(row);
     assert.equal(row.getAttribute('aria-expanded'), 'false');
-    await waitFor(() => assert.equal(slot.queryByRole('radiogroup'), null));
+    await waitFor(() => assert.ok(slot.queryByRole('radiogroup') === null, 'element should be absent'));
   } finally { slot.lifecycle.unmount(); }
 });
 
@@ -1195,7 +1195,7 @@ test('«Оценка кнопок» toggles scoring, hides the catalog without e
     const toggle = await slot.findByRole('button', { name: 'Вкл' });
     assert.equal(toggle.getAttribute('aria-pressed'), 'true');
     await slot.findByLabelText('Ключ Gemini API');
-    assert.equal(slot.queryByRole('radiogroup', { name: 'Источник ключа' }), null);
+    assert.ok(slot.queryByRole('radiogroup', { name: 'Источник ключа' }) === null, 'element should be absent');
     fireEvent.change(slot.getByLabelText('Ключ Gemini API'), { target: { value: 'decisions-test-key' } });
     fireEvent.click(slot.getByRole('button', { name: 'Сохранить' }));
     await waitFor(() => assert.deepEqual(saved[1], { manualKey: 'decisions-test-key' }));
