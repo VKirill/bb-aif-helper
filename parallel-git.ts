@@ -62,10 +62,17 @@ async function onlyBlockRefresh(top: string, file: string): Promise<boolean> {
  * repository, not only this section: the copies are of the whole repository, and a section's task may change a file
  * above it (a root lockfile). A file in the plugin's folder whose only change is a refreshed block is listed apart.
  */
+/**
+ * The placeholder `bring-back` keeps in the chat folder while the patch goes in. One fixed name: a copy left by a
+ * killed host is overwritten and removed by the next `bring-back`, and the checkpoint never lists or commits it.
+ */
+const KEEPER = '.aif-bring-back-keep';
+
 async function changes(root: string) {
   const r = await repo(root);
   const raw = await git(r.top, ['status', '--porcelain=v1', '-z', '-uall', '--no-renames']);
-  const all: Change[] = raw.split('\0').filter(Boolean).map(entry => ({ status: entry.slice(0, 2), path: entry.slice(3) })).sort(byPath);
+  const all: Change[] = raw.split('\0').filter(Boolean).map(entry => ({ status: entry.slice(0, 2), path: entry.slice(3) }))
+    .filter(c => path.posix.basename(c.path) !== KEEPER).sort(byPath);
   const files: Change[] = [], plugin: Change[] = [];
   for (const c of all) (c.path.startsWith(r.own) && await onlyBlockRefresh(r.top, c.path) ? plugin : files).push(c);
   // The token pins the exact content and the executable bit: a file someone edits after the list makes the commit refuse.
@@ -102,9 +109,15 @@ async function refuseUnsafe(top: string, files: Change[], plugin: Change[]) {
   // not show; the checkpoint does not guess it. The owner or the coordinator commits or unstages it first.
   const staged = [...files, ...plugin].filter(f => f.status[0] !== ' ' && f.status[0] !== '?').map(f => f.path);
   // No ready-made command: which version to keep is the owner's decision, and a pasted command could lose one.
-  // The instruction goes first and the list is capped: the CLI cuts stderr at about 1,000 characters. One quoted path
-  // per line, so a comma in a file name cannot be read as two files.
-  if (staged.length) throw new Error(`В индексе уже есть изменения. Пусть владелец закоммитит их или уберёт из индекса, потом снова checkpoint. Файлы (пути от корня репозитория):\n${staged.slice(0, 8).map(f => JSON.stringify(f)).join('\n')}${staged.length > 8 ? `\nи ещё ${staged.length - 8}` : ''}`);
+  // The instruction goes first and the list is capped by length: the CLI cuts stderr at about 1,000 characters, and
+  // the count of the omitted paths is always there. One quoted path per line, so a comma cannot read as two files.
+  if (staged.length) {
+    const shown: string[] = [];
+    let size = 0; // UTF-8 bytes: the cut may count bytes, and a Cyrillic path is twice its length in them
+    for (const f of staged.map(p => JSON.stringify(p))) { size += Buffer.byteLength(f) + 1; if (size > 560) break; shown.push(f); }
+    const more = staged.length - shown.length;
+    throw new Error(`В индексе уже есть изменения (${staged.length}). Пусть владелец закоммитит их или уберёт из индекса, потом снова checkpoint. Файлы (пути от корня репозитория):${shown.map(f => `\n${f}`).join('')}${more ? `\nи ещё ${more}` : ''}`);
+  }
 }
 
 /**
@@ -243,7 +256,7 @@ export async function bringBack(input: { root: string; copy: string }) {
     };
     // git apply removes a folder that a deletion leaves empty and makes it again for an added file, with default
     // permissions. A placeholder file keeps the chat folder itself in place while the patch goes in.
-    const keeper = mine.prefix ? path.join(path.resolve(input.root), `.aif-keep-${randomUUID()}`) : null;
+    const keeper = mine.prefix ? path.join(path.resolve(input.root), KEEPER) : null;
     if (keeper) await writeFile(keeper, '').catch(() => undefined);
     try { await git(mine.top, ['apply', '--whitespace=nowarn', patch]); }
     catch (cause) { return undo((cause as Error).message); }

@@ -380,7 +380,7 @@ test('checkpoint refuses what is only staged, never commits ignored files, names
   let listed = await listChanges({ root: top });
   assert.deepEqual(listed.files.map(f => f.path), ['.gitignore', 'a.txt', 'config.txt', 'script.sh']);
   const before = sh(top, 'rev-parse', 'HEAD');
-  await assert.rejects(checkpoint({ root: top, token: listed.token, message: 'cp' }), /В индексе уже есть изменения\. Пусть владелец.*\n"config\.txt"\n"script\.sh"$/);
+  await assert.rejects(checkpoint({ root: top, token: listed.token, message: 'cp' }), /В индексе уже есть изменения \(2\)\. Пусть владелец.*\n"config\.txt"\n"script\.sh"$/);
   assert.equal(sh(top, 'rev-parse', 'HEAD'), before, 'nothing is committed before the refusal');
   // The owner commits what they staged; then the checkpoint takes the rest.
   sh(top, 'commit', '-qm', 'owner');
@@ -524,6 +524,9 @@ test('bring-back keeps the chat folder in place: renaming its only file, an empt
   const before = statSync(base);
   const one = await createWorktree({ basePath: base, name: 'keep-1' });
   renameSync(path.join(one.path, 'old.txt'), path.join(one.path, 'new.txt'));
+  // A placeholder left by a host killed in the middle of a bring-back: the checkpoint ignores it, the retry removes it.
+  writeFileSync(path.join(base, '.aif-bring-back-keep'), '');
+  assert.deepEqual((await listChanges({ root: base })).files, []);
   assert.equal((await bringBack({ root: base, copy: one.path })).applied, true);
   assert.deepEqual(readdirSync(base), ['new.txt'], 'no placeholder left behind');
   if (process.platform !== 'win32') {
@@ -556,13 +559,24 @@ test('checkpoint: the staged refusal puts the instruction first, caps the list a
   for (let i = 1; i <= 18; i++) writeFileSync(path.join(deep, `fixture-${String(i).padStart(2, '0')}.test.ts`), 'x\n');
   writeFileSync(path.join(top, 'a, b.txt'), 'x\n');
   sh(top, 'add', '-A');
-  await assert.rejects(checkpoint({ root: top, token: (await listChanges({ root: top })).token, message: 'cp' }), (e: Error) => {
-    assert.ok(e.message.length < 1000, `${e.message.length} characters`);
-    assert.match(e.message.slice(0, 200), /закоммитит их или уберёт из индекса/);
-    assert.match(e.message, /\n"a, b\.txt"\n/);
-    assert.match(e.message, /и ещё 11$/);
-    return true;
-  });
+  const refusal = async () => checkpoint({ root: top, token: (await listChanges({ root: top })).token, message: 'cp' }).then(() => '', (e: Error) => e.message);
+  const check = (message: string, total: number) => {
+    assert.ok(Buffer.byteLength(message) < 1000, `${Buffer.byteLength(message)} bytes`);
+    assert.match(message.slice(0, 200), new RegExp(`изменения \\(${total}\\)\\. Пусть владелец закоммитит их или уберёт из индекса`));
+    const shown = message.split('\n').filter(l => l.startsWith('"')).length;
+    assert.ok(shown > 0 && shown < total);
+    assert.match(message, new RegExp(`\\nи ещё ${total - shown}$`), 'the omitted count is always there');
+  };
+  const first = await refusal();
+  check(first, 19);
+  assert.match(first, /\n"a, b\.txt"\n/);
+  // Paths under a long folder: fewer fit, every shown one is whole, and the rest are counted.
+  sh(top, 'reset', '-q');
+  const longer = path.join(top, 'l'.repeat(60), 'м'.repeat(60));
+  mkdirSync(longer, { recursive: true });
+  for (let i = 1; i <= 8; i++) writeFileSync(path.join(longer, `fixture-${i}.test.ts`), 'x\n');
+  sh(top, 'add', '--', longer);
+  check(await refusal(), 8);
 });
 
 test('checkpoint: a staged edit hidden behind a block refresh is refused, and the message names files, not commands', async () => {
