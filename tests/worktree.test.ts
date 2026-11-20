@@ -524,11 +524,14 @@ test('bring-back keeps the chat folder in place: renaming its only file, an empt
   const before = statSync(base);
   const one = await createWorktree({ basePath: base, name: 'keep-1' });
   renameSync(path.join(one.path, 'old.txt'), path.join(one.path, 'new.txt'));
-  // A placeholder left by a host killed in the middle of a bring-back: the checkpoint ignores it, the retry removes it.
-  writeFileSync(path.join(base, '.aif-bring-back-keep'), '');
-  assert.deepEqual((await listChanges({ root: base })).files, []);
+  // The host was killed after the first step (the added file) and before the deletion and the receipt: the retry
+  // skips what already went in and finishes, instead of refusing a patch that "does not apply".
+  writeFileSync(path.join(base, 'new.txt'), 'a\n');
+  const owner = path.join(base, 'owner.txt');
+  writeFileSync(owner, 'mine, untouched\n');
   assert.equal((await bringBack({ root: base, copy: one.path })).applied, true);
-  assert.deepEqual(readdirSync(base), ['new.txt'], 'no placeholder left behind');
+  assert.deepEqual(readdirSync(base).sort(), ['new.txt', 'owner.txt']);
+  unlinkSync(owner);
   if (process.platform !== 'win32') {
     assert.equal(statSync(base).ino, before.ino);
     assert.equal(statSync(base).mode & 0o777, 0o700);
@@ -541,13 +544,37 @@ test('bring-back keeps the chat folder in place: renaming its only file, an empt
   assert.equal((await bringBack({ root: base, copy: three.path })).applied, true);
   assert.equal(text(path.join(top, 'root.txt')), 'r2\n');
   sh(top, 'checkout', '--', 'sec'); sh(top, 'commit', '-qam', 'root');
+  // Killed after the whole patch went in and before the receipt: the retry reports success and changes nothing.
+  const four = await createWorktree({ basePath: base, name: 'keep-4' });
+  writeFileSync(path.join(four.root, 'root.txt'), 'r3\n');
+  writeFileSync(path.join(top, 'root.txt'), 'r3\n');
+  assert.equal((await bringBack({ root: base, copy: four.path })).applied, true);
+  assert.equal(text(path.join(top, 'root.txt')), 'r3\n');
+  sh(top, 'commit', '-qam', 'root again');
   // An empty subfolder the patch does not touch keeps the folder: moving the file out is fine.
   mkdirSync(path.join(base, 'empty'));
   const two = await createWorktree({ basePath: base, name: 'keep-2' });
   renameSync(path.join(two.path, 'new.txt'), path.join(two.root, 'moved.txt'));
   assert.equal((await bringBack({ root: base, copy: two.path })).applied, true);
   assert.equal(existsSync(path.join(top, 'moved.txt')), true);
-  for (const made of [one, two, three]) await removeWorktree({ basePath: base, root: made.root });
+  for (const made of [one, two, three, four]) await removeWorktree({ basePath: base, root: made.root });
+});
+
+test('bring-back: a file replaced by a folder of the same name, and back, goes in one step', async () => {
+  const top = path.join(sandbox, 'swap repo');
+  const sh = (cwd: string, ...args: string[]) => execFileSync('git', ['-C', cwd, '-c', 'user.email=t@t', '-c', 'user.name=t', ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
+  mkdirSync(path.join(top, 'sec', 'dir'), { recursive: true });
+  writeFileSync(path.join(top, 'sec', 'x'), 'file\n');
+  writeFileSync(path.join(top, 'sec', 'dir', 'y'), 'y\n');
+  sh(top, 'init', '-q'); sh(top, 'config', 'core.autocrlf', 'false'); sh(top, 'add', '-A'); sh(top, 'commit', '-qm', 'init');
+  const base = path.join(top, 'sec');
+  const one = await createWorktree({ basePath: base, name: 'swap-1' });
+  unlinkSync(path.join(one.path, 'x')); mkdirSync(path.join(one.path, 'x')); writeFileSync(path.join(one.path, 'x', 'z'), 'z\n');
+  rmSync(path.join(one.path, 'dir'), { recursive: true }); writeFileSync(path.join(one.path, 'dir'), 'now a file\n');
+  assert.equal((await bringBack({ root: base, copy: one.path })).applied, true);
+  assert.equal(text(path.join(base, 'x', 'z')), 'z\n');
+  assert.equal(text(path.join(base, 'dir')), 'now a file\n');
+  await removeWorktree({ basePath: base, root: one.root });
 });
 
 test('checkpoint: the staged refusal puts the instruction first, caps the list and quotes each path on its own line', async () => {
