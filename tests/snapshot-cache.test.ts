@@ -54,6 +54,16 @@ test('invalidation during a scan prevents old completion overwriting newer data'
   old.resolve(snapshot()); await before;
   assert.equal(h.disk.get('key')!.value.fingerprint, newer.fingerprint); assert.equal(h.writes, 1); h.cache.dispose();
 });
+test('a refresh notifies only when the snapshot actually changed', async () => {
+  const h = setup();
+  await h.cache.get('key', async () => snapshot());
+  const changes = h.changes;
+  await h.cache.get('key', async () => snapshot({ collectedAt: '2099-01-01T00:00:00.000Z' }), true);
+  assert.equal(h.changes, changes, 'only collectedAt differs');
+  await h.cache.get('key', async () => snapshot({ fingerprint: 'b'.repeat(64) }), true);
+  assert.equal(h.changes, changes + 1);
+  h.cache.dispose();
+});
 test('different scopes never share values, and disposed loads cannot write or notify', async () => {
   const h = setup(); await h.cache.get('one', async () => snapshot());
   const other = await h.cache.get('two', async () => snapshot({ root: '/other' })); assert.equal(other.root, '/other');

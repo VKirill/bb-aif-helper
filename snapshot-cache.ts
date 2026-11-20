@@ -5,6 +5,8 @@ type Entry = CachedSnapshot & { dirty?: boolean; retryAt?: number; error?: boole
 type Store = { read(key: string): CachedSnapshot | null; write(key: string, entry: CachedSnapshot): void; changed(key: string): void };
 const TTL = 60000;
 const MAX_AGE = 24 * 60 * 60000;
+// collectedAt changes on every read; it alone is not a change worth refreshing clients for.
+const sameContent = (value: Snapshot) => JSON.stringify({ ...value, collectedAt: '' });
 
 /** Shared, bounded stale-while-revalidate cache. Forced reads never fall back. */
 export class SnapshotCache {
@@ -49,9 +51,10 @@ export class SnapshotCache {
     const promise = Promise.resolve().then(load).then(value => {
       const entry: Entry = { at: this.now(), value: structuredClone(value) };
       if (!this.disposed && epoch === (this.epochs.get(key) ?? 0)) {
+        const previous = this.entries.get(key);
         this.remember(key, entry);
         try { this.store.write(key, { at: entry.at, value: entry.value }); } catch { /* Disk failures do not break a live status. */ }
-        this.store.changed(key);
+        if (!previous || sameContent(previous.value) !== sameContent(entry.value)) this.store.changed(key);
       }
       return entry;
     }).catch(error => {

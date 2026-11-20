@@ -104,7 +104,7 @@ test('OpenSpec rules action stays bound to the selected change rather than resol
 });
 test('unavailable skills remain disabled and unknown target is not guessed', () => {
   assert(!workflowActions(snapshot({ skills: [] }))[0].available);
-  assert.deepEqual(workflowActions(snapshot({ target: null, candidates: [{ path: 'a', title: 'a', kind: 'full' }, { path: 'b', title: 'b', kind: 'full' }] })).filter(a => a.group !== 'maintenance'), []);
+  assert.deepEqual(workflowActions(snapshot({ target: null, candidates: [{ path: 'a', title: 'a', kind: 'full' }, { path: 'b', title: 'b', kind: 'full' }] })).filter(a => a.group === 'next' || a.group === 'check'), []);
 });
 test('quality and CI actions do not label configuration as a successful check', () => {
   const a = workflowActions(snapshot());
@@ -194,4 +194,15 @@ test('both update actions order core, project, extensions and verification and s
 test('setup action does not pass the selected plan as an aif argument', () => {
   const s = snapshot(); const a = workflowActions(s).find(a => a.id === 'setup-context')!;
   assert.equal(a.command, '$aif'); assert(!actionPrompt(s, a).includes(s.target!.path));
+});
+
+test('readiness setup actions exist without a selected plan and follow installed skills', () => {
+  const actions = workflowActions(snapshot({ target: null, candidates: [] }));
+  const quality = actions.find(a => a.id === 'quality-setup')!, architecture = actions.find(a => a.id === 'setup-architecture')!;
+  assert.equal(quality.group, 'setup'); assert.equal(quality.available, true); assert.equal(quality.command, '$aif-quality-setup setup');
+  assert.equal(architecture.available, false); assert.match(architecture.reason, /Сначала установите aif-architecture/);
+  assert(actions.some(a => a.id === 'ci-setup'));
+  for (const id of ['setup-roadmap', 'setup-rules', 'setup-docs', 'setup-build', 'setup-docker']) assert(!actions.some(a => a.id === id), id);
+  const prompt = actionPrompt(snapshot(), { ...architecture, available: true });
+  assert.match(prompt, /^\$aif-architecture/); assert.match(prompt, /Не выполняй план/);
 });

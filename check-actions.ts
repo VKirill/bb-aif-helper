@@ -7,6 +7,12 @@ export const rowActions: Record<string, string> = {
   worktree: 'check-worktree',
   coupling: 'check-coupling',
 };
+/** Optional project commands offered in the tab's «Другие команды» list, with their «?» text. */
+export const toolHelp: Record<string, string> = {
+  'roadmap-setup': '/aif-roadmap составляет или обновляет план развития проекта по этапам (ROADMAP.md). По нему /aif-roadmap-next подсказывает, какую задачу планировать следующей, а /aif-plan привязывает планы к этапам. Нужен, когда впереди много этапов.',
+  'archive-plans': '/aif-archive переносит выполненные планы в архив и при желании убирает закрытые этапы из ROADMAP.md, чтобы в списке задач остались только актуальные.',
+};
+
 export const supplementaryChecks = new Set(['rules', 'security', 'review', 'qa-plan', 'qa', 'quality', 'ci', 'mode', 'worktree', 'completion-hook', 'coupling']);
 export const checkHelp: Readonly<Record<string, string>> = {
   verify: 'Сверяет реализацию с выбранным планом и выполняет применимые проверки проекта.',
