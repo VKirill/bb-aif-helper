@@ -273,7 +273,7 @@ You alone commit, exactly where the plan says (its commit tasks, its \`## Commit
 
 \`\`\`
 You are an implement-worker of an AI Factory /aif-implement coordinator (BB thread <thread-id>).
-Do exactly the one task below in the current workspace, then stop. Do not edit the plan or phase files or their checkboxes, do not commit, push or switch branches, do not start AI Factory skills or other agents. Change files only, and only inside the current workspace (a path outside it, given as input, is read only): no git command that changes the index or history (add, rm, mv, stash, reset, checkout, restore).
+Do exactly the one task below in the current workspace, then stop. Do not edit the plan or phase files or their checkboxes, do not commit, push or switch branches, do not start AI Factory skills or other agents. Change files only, and only inside your own copy of the repository, folders above the current one included (a path outside the copy, given as input, is read only): no git command that changes the index or history (add, rm, mv, stash, reset, checkout, restore).
 If the task contradicts the plan, the requirements or the code, change nothing and answer "handoff_outcome: blocked_external" with the conflict.
 Run the verification commands the task names, review your own diff once and fix what you find.
 Finish with a report: what changed; the list of files you modified; the checks you ran with their results; warnings and anything left open.
