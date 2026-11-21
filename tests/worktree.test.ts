@@ -120,7 +120,8 @@ test('bringing results back: a conflicting patch changes nothing and earlier res
   const before = snapshot();
   const refused = await bringBack({ root: base, copy: two.path });
   assert.equal(refused.applied, false);
-  assert.ok(refused.error, 'refused'); // git's own text depends on its language
+  // A conflict, not an empty transfer; git's own text depends on its language, so it is not matched.
+  assert.deepEqual([refused.empty, refused.files.length > 0, !!refused.error], [false, true, true]);
   assert.deepEqual(snapshot(), before);
   assert.equal(sh(top, 'diff', '--name-only', '--diff-filter=U'), '');
   assert.equal(existsSync(path.join(base, 'new.txt')), false);
@@ -480,7 +481,8 @@ test('review of 9f6867b, 8fa0a42 and af77a9d: a coordinator\'s case-only rename,
   writeFileSync(path.join(copy.path, 'collision.txt'), 'w\n');
   writeFileSync(path.join(top, 'collision.txt'), 'c\n');
   const collided = await bringBack({ root: top, copy: copy.path });
-  assert.equal(collided.applied, false); assert.ok(collided.error, 'refused'); // git's own text depends on its language
+  assert.equal(collided.applied, false);
+  assert.deepEqual([collided.empty, collided.files.includes('collision.txt'), !!collided.error], [false, true, true]);
   unlinkSync(path.join(top, 'collision.txt'));
   writeFileSync(path.join(copy.path, '.gitignore'), 'previous.txt\n');
   sh(top, 'gc', '-q', '--prune=now');
