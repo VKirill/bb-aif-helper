@@ -6,7 +6,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, realpa
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { createWorktree, removeWorktree, worktreesRoot } from '../worktree.ts';
-import { bringBack } from '../parallel-git.ts';
+import { bringBack, submodulesWithEdits } from '../parallel-git.ts';
 
 const sandbox = realpathSync(mkdtempSync(path.join(tmpdir(), 'aif-wt-')));
 // os.homedir() reads HOME on POSIX and USERPROFILE on Windows.
@@ -287,6 +287,19 @@ test('bring-back: a submodule move is refused, a renamed section still comes bac
   assert.equal(refused.applied, false);
   assert.match(refused.error ?? '', /подмодуль: mod/);
   await removeWorktree({ basePath: top, root: two.root });
+  // Edits inside a checked-out submodule (another repository) are refused too, not reported as brought back without them.
+  const four = await createWorktree({ basePath: top, name: 'moves-4' });
+  sh(four.path, 'submodule', 'update', '-q', '--init');
+  writeFileSync(path.join(four.path, 'mod', 'f.txt'), 'edited inside the submodule');
+  writeFileSync(path.join(four.path, 'moved', 'a.md'), 'parent edit\n');
+  const inside = await bringBack({ root: top, copy: four.path });
+  assert.equal(inside.applied, false);
+  assert.match(inside.error ?? '', /внутри подмодуля: mod/);
+  assert.notEqual(text(path.join(top, 'moved', 'a.md')), 'parent edit\n', 'nothing is brought back');
+  writeFileSync(path.join(four.path, 'mod', 'f.txt'), 'B'); // back to its commit; an untracked file alone also counts
+  writeFileSync(path.join(four.path, 'mod', 'new.txt'), 'n');
+  assert.match((await bringBack({ root: top, copy: four.path })).error ?? '', /внутри подмодуля: mod/);
+  await removeWorktree({ basePath: top, root: four.root });
   if (process.platform !== 'win32' && process.getuid?.() !== 0) {
     const { chmodSync } = await import('node:fs');
     const three = await createWorktree({ basePath: top, name: 'moves-3' });
@@ -502,4 +515,18 @@ test('review of 9f6867b, 8fa0a42 and af77a9d: a coordinator\'s case-only rename,
   assert.match((await bringBack({ root: top, copy: copy.path })).error ?? '', /Базовое состояние копии исполнителя потеряно/);
   assert.equal(existsSync(path.join(top, 'more.txt')), false);
   await removeWorktree({ basePath: top, root: copy.root });
+});
+
+test('submodulesWithEdits reads porcelain v2: only submodules with changed or untracked files, paths with spaces, renames', () => {
+  const status = [
+    '1 .M N... 100644 100644 100644 aaa aaa file with space.txt',
+    '1 .M S.M. 160000 160000 160000 bbb bbb libs/my sub',
+    '1 .M S..U 160000 160000 160000 ccc ccc untracked sub',
+    '1 M. SC.. 160000 160000 160000 ddd eee moved only',
+    '2 R. N... 100644 100644 100644 fff fff R100 new name.txt', 'old name.txt',
+    '? loose.txt',
+    '',
+  ].join('\0');
+  assert.deepEqual(submodulesWithEdits(status), ['libs/my sub', 'untracked sub']);
+  assert.deepEqual(submodulesWithEdits(''), []);
 });

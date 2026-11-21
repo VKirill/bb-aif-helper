@@ -24,6 +24,25 @@ const FROM_STDIN = ['--pathspec-from-file=-', '--pathspec-file-nul'];
 // git ends its answer with a newline; a path may itself start or end with a space, so nothing else is trimmed.
 const line = (text: string) => text.replace(/\r?\n$/, '');
 
+/**
+ * Submodules with changed or untracked files inside them, from `git status --porcelain=v2 -z`. An ordinary (`1`) or
+ * unmerged (`u`) entry has 8 or 10 fields before its path, a renamed one (`2`) 9 fields, then its old path as the
+ * next NUL-separated token. The third field is `N...` for a file and `S<c><m><u>` for a submodule, where `m` is `M`
+ * for changed tracked files and `u` is `U` for untracked ones.
+ */
+export function submodulesWithEdits(status: string): string[] {
+  const tokens = status.split('\0'), found: string[] = [];
+  for (let i = 0; i < tokens.length; i++) {
+    const entry = tokens[i], kind = entry[0];
+    const before = kind === '1' ? 8 : kind === '2' ? 9 : kind === 'u' ? 10 : -1;
+    if (before < 0) continue;
+    if (kind === '2') i++; // skip the old path of a rename
+    const fields = entry.split(' ');
+    if (/^S.(M.|.U)$/.test(fields[2] ?? '')) found.push(fields.slice(before).join(' '));
+  }
+  return found;
+}
+
 async function repo(root: string) {
   const top = line(await git(root, ['rev-parse', '--show-toplevel']).catch(() => { throw new Error(`${root} не в git-репозитории`); }));
   const prefix = line(await git(root, ['rev-parse', '--show-prefix'])); // `sec/` or '' — always with `/`
@@ -98,6 +117,10 @@ export async function bringBack(input: { root: string; copy: string }) {
   await inCopy(['-c', 'core.fsmonitor=false', 'add', '-A']);
   const tree = line(await inCopy(['write-tree']));
   const files = (await inCopy(['diff', '--cached', '--name-only', '-z', '--no-relative', '--no-renames', '--ignore-submodules=none', base])).split('\0').filter(Boolean);
+  // Edits inside a checked-out submodule belong to another repository: neither the tree nor a patch carries them, so
+  // refuse instead of reporting a transfer (or nothing to transfer) while they are left behind.
+  const dirtySubmodules = submodulesWithEdits(await git(theirs.top, ['status', '--porcelain=v2', '-z', '--ignore-submodules=none']));
+  if (dirtySubmodules.length) return { applied: false as const, empty: false as const, files, error: `Исполнитель изменил файлы внутри подмодуля: ${dirtySubmodules.join(', ')}. Это другой репозиторий, патч их не переносит — перенесите вручную.` };
   if (!files.length) return { applied: false as const, empty: true as const, files };
   // `git apply` without --index cannot move a submodule: say so instead of reporting a transfer that did not happen.
   const raw = await inCopy(['diff', '--cached', '--raw', '-z', '--no-renames', '--no-abbrev', '--ignore-submodules=none', base]);
