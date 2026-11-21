@@ -76,7 +76,8 @@ async function seed(top: string, root: string, sha: string) {
     // file, a case-only rename, a removal from the index) is part of its work too.
     const index = await git(top, ['rev-parse', '--path-format=absolute', '--git-path', 'index']);
     await copyIndex(index, env.GIT_INDEX_FILE).catch(() => inTemp(['read-tree', sha]));
-    await inTemp(['-c', 'core.fsmonitor=false', 'add', '-A']);
+    // BB keeps each chat's attachments and notes in `.bb/chats/` of the project: the coordinator's own storage, not work.
+    await inTemp(['-c', 'core.fsmonitor=false', 'add', '-A', '--', '.', ':(exclude,glob)**/.bb/chats/**']);
     const tree = (await inTemp(['write-tree'])).stdout.trim();
     // --reset, not a two-tree merge: the fresh copy has nothing to keep, and a merge refuses a case-only rename on a
     // case-insensitive disk (`hello.txt` "would be overwritten" by itself).

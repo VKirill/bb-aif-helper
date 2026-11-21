@@ -267,7 +267,7 @@ The owner allowed up to ${n} workers at once. You run the plan as AI Factory's \
 
 ### Commits
 
-You alone commit, exactly where the plan says (its commit tasks, its \`## Commit Plan\`, the final commit of \`single-commit\`), with the plan's message; you never push without the owner. Parallel layers need no commits of their own: every copy starts from your current workspace.
+You alone commit, exactly where the plan says (its commit tasks, its \`## Commit Plan\`, the final commit of \`single-commit\`), with the plan's message, through the skill's own commit flow (commit-task handler and receipts, as without workers); you never push without the owner. Parallel layers need no commits of their own: every copy starts from your current workspace.
 
 ### The worker contract — the mandatory start of every brief (replace \`<thread-id>\` with your own \`BB_THREAD_ID\`)
 
