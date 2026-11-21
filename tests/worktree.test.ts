@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 // On Windows rmSync can silently keep a file whose path has Cyrillic in it; tests delete files with unlinkSync.
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, realpathSync, renameSync, rmSync, unlinkSync, chmodSync, statSync, readdirSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, realpathSync, renameSync, rmSync, unlinkSync, chmodSync, statSync, readdirSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { createWorktree, removeWorktree, worktreesRoot } from '../worktree.ts';
@@ -320,6 +320,40 @@ test('bring-back: a submodule move is refused, a renamed section still comes bac
   assert.equal(unchecked.applied, false);
   assert.match(unchecked.error ?? '', /внутри подмодуля[\s\S]*"mod\/gen\/generated\.mjs"/);
   assert.notEqual(text(path.join(top, 'moved', 'a.md')), 'imports mod/gen/generated.mjs\n', 'nothing is brought back');
+  // Build output that the coordinator's checked-out submodule ignores is not a change: that is where it would land.
+  rmSync(path.join(six.path, 'mod', 'gen'), { recursive: true });
+  const exclude = path.resolve(top, 'mod', sh(path.join(top, 'mod'), 'rev-parse', '--git-path', 'info/exclude'));
+  mkdirSync(path.dirname(exclude), { recursive: true });
+  writeFileSync(exclude, 'dist/\n');
+  mkdirSync(path.join(six.path, 'mod', 'dist'), { recursive: true });
+  writeFileSync(path.join(six.path, 'mod', 'dist', 'generated.mjs'), 'built\n');
+  const built = await bringBack({ root: top, copy: six.path });
+  assert.deepEqual([built.applied, built.files], [true, ['moved/a.md']], built.error);
+  sh(top, 'checkout', '-q', '--', 'moved/a.md');
+  // A folder that cannot be read refuses instead of hiding what is inside it (root reads everything; Windows has no modes).
+  if (process.platform !== 'win32' && process.getuid?.() !== 0) {
+    mkdirSync(path.join(six.path, 'mod', 'locked'));
+    writeFileSync(path.join(six.path, 'mod', 'locked', 'x.mjs'), 'x\n');
+    chmodSync(path.join(six.path, 'mod', 'locked'), 0o311);
+    writeFileSync(path.join(six.path, 'moved', 'a.md'), 'second edit\n');
+    await assert.rejects(bringBack({ root: top, copy: six.path }), /Не удалось прочитать папку/);
+    chmodSync(path.join(six.path, 'mod', 'locked'), 0o755);
+    rmSync(path.join(six.path, 'mod', 'locked'), { recursive: true });
+    assert.notEqual(text(path.join(top, 'moved', 'a.md')), 'second edit\n', 'nothing is brought back');
+  }
+  // The submodule folder replaced by a symlink is itself the change; nothing outside the copy is listed.
+  if (process.platform !== 'win32') {
+    const outside = mkdtempSync(path.join(tmpdir(), 'aif-outside-'));
+    writeFileSync(path.join(outside, 'external-only.txt'), 'x');
+    rmSync(path.join(six.path, 'mod'), { recursive: true });
+    symlinkSync(outside, path.join(six.path, 'mod'));
+    const linked = await bringBack({ root: top, copy: six.path });
+    assert.equal(linked.applied, false);
+    assert.match(linked.error ?? '', /внутри подмодуля[\s\S]*"mod"/);
+    assert.doesNotMatch(linked.error ?? '', /external-only/);
+    rmSync(outside, { recursive: true, force: true });
+  }
+  rmSync(exclude, { force: true });
   await removeWorktree({ basePath: top, root: six.root });
   // A nested submodule that its parent marks `ignore = all`: an edit two levels down is still found.
   const inner = path.join(sandbox, 'moves inner');
