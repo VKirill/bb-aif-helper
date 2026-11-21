@@ -6,8 +6,8 @@ import plugin from '../server.ts';
 // The coordinator works on Windows here: every value reaches BB and the folder's machine as data, never through a shell.
 const ROOT = 'C:\\Users\\Dev User\\репо';
 async function setup() {
-  const calls: { method: string; input: any; hostId: string }[] = [];
-  const spawns: any[] = [];
+  const calls: { method: string; input: any; hostId: string }[] = [];  // guardian: allow — loose mock of the BB SDK and host RPC in this test
+  const spawns: any[] = [];  // guardian: allow — loose mock of the BB SDK and host RPC in this test
   const threads: Record<string, any> = {
     thr_test: makeThreadResponse({ id: 'thr_test', projectId: 'proj_test', environmentId: 'env_test', status: 'idle', runtime: { displayStatus: 'idle' } }),
     thr_worker: { ...makeThreadResponse({ id: 'thr_worker', projectId: 'proj_test', environmentId: 'env_worker', status: 'idle', runtime: { displayStatus: 'idle' } }), parentThreadId: 'thr_test' },
@@ -19,13 +19,13 @@ async function setup() {
   };
   const h = createFakePluginHost({ pluginId: 'aif-chat', agentSkillIds: ['aif-chat'], experimental_hostEntry: true,
     sdk: {
-      threads: { get: async ({ threadId }: any) => threads[threadId], list: async () => [], spawn: async (args: any) => { spawns.push(args); return { ...threads.thr_test, id: 'thr_new' }; } } as any,
-      environments: { get: async ({ environmentId }: any) => envs[environmentId] } as any,
+      threads: { get: async ({ threadId }: any) => threads[threadId], list: async () => [], spawn: async (args: any) => { spawns.push(args); return { ...threads.thr_test, id: 'thr_new' }; } } as any,  // guardian: allow — loose mock of the BB SDK and host RPC in this test
+      environments: { get: async ({ environmentId }: any) => envs[environmentId] } as any,  // guardian: allow — loose mock of the BB SDK and host RPC in this test
     },
     experimental_callHostRpc: async call => {
       calls.push({ method: call.method, input: call.input, hostId: call.hostId });
       if (call.method === 'collect') throw new Error('not needed');
-      if (call.method === 'delegation') return { choice: { mode: 'bb', providerId: 'codex', model: 'gpt-6.2-sol', reasoning: 'high', tier: 'fast', parallel: 2 }, research: { mode: 'self' }, research2: { mode: 'self' }, research3: { mode: 'self' }, configured: true, foreign: null, error: null } as any;
+      if (call.method === 'delegation') return { choice: { mode: 'bb', providerId: 'codex', model: 'gpt-6.2-sol', reasoning: 'high', tier: 'fast', parallel: 2 }, research: { mode: 'self' }, research2: { mode: 'self' }, research3: { mode: 'self' }, configured: true, foreign: null, error: null } as any;  // guardian: allow — loose mock of the BB SDK and host RPC in this test
       if (call.method === 'readBrief') return { text: 'Do task 2.' };
       if (call.method === 'headCommit') return { sha: 'c'.repeat(40) };
       if (call.method === 'bringBack') return { applied: true, files: ['src/b.ts'] };
@@ -57,6 +57,16 @@ test('spawn-worker starts the owner model on a fresh copy seeded with the coordi
     // A retry gets its own copy name.
     await h.harness.behavior.runCli(['spawn-worker', '--thread', 'thr_test', '--target', '.ai-factory/plans/demo.md', '--task', '2', '--brief', 'C:\\Temp\\brief 2.md']);
     assert.notEqual(spawns[1].environment.inputs.name, args.environment.inputs.name);
+    // A nested task id, as the plan card reads `Task 1.2`, is accepted; anything else is refused before a spawn.
+    const nested = await h.harness.behavior.runCli(['spawn-worker', '--thread', 'thr_test', '--target', '.ai-factory/plans/demo.md', '--task', '1.2', '--brief', 'C:\\Temp\\brief 2.md']);
+    assert.equal(nested.exitCode, 0, nested.stderr);
+    assert.match(spawns[2].environment.inputs.name, /^demo-1\.2-[0-9a-f]{8}$/);
+    assert.equal(spawns[2].title, 'AIF · demo · 1.2');
+    for (const bad of ['1.', '.2', '1..2', '1 2', 'a']) {
+      const refused = await h.harness.behavior.runCli(['spawn-worker', '--thread', 'thr_test', '--target', '.ai-factory/plans/demo.md', '--task', bad, '--brief', 'C:\\Temp\\brief 2.md']);
+      assert.notEqual(refused.exitCode, 0, bad);
+    }
+    assert.equal(spawns.length, 3);
   } finally { await h.harness.lifecycle.dispose(); }
 });
 

@@ -6,7 +6,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, realpa
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { createWorktree, removeWorktree, worktreesRoot } from '../worktree.ts';
-import { bringBack, submodulesWithEdits } from '../parallel-git.ts';
+import { bringBack } from '../parallel-git.ts';
 
 const sandbox = realpathSync(mkdtempSync(path.join(tmpdir(), 'aif-wt-')));
 // os.homedir() reads HOME on POSIX and USERPROFILE on Windows.
@@ -287,7 +287,7 @@ test('bring-back: a submodule move is refused, a renamed section still comes bac
   assert.equal(refused.applied, false);
   assert.match(refused.error ?? '', /подмодуль: mod/);
   await removeWorktree({ basePath: top, root: two.root });
-  // Edits inside a checked-out submodule (another repository) are refused too, not reported as brought back without them.
+  // Tracked edits inside a checked-out submodule (another repository) are refused, not reported as brought back.
   const four = await createWorktree({ basePath: top, name: 'moves-4' });
   sh(four.path, 'submodule', 'update', '-q', '--init');
   writeFileSync(path.join(four.path, 'mod', 'f.txt'), 'edited inside the submodule');
@@ -296,10 +296,28 @@ test('bring-back: a submodule move is refused, a renamed section still comes bac
   assert.equal(inside.applied, false);
   assert.match(inside.error ?? '', /внутри подмодуля: mod/);
   assert.notEqual(text(path.join(top, 'moved', 'a.md')), 'parent edit\n', 'nothing is brought back');
-  writeFileSync(path.join(four.path, 'mod', 'f.txt'), 'B'); // back to its commit; an untracked file alone also counts
-  writeFileSync(path.join(four.path, 'mod', 'new.txt'), 'n');
-  assert.match((await bringBack({ root: top, copy: four.path })).error ?? '', /внутри подмодуля: mod/);
+  // Files an install step generated inside the submodule (untracked) are not edits: the parent edit comes back.
+  writeFileSync(path.join(four.path, 'mod', 'f.txt'), 'B');
+  mkdirSync(path.join(four.path, 'mod', 'dist'), { recursive: true });
+  writeFileSync(path.join(four.path, 'mod', 'dist', 'index.js'), 'built');
+  const built = await bringBack({ root: top, copy: four.path });
+  assert.deepEqual([built.applied, built.files], [true, ['moved/a.md']]);
+  assert.equal(text(path.join(top, 'moved', 'a.md')), 'parent edit\n');
   await removeWorktree({ basePath: top, root: four.root });
+  sh(top, 'checkout', '-q', '--', 'moved/a.md');
+  // A nested submodule that its parent marks `ignore = all`: an edit two levels down is still found.
+  const inner = path.join(sandbox, 'moves inner');
+  mkdirSync(inner, { recursive: true }); sh(inner, 'init', '-q');
+  writeFileSync(path.join(inner, 'g.txt'), 'G'); sh(inner, 'add', '-A'); sh(inner, 'commit', '-qm', 'G');
+  sh(sub, 'submodule', 'add', '-q', inner, 'inner');
+  sh(sub, 'config', '-f', '.gitmodules', 'submodule.inner.ignore', 'all'); sh(sub, 'add', '-A'); sh(sub, 'commit', '-qm', 'nested');
+  sh(path.join(top, 'mod'), 'pull', '-q', 'origin', 'HEAD'); sh(top, 'add', '-A'); sh(top, 'commit', '-qm', 'nested submodule');
+  const five = await createWorktree({ basePath: top, name: 'moves-5' });
+  sh(five.path, 'submodule', 'update', '-q', '--init', '--recursive');
+  writeFileSync(path.join(five.path, 'mod', 'inner', 'g.txt'), 'edited two levels down');
+  writeFileSync(path.join(five.path, 'moved', 'a.md'), 'parent edit\n');
+  assert.match((await bringBack({ root: top, copy: five.path })).error ?? '', /внутри подмодуля: mod\/inner/);
+  await removeWorktree({ basePath: top, root: five.root });
   if (process.platform !== 'win32' && process.getuid?.() !== 0) {
     const { chmodSync } = await import('node:fs');
     const three = await createWorktree({ basePath: top, name: 'moves-3' });
@@ -517,16 +535,3 @@ test('review of 9f6867b, 8fa0a42 and af77a9d: a coordinator\'s case-only rename,
   await removeWorktree({ basePath: top, root: copy.root });
 });
 
-test('submodulesWithEdits reads porcelain v2: only submodules with changed or untracked files, paths with spaces, renames', () => {
-  const status = [
-    '1 .M N... 100644 100644 100644 aaa aaa file with space.txt',
-    '1 .M S.M. 160000 160000 160000 bbb bbb libs/my sub',
-    '1 .M S..U 160000 160000 160000 ccc ccc untracked sub',
-    '1 M. SC.. 160000 160000 160000 ddd eee moved only',
-    '2 R. N... 100644 100644 100644 fff fff R100 new name.txt', 'old name.txt',
-    '? loose.txt',
-    '',
-  ].join('\0');
-  assert.deepEqual(submodulesWithEdits(status), ['libs/my sub', 'untracked sub']);
-  assert.deepEqual(submodulesWithEdits(''), []);
-});

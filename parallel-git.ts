@@ -25,20 +25,21 @@ const FROM_STDIN = ['--pathspec-from-file=-', '--pathspec-file-nul'];
 const line = (text: string) => text.replace(/\r?\n$/, '');
 
 /**
- * Submodules with changed or untracked files inside them, from `git status --porcelain=v2 -z`. An ordinary (`1`) or
- * unmerged (`u`) entry has 8 or 10 fields before its path, a renamed one (`2`) 9 fields, then its old path as the
- * next NUL-separated token. The third field is `N...` for a file and `S<c><m><u>` for a submodule, where `m` is `M`
- * for changed tracked files and `u` is `U` for untracked ones.
+ * Checked-out submodules whose tracked files differ from their own HEAD (staged or not), at any depth. Each submodule
+ * is asked directly, so neither the parent's `status.*` or `diff.ignoreSubmodules` settings nor an `ignore = all` in
+ * a `.gitmodules` can hide an edit. Untracked files inside a submodule (a `dist/` its install step built) are not
+ * edits. A submodule that moved to another commit is the parent's gitlink change and is reported by the caller.
  */
-export function submodulesWithEdits(status: string): string[] {
-  const tokens = status.split('\0'), found: string[] = [];
-  for (let i = 0; i < tokens.length; i++) {
-    const entry = tokens[i], kind = entry[0];
-    const before = kind === '1' ? 8 : kind === '2' ? 9 : kind === 'u' ? 10 : -1;
-    if (before < 0) continue;
-    if (kind === '2') i++; // skip the old path of a rename
-    const fields = entry.split(' ');
-    if (/^S.(M.|.U)$/.test(fields[2] ?? '')) found.push(fields.slice(before).join(' '));
+async function submodulesWithEdits(top: string, shown = ''): Promise<string[]> {
+  const found: string[] = [];
+  for (const entry of (await git(top, ['ls-files', '--stage', '-z'])).split('\0')) {
+    if (!entry.startsWith('160000 ')) continue;
+    const rel = entry.slice(entry.indexOf('\t') + 1), dir = path.join(top, rel), name = `${shown}${rel}`;
+    if (!(await exists(path.join(dir, '.git')))) continue; // not checked out: nothing of the worker's can be there
+    // --ignore-submodules=dirty: a nested submodule that moved counts here, its own edits are found by the recursion.
+    const edited = await git(dir, ['diff', '--quiet', '--no-ext-diff', '--ignore-submodules=dirty', 'HEAD', '--']).then(() => false, () => true);
+    if (edited) found.push(name);
+    found.push(...await submodulesWithEdits(dir, `${name}/`));
   }
   return found;
 }
@@ -119,8 +120,8 @@ export async function bringBack(input: { root: string; copy: string }) {
   const files = (await inCopy(['diff', '--cached', '--name-only', '-z', '--no-relative', '--no-renames', '--ignore-submodules=none', base])).split('\0').filter(Boolean);
   // Edits inside a checked-out submodule belong to another repository: neither the tree nor a patch carries them, so
   // refuse instead of reporting a transfer (or nothing to transfer) while they are left behind.
-  const dirtySubmodules = submodulesWithEdits(await git(theirs.top, ['status', '--porcelain=v2', '-z', '--ignore-submodules=none']));
-  if (dirtySubmodules.length) return { applied: false as const, empty: false as const, files, error: `Исполнитель изменил файлы внутри подмодуля: ${dirtySubmodules.join(', ')}. Это другой репозиторий, патч их не переносит — перенесите вручную.` };
+  const dirtySubmodules = await submodulesWithEdits(theirs.top);
+  if (dirtySubmodules.length) return { applied: false as const, empty: false as const, files, error: `Исполнитель изменил отслеживаемые файлы внутри подмодуля: ${dirtySubmodules.join(', ')}. Это другой репозиторий, патч их не переносит — перенесите вручную.` };
   if (!files.length) return { applied: false as const, empty: true as const, files };
   // `git apply` without --index cannot move a submodule: say so instead of reporting a transfer that did not happen.
   const raw = await inCopy(['diff', '--cached', '--raw', '-z', '--no-renames', '--no-abbrev', '--ignore-submodules=none', base]);

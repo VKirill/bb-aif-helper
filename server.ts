@@ -985,7 +985,7 @@ export default async function plugin(bb: BbPluginApi) {
     if (command === 'spawn-worker') {
       const task = options['--task'], brief = options['--brief'];
       if (!target) throw new Error('Укажите план: --target <путь>.');
-      if (!/^\d{1,6}$/.test(task ?? '')) throw new Error('Укажите номер задачи: --task <id>.');
+      if (!/^\d{1,6}(?:\.\d{1,6}){0,5}$/.test(task ?? '')) throw new Error('Укажите номер задачи: --task <id> (например 3 или 1.2).');
       if (!brief) throw new Error('Укажите файл задания: --brief <файл>.');
       const state = await host.call('delegation', { root }, { hostId });
       if (state.choice.mode !== 'bb') throw new Error('Делегирование кода выключено: выполняйте задачи сами.');
