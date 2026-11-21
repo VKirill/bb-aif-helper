@@ -50,7 +50,7 @@ test('contextBlock with parallel spawns workers on BB-made copies and keeps prov
   for (const part of [
     'Parallel mode', 'up to 3 workers', "AI Factory's `implement-coordinator`", '(depends on X, Y)', 'Tasks of the same phase without explicit dependencies are independent',
     '<!-- parallel: tasks N, M -->', '- [~] Task N: … <!-- in-progress -->', '- [!] Task N: … <!-- failed: <reason> -->', 'handoff_outcome: blocked_external',
-    'the list of files you modified', 'same cause three times', 'Status: complete', 'Change files only: no git command that changes the index',
+    'the list of files you modified', 'same cause three times', 'Status: complete', 'Change files only, and only inside the current workspace', 'no git command that changes the index', 'as input to read only',
     // Review of aa0cdb6 and 3377882: resume of [~], old dependency forms, check-only and already-applied tasks,
     // commits only where the plan says, and no error text inside shell quotes.
     'Open tasks are `[ ]` and `[~]`', '`Depends on X`', 'treat it as dependent',
