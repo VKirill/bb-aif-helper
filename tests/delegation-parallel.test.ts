@@ -50,14 +50,14 @@ test('contextBlock with parallel spawns workers on BB-made copies and keeps prov
   for (const part of [
     'Parallel mode', 'up to 3 workers', "AI Factory's `implement-coordinator`", '(depends on X, Y)', 'Tasks of the same phase without explicit dependencies are independent',
     '<!-- parallel: tasks N, M -->', '- [~] Task N: … <!-- in-progress -->', '- [!] Task N: … <!-- failed: <reason> -->', 'handoff_outcome: blocked_external',
-    'the list of files you modified', 'same cause three times', 'Status: complete', 'This workspace is your own copy of the repository', 'a path outside it is input you read and never change', 'Untracked ignored files (dependencies, build output) stay in the copy', 'Do not change tracked files inside a git submodule', '`.git/info/exclude` and global excludes all count', 'whose name has only letters, digits', 'no git command that changes the index', 'The copy holds the files git tracks (a force-added one too)', 'give its absolute path in your workspace in the brief',
+    'the list of files you modified', 'same cause three times', 'Status: complete', 'This workspace is your own copy of the repository', 'a path outside it is input you read and never change', 'Untracked ignored files (dependencies, build output) stay in the copy', 'Do not change or add files inside a git submodule', 'Submodules are not checked out in the copy', 'which keep \`$\`, spaces', '`.git/info/exclude` and global excludes all count', 'whose name has only letters, digits', 'no git command that changes the index', 'The copy holds the files git tracks (a force-added one too)', 'give its absolute path in your workspace in the brief',
     // Review of aa0cdb6 and 3377882: resume of [~], old dependency forms, check-only and already-applied tasks,
     // commits only where the plan says, and no error text inside shell quotes.
     'Open tasks are `[ ]` and `[~]`', '`Depends on X`', 'treat it as dependent',
     'a task that only checks something', 'already in this workspace', 'exactly where the plan says', 'single-commit',
     'the last commit plus your uncommitted work', 'Parallel layers need no commits of their own',
     'bb thread tell <id> --message-file "<file>"',
-    'bb plugin run aif-chat spawn-worker --target "<plan path>" --task <taskId> --brief "<absolute brief path>" --json',
+    "bb plugin run aif-chat spawn-worker --target \"<plan path>\" --task <taskId> --brief '<absolute brief path>' --json",
     'bb plugin run aif-chat bring-back --worker <id> --json', 'nothing was changed', 'there is nothing to undo', '{ applied: false, empty: true }',
     "--provider 'codex'", "--model 'gpt-6.2-sol'", "--reasoning-level 'high'", "--service-tier 'fast'",
     'BB removes its copy',

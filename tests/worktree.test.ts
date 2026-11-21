@@ -294,14 +294,19 @@ test('bring-back: a submodule move is refused, a renamed section still comes bac
   writeFileSync(path.join(four.path, 'moved', 'a.md'), 'parent edit\n');
   const inside = await bringBack({ root: top, copy: four.path });
   assert.equal(inside.applied, false);
-  assert.match(inside.error ?? '', /внутри подмодуля: mod/);
+  assert.match(inside.error ?? '', /внутри подмодуля[\s\S]*"mod\/f\.txt"/);
   assert.notEqual(text(path.join(top, 'moved', 'a.md')), 'parent edit\n', 'nothing is brought back');
-  // Files an install step generated inside the submodule (untracked) are not edits: the parent edit comes back.
+  // A new file inside the submodule is a change a patch cannot carry either (a source file the parent now imports,
+  // or build output): refused with the file named; once the worker's copy no longer has it, the parent edit comes back.
   writeFileSync(path.join(four.path, 'mod', 'f.txt'), 'B');
   mkdirSync(path.join(four.path, 'mod', 'dist'), { recursive: true });
   writeFileSync(path.join(four.path, 'mod', 'dist', 'index.js'), 'built');
-  const built = await bringBack({ root: top, copy: four.path });
-  assert.deepEqual([built.applied, built.files], [true, ['moved/a.md']]);
+  const added = await bringBack({ root: top, copy: four.path });
+  assert.equal(added.applied, false);
+  assert.match(added.error ?? '', /"mod\/dist\/index\.js"/);
+  unlinkSync(path.join(four.path, 'mod', 'dist', 'index.js'));
+  const back = await bringBack({ root: top, copy: four.path });
+  assert.deepEqual([back.applied, back.files], [true, ['moved/a.md']]);
   assert.equal(text(path.join(top, 'moved', 'a.md')), 'parent edit\n');
   await removeWorktree({ basePath: top, root: four.root });
   sh(top, 'checkout', '-q', '--', 'moved/a.md');
@@ -316,7 +321,7 @@ test('bring-back: a submodule move is refused, a renamed section still comes bac
   sh(five.path, 'submodule', 'update', '-q', '--init', '--recursive');
   writeFileSync(path.join(five.path, 'mod', 'inner', 'g.txt'), 'edited two levels down');
   writeFileSync(path.join(five.path, 'moved', 'a.md'), 'parent edit\n');
-  assert.match((await bringBack({ root: top, copy: five.path })).error ?? '', /внутри подмодуля: mod\/inner/);
+  assert.match((await bringBack({ root: top, copy: five.path })).error ?? '', /"mod\/inner\/g\.txt"/);
   await removeWorktree({ basePath: top, root: five.root });
   if (process.platform !== 'win32' && process.getuid?.() !== 0) {
     const { chmodSync } = await import('node:fs');

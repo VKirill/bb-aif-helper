@@ -25,21 +25,23 @@ const FROM_STDIN = ['--pathspec-from-file=-', '--pathspec-file-nul'];
 const line = (text: string) => text.replace(/\r?\n$/, '');
 
 /**
- * Checked-out submodules whose tracked files differ from their own HEAD (staged or not), at any depth. Each submodule
- * is asked directly, so neither the parent's `status.*` or `diff.ignoreSubmodules` settings nor an `ignore = all` in
- * a `.gitmodules` can hide an edit. Untracked files inside a submodule (a `dist/` its install step built) are not
- * edits. A submodule that moved to another commit is the parent's gitlink change and is reported by the caller.
+ * Files the worker changed inside checked-out submodules, at any depth: tracked files that differ from the
+ * submodule's own HEAD (staged or not) and new files its ignore rules do not exclude. A patch of the parent carries
+ * none of them, so the caller refuses instead of leaving them behind. Each submodule is asked directly, so neither
+ * the parent's `status.*` or `diff.ignoreSubmodules` settings nor an `ignore = all` in a `.gitmodules` hides a change.
+ * A submodule that moved to another commit is the parent's gitlink change and is reported by the caller.
  */
-async function submodulesWithEdits(top: string, shown = ''): Promise<string[]> {
+async function submoduleChanges(top: string, shown = ''): Promise<string[]> {
   const found: string[] = [];
   for (const entry of (await git(top, ['ls-files', '--stage', '-z'])).split('\0')) {
     if (!entry.startsWith('160000 ')) continue;
     const rel = entry.slice(entry.indexOf('\t') + 1), dir = path.join(top, rel), name = `${shown}${rel}`;
     if (!(await exists(path.join(dir, '.git')))) continue; // not checked out: nothing of the worker's can be there
-    // --ignore-submodules=dirty: a nested submodule that moved counts here, its own edits are found by the recursion.
-    const edited = await git(dir, ['diff', '--quiet', '--no-ext-diff', '--ignore-submodules=dirty', 'HEAD', '--']).then(() => false, () => true);
-    if (edited) found.push(name);
-    found.push(...await submodulesWithEdits(dir, `${name}/`));
+    // --ignore-submodules=dirty: a nested submodule that moved counts here, its own changes are found by the recursion.
+    const tracked = await git(dir, ['diff', '--name-only', '-z', '--no-ext-diff', '--no-relative', '--ignore-submodules=dirty', 'HEAD', '--']);
+    const added = await git(dir, ['ls-files', '--others', '--exclude-standard', '-z', '--full-name']);
+    for (const file of [...tracked.split('\0'), ...added.split('\0')].filter(Boolean)) found.push(`${name}/${file}`);
+    found.push(...await submoduleChanges(dir, `${name}/`));
   }
   return found;
 }
@@ -120,8 +122,11 @@ export async function bringBack(input: { root: string; copy: string }) {
   const files = (await inCopy(['diff', '--cached', '--name-only', '-z', '--no-relative', '--no-renames', '--ignore-submodules=none', base])).split('\0').filter(Boolean);
   // Edits inside a checked-out submodule belong to another repository: neither the tree nor a patch carries them, so
   // refuse instead of reporting a transfer (or nothing to transfer) while they are left behind.
-  const dirtySubmodules = await submodulesWithEdits(theirs.top);
-  if (dirtySubmodules.length) return { applied: false as const, empty: false as const, files, error: `Исполнитель изменил отслеживаемые файлы внутри подмодуля: ${dirtySubmodules.join(', ')}. Это другой репозиторий, патч их не переносит — перенесите вручную.` };
+  const insideSubmodules = await submoduleChanges(theirs.top);
+  if (insideSubmodules.length) {
+    const shown = insideSubmodules.slice(0, 8).map(f => `"${f}"`).join(', ') + (insideSubmodules.length > 8 ? ` и ещё ${insideSubmodules.length - 8}` : '');
+    return { applied: false as const, empty: false as const, files, error: `Исполнитель изменил файлы внутри подмодуля (это другой репозиторий, патч их не переносит): ${shown}. Если это собранные файлы, удалите их в копии исполнителя и повторите перенос; иначе сделайте эту задачу сами.` };
+  }
   if (!files.length) return { applied: false as const, empty: true as const, files };
   // `git apply` without --index cannot move a submodule: say so instead of reporting a transfer that did not happen.
   const raw = await inCopy(['diff', '--cached', '--raw', '-z', '--no-renames', '--no-abbrev', '--ignore-submodules=none', base]);
