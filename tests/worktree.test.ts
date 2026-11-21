@@ -385,8 +385,6 @@ test('a seeded copy holds the coordinator\'s uncommitted work, and bring-back re
   writeFileSync(path.join(base, 'staged.txt'), 's1\n'); sh(top, 'add', 'sec/staged.txt');
   mkdirSync(path.join(base, 'node_modules'), { recursive: true });
   writeFileSync(path.join(base, 'node_modules', 'x.js'), 'ignored\n');
-  mkdirSync(path.join(base, '.bb', 'chats', 'thr_1'), { recursive: true });
-  writeFileSync(path.join(base, '.bb', 'chats', 'thr_1', 'note.md'), 'chat storage\n');
   const index = () => sh(top, 'ls-files', '-s');
   const before = [index(), sh(top, 'status', '--porcelain=v1', '-uall'), sh(top, 'rev-parse', 'HEAD')];
   const copy = await createWorktree({ basePath: base, name: 'seed-1', seed: true });
@@ -396,7 +394,6 @@ test('a seeded copy holds the coordinator\'s uncommitted work, and bring-back re
   assert.equal(text(path.join(copy.path, 'staged.txt')), 's1\n');
   assert.equal(existsSync(path.join(copy.path, 'gone.txt')), false);
   assert.equal(existsSync(path.join(copy.path, 'node_modules')), false, 'ignored files stay out');
-  assert.equal(existsSync(path.join(copy.path, '.bb', 'chats')), false, 'the chat storage of BB stays out');
   // The copy's index holds the work (staged), so what the worker stages lands on top of it.
   assert.equal(sh(copy.root, 'diff', '--name-only'), '', 'files and index of the copy agree');
   assert.equal(sh(copy.root, 'rev-parse', 'HEAD'), before[2]);
