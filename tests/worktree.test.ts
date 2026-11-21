@@ -341,7 +341,7 @@ test('bring-back: a submodule move is refused, a renamed section still comes bac
     writeFileSync(path.join(six.path, 'mod', 'locked', 'x.mjs'), 'x\n');
     chmodSync(path.join(six.path, 'mod', 'locked'), 0o311);
     writeFileSync(path.join(six.path, 'moved', 'a.md'), 'second edit\n');
-    await assert.rejects(bringBack({ root: top, copy: six.path }), /Не удалось прочитать папку/);
+    await assert.rejects(bringBack({ root: top, copy: six.path }), /Не удалось прочитать/);
     chmodSync(path.join(six.path, 'mod', 'locked'), 0o755);
     rmSync(path.join(six.path, 'mod', 'locked'), { recursive: true });
     assert.notEqual(text(path.join(top, 'moved', 'a.md')), 'second edit\n', 'nothing is brought back');
@@ -591,3 +591,50 @@ test('review of 9f6867b, 8fa0a42 and af77a9d: a coordinator\'s case-only rename,
   await removeWorktree({ basePath: top, root: copy.root });
 });
 
+
+test('review of 71dce6b: a submodule below a folder — unreadable, symlinked or huge, never a silent transfer', async () => {
+  const top = path.join(sandbox, 'deep-sub');
+  const sh = (cwd: string, ...args: string[]) => execFileSync('git', ['-C', cwd, '-c', 'user.email=t@t', '-c', 'user.name=t', '-c', 'protocol.file.allow=always', ...args], { encoding: 'utf8' }).trim();
+  const lib = path.join(sandbox, 'deep-sub-lib');
+  mkdirSync(lib, { recursive: true }); writeFileSync(path.join(lib, 'l.txt'), 'A\n');
+  sh(lib, 'init', '-q'); sh(lib, 'add', '-A'); sh(lib, 'commit', '-qm', 'A');
+  mkdirSync(top, { recursive: true }); writeFileSync(path.join(top, 'p.txt'), 'parent\n');
+  sh(top, 'init', '-q'); sh(top, 'submodule', 'add', '-q', lib, 'deps/mod'); sh(top, 'add', '-A'); sh(top, 'commit', '-qm', 'init');
+  const copy = await createWorktree({ basePath: top, name: 'deep-1', seed: true });
+  writeFileSync(path.join(copy.path, 'p.txt'), 'parent edit\n');
+  const unchanged = () => assert.equal(readFileSync(path.join(top, 'p.txt'), 'utf8'), 'parent\n', 'nothing is brought back');
+  // A folder above the submodule that cannot be read refuses instead of reading as "no submodule there".
+  if (process.platform !== 'win32' && process.getuid?.() !== 0) {
+    writeFileSync(path.join(copy.path, 'deps', 'mod', 'generated.js'), 'x\n');
+    chmodSync(path.join(copy.path, 'deps'), 0o600);
+    await assert.rejects(bringBack({ root: top, copy: copy.path }), /Не удалось прочитать/);
+    chmodSync(path.join(copy.path, 'deps'), 0o755);
+    unlinkSync(path.join(copy.path, 'deps', 'mod', 'generated.js'));
+    unchanged();
+  }
+  // A symlink in place of a folder above the submodule is the change itself; nothing behind it is listed.
+  if (process.platform !== 'win32') {
+    const outside = mkdtempSync(path.join(tmpdir(), 'aif-outside-'));
+    mkdirSync(path.join(outside, 'mod')); writeFileSync(path.join(outside, 'mod', 'external-only.txt'), 'x');
+    renameSync(path.join(copy.path, 'deps'), path.join(copy.path, 'deps-real'));
+    symlinkSync(outside, path.join(copy.path, 'deps'));
+    const linked = await bringBack({ root: top, copy: copy.path });
+    assert.equal(linked.applied, false);
+    assert.match(linked.error ?? '', /внутри подмодуля[\s\S]*"deps"/);
+    assert.doesNotMatch(linked.error ?? '', /external-only/);
+    unlinkSync(path.join(copy.path, 'deps')); renameSync(path.join(copy.path, 'deps-real'), path.join(copy.path, 'deps'));
+    rmSync(outside, { recursive: true, force: true });
+    unchanged();
+  }
+  // Very many files are listed without overflowing the stack and refused by count.
+  const many = path.join(copy.path, 'deps', 'mod');
+  for (let i = 0; i < 130_000; i++) writeFileSync(path.join(many, `f${i}`), '');
+  const huge = await bringBack({ root: top, copy: copy.path });
+  assert.equal(huge.applied, false);
+  assert.match(huge.error ?? '', /и ещё 129992/);
+  unchanged();
+  rmSync(many, { recursive: true }); mkdirSync(many);
+  const back = await bringBack({ root: top, copy: copy.path });
+  assert.deepEqual([back.applied, back.files], [true, ['p.txt']], back.error);
+  await removeWorktree({ basePath: top, root: copy.root });
+});

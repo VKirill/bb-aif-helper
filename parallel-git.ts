@@ -26,20 +26,45 @@ const line = (text: string) => text.replace(/\r?\n$/, '');
 
 /**
  * Files and symlinks under `dir`, relative to it with `/` separators, without following symlinks; none when `dir` does
- * not exist. A folder that cannot be read throws: a file hidden there would otherwise be lost silently.
+ * not exist. A folder that cannot be read throws: a file hidden there would otherwise be lost silently. Iterative, so
+ * a folder with any number of files or levels never overflows the stack.
  */
-async function filesUnder(dir: string, prefix = ''): Promise<string[]> {
-  const entries = await readdir(dir, { withFileTypes: true }).catch((error: NodeJS.ErrnoException) => {
-    if (error.code === 'ENOENT') return [];
-    throw new Error(`Не удалось прочитать папку ${dir} в копии исполнителя: ${error.code ?? error.message}`);
-  });
-  const found: string[] = [];
-  for (const entry of entries) {
-    const rel = `${prefix}${entry.name}`;
-    if (entry.isDirectory()) found.push(...await filesUnder(path.join(dir, entry.name), `${rel}/`));
-    else found.push(rel);
+async function filesUnder(dir: string): Promise<string[]> {
+  const found: string[] = [], pending: [string, string][] = [[dir, '']];
+  for (let next = pending.pop(); next; next = pending.pop()) {
+    const [at, prefix] = next;
+    const entries = await readdir(at, { withFileTypes: true }).catch((error: NodeJS.ErrnoException) => {
+      if (at === dir && error.code === 'ENOENT') return [];
+      throw unreadable(at, error);
+    });
+    for (const entry of entries) {
+      if (entry.isDirectory()) pending.push([path.join(at, entry.name), `${prefix}${entry.name}/`]);
+      else found.push(`${prefix}${entry.name}`);
+    }
   }
   return found;
+}
+
+const unreadable = (at: string, error: NodeJS.ErrnoException) =>
+  new Error(`Не удалось прочитать ${at} в копии исполнителя: ${error.code ?? error.message}`);
+
+/**
+ * What stands at a submodule's path in the worker's copy: nothing, a real folder, or something else (a symlink or a
+ * file at that path or at any folder above it inside the copy) — then the first such entry is the change, and it is
+ * never followed, so nothing outside the copy is read. Any error other than "not there" throws.
+ */
+async function submodulePath(top: string, rel: string): Promise<{ kind: 'none' } | { kind: 'dir' } | { kind: 'other'; at: string }> {
+  const parts = rel.split('/');
+  for (let i = 1; i <= parts.length; i++) {
+    const at = parts.slice(0, i).join('/');
+    const stat = await lstat(path.join(top, at)).catch((error: NodeJS.ErrnoException) => {
+      if (error.code === 'ENOENT') return null;
+      throw unreadable(path.join(top, at), error);
+    });
+    if (!stat) return { kind: 'none' };
+    if (!stat.isDirectory()) return { kind: 'other', at };
+  }
+  return { kind: 'dir' };
 }
 
 /**
@@ -58,18 +83,18 @@ async function submoduleChanges(top: string, shown = ''): Promise<string[]> {
   for (const entry of (await git(top, ['ls-files', '--stage', '-z'])).split('\0')) {
     if (!entry.startsWith('160000 ')) continue;
     const rel = entry.slice(entry.indexOf('\t') + 1), dir = path.join(top, rel), name = `${shown}${rel}`;
-    const kind = await lstat(dir).then(stat => stat.isDirectory() ? 'dir' : 'other', () => 'none');
-    if (kind === 'none') continue;
-    if (kind === 'other') { found.push(name); continue; }
+    const where = await submodulePath(top, rel);
+    if (where.kind === 'none') continue;
+    if (where.kind === 'other') { found.push(`${shown}${where.at}`); continue; }
     if (!(await exists(path.join(dir, '.git')))) {
-      found.push(...(await filesUnder(dir)).map(file => `${name}/${file}`));
+      for (const file of await filesUnder(dir)) found.push(`${name}/${file}`);
       continue;
     }
     // --ignore-submodules=dirty: a nested submodule that moved counts here, its own changes are found by the recursion.
     const tracked = await git(dir, ['diff', '--name-only', '-z', '--no-ext-diff', '--no-relative', '--ignore-submodules=dirty', 'HEAD', '--']);
     const added = await git(dir, ['ls-files', '--others', '--exclude-standard', '-z', '--full-name']);
-    for (const file of [...tracked.split('\0'), ...added.split('\0')].filter(Boolean)) found.push(`${name}/${file}`);
-    found.push(...await submoduleChanges(dir, `${name}/`));
+    for (const file of tracked.split('\0').concat(added.split('\0'))) if (file) found.push(`${name}/${file}`);
+    for (const file of await submoduleChanges(dir, `${name}/`)) found.push(file);
   }
   return found;
 }
