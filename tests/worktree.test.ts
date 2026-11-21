@@ -310,6 +310,17 @@ test('bring-back: a submodule move is refused, a renamed section still comes bac
   assert.equal(text(path.join(top, 'moved', 'a.md')), 'parent edit\n');
   await removeWorktree({ basePath: top, root: four.root });
   sh(top, 'checkout', '-q', '--', 'moved/a.md');
+  // A submodule the copy never checked out: a file the worker put in its empty folder is skipped by the parent's
+  // `add -A` (the path is a gitlink), so it is refused by name instead of a transfer that leaves it behind.
+  const six = await createWorktree({ basePath: top, name: 'moves-6' });
+  mkdirSync(path.join(six.path, 'mod', 'gen'), { recursive: true });
+  writeFileSync(path.join(six.path, 'mod', 'gen', 'generated.mjs'), 'export const x = 1;\n');
+  writeFileSync(path.join(six.path, 'moved', 'a.md'), 'imports mod/gen/generated.mjs\n');
+  const unchecked = await bringBack({ root: top, copy: six.path });
+  assert.equal(unchecked.applied, false);
+  assert.match(unchecked.error ?? '', /внутри подмодуля[\s\S]*"mod\/gen\/generated\.mjs"/);
+  assert.notEqual(text(path.join(top, 'moved', 'a.md')), 'imports mod/gen/generated.mjs\n', 'nothing is brought back');
+  await removeWorktree({ basePath: top, root: six.root });
   // A nested submodule that its parent marks `ignore = all`: an edit two levels down is still found.
   const inner = path.join(sandbox, 'moves inner');
   mkdirSync(inner, { recursive: true }); sh(inner, 'init', '-q');

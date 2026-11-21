@@ -56,8 +56,8 @@ test('contextBlock with parallel spawns workers on BB-made copies and keeps prov
     'Open tasks are `[ ]` and `[~]`', '`Depends on X`', 'treat it as dependent',
     'a task that only checks something', 'already in this workspace', 'exactly where the plan says', 'single-commit',
     'the last commit plus your uncommitted work', 'Parallel layers need no commits of their own',
-    'bb thread tell <id> --message-file "<file>"',
-    "bb plugin run aif-chat spawn-worker --target \"<plan path>\" --task <taskId> --brief '<absolute brief path>' --json",
+    "bb thread tell <id> --message-file '<file>'",
+    "bb plugin run aif-chat spawn-worker --target '<plan path>' --task <taskId> --brief '<absolute brief path>' --json",
     'bb plugin run aif-chat bring-back --worker <id> --json', 'nothing was changed', 'there is nothing to undo', '{ applied: false, empty: true }',
     "--provider 'codex'", "--model 'gpt-6.2-sol'", "--reasoning-level 'high'", "--service-tier 'fast'",
     'BB removes its copy',
@@ -179,10 +179,10 @@ test('the refresh keeps CRLF files CRLF, updates the research block, and never f
   await readDelegation(root);
   assert.equal(await readFile(implement, 'utf8'), crlf, 'no change, so git sees none');
   // An old research block with an unquoted prompt path is brought up to date.
-  const old = (await readFile(research, 'utf8')).replace('--prompt-file "<prompt>"', '--prompt-file <prompt>');
+  const old = (await readFile(research, 'utf8')).replace("--prompt-file '<prompt>'", '--prompt-file <prompt>');
   await writeFile(research, old);
   await readDelegation(root + '/');
-  assert.ok((await readFile(research, 'utf8')).includes('--prompt-file "<prompt>"'));
+  assert.ok((await readFile(research, 'utf8')).includes("--prompt-file '<prompt>'"));
   if (process.platform !== 'win32') {
     const { chmod } = await import('node:fs/promises');
     await writeFile(research, old);

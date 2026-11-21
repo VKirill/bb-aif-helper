@@ -24,9 +24,21 @@ const FROM_STDIN = ['--pathspec-from-file=-', '--pathspec-file-nul'];
 // git ends its answer with a newline; a path may itself start or end with a space, so nothing else is trimmed.
 const line = (text: string) => text.replace(/\r?\n$/, '');
 
+/** Files and symlinks under `dir`, relative to it with `/` separators; none when `dir` does not exist. */
+async function filesUnder(dir: string, prefix = ''): Promise<string[]> {
+  const found: string[] = [];
+  for (const entry of await readdir(dir, { withFileTypes: true }).catch(() => [])) {
+    const rel = `${prefix}${entry.name}`;
+    if (entry.isDirectory()) found.push(...await filesUnder(path.join(dir, entry.name), `${rel}/`));
+    else found.push(rel);
+  }
+  return found;
+}
+
 /**
- * Files the worker changed inside checked-out submodules, at any depth: tracked files that differ from the
- * submodule's own HEAD (staged or not) and new files its ignore rules do not exclude. A patch of the parent carries
+ * Files the worker changed inside submodules: any file in the folder of one that is not checked out and, in checked-out
+ * ones at any depth, tracked files that differ from the submodule's own HEAD (staged or not) and new files its ignore
+ * rules do not exclude. A patch of the parent carries
  * none of them, so the caller refuses instead of leaving them behind. Each submodule is asked directly, so neither
  * the parent's `status.*` or `diff.ignoreSubmodules` settings nor an `ignore = all` in a `.gitmodules` hides a change.
  * A submodule that moved to another commit is the parent's gitlink change and is reported by the caller.
@@ -36,7 +48,12 @@ async function submoduleChanges(top: string, shown = ''): Promise<string[]> {
   for (const entry of (await git(top, ['ls-files', '--stage', '-z'])).split('\0')) {
     if (!entry.startsWith('160000 ')) continue;
     const rel = entry.slice(entry.indexOf('\t') + 1), dir = path.join(top, rel), name = `${shown}${rel}`;
-    if (!(await exists(path.join(dir, '.git')))) continue; // not checked out: nothing of the worker's can be there
+    if (!(await exists(path.join(dir, '.git')))) {
+      // Not checked out: git keeps its folder empty in the copy and the parent's `add -A` skips whatever lands there
+      // (the path is a gitlink), so every file in it is the worker's and no patch carries it.
+      found.push(...(await filesUnder(dir)).map(file => `${name}/${file}`));
+      continue;
+    }
     // --ignore-submodules=dirty: a nested submodule that moved counts here, its own changes are found by the recursion.
     const tracked = await git(dir, ['diff', '--name-only', '-z', '--no-ext-diff', '--no-relative', '--ignore-submodules=dirty', 'HEAD', '--']);
     const added = await git(dir, ['ls-files', '--others', '--exclude-standard', '-z', '--full-name']);
