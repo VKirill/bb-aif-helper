@@ -320,7 +320,8 @@ test('bring-back: a submodule move is refused, a renamed section still comes bac
   assert.equal(unchecked.applied, false);
   assert.match(unchecked.error ?? '', /внутри подмодуля[\s\S]*"mod\/gen\/generated\.mjs"/);
   assert.notEqual(text(path.join(top, 'moved', 'a.md')), 'imports mod/gen/generated.mjs\n', 'nothing is brought back');
-  // Build output that the coordinator's checked-out submodule ignores is not a change: that is where it would land.
+  // Build output there is refused too, even when the coordinator's submodule ignores it: no patch can carry it, and a
+  // tracked file under an ignored path would otherwise be dropped silently. Once removed, the parent edit comes back.
   rmSync(path.join(six.path, 'mod', 'gen'), { recursive: true });
   const exclude = path.resolve(top, 'mod', sh(path.join(top, 'mod'), 'rev-parse', '--git-path', 'info/exclude'));
   mkdirSync(path.dirname(exclude), { recursive: true });
@@ -328,7 +329,11 @@ test('bring-back: a submodule move is refused, a renamed section still comes bac
   mkdirSync(path.join(six.path, 'mod', 'dist'), { recursive: true });
   writeFileSync(path.join(six.path, 'mod', 'dist', 'generated.mjs'), 'built\n');
   const built = await bringBack({ root: top, copy: six.path });
-  assert.deepEqual([built.applied, built.files], [true, ['moved/a.md']], built.error);
+  assert.equal(built.applied, false);
+  assert.match(built.error ?? '', /"mod\/dist\/generated\.mjs"/);
+  rmSync(path.join(six.path, 'mod', 'dist'), { recursive: true });
+  const parent = await bringBack({ root: top, copy: six.path });
+  assert.deepEqual([parent.applied, parent.files], [true, ['moved/a.md']], parent.error);
   sh(top, 'checkout', '-q', '--', 'moved/a.md');
   // A folder that cannot be read refuses instead of hiding what is inside it (root reads everything; Windows has no modes).
   if (process.platform !== 'win32' && process.getuid?.() !== 0) {
@@ -344,6 +349,7 @@ test('bring-back: a submodule move is refused, a renamed section still comes bac
   // The submodule folder replaced by a symlink is itself the change; nothing outside the copy is listed.
   if (process.platform !== 'win32') {
     const outside = mkdtempSync(path.join(tmpdir(), 'aif-outside-'));
+    sh(outside, 'init', '-q'); // another git checkout: its files must not be reported as the worker's
     writeFileSync(path.join(outside, 'external-only.txt'), 'x');
     rmSync(path.join(six.path, 'mod'), { recursive: true });
     symlinkSync(outside, path.join(six.path, 'mod'));

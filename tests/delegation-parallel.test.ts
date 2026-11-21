@@ -57,7 +57,7 @@ test('contextBlock with parallel spawns workers on BB-made copies and keeps prov
     'a task that only checks something', 'already in this workspace', 'exactly where the plan says', 'single-commit',
     'the last commit plus your uncommitted work', 'Parallel layers need no commits of their own',
     "bb thread tell <id> --message-file '<file>'",
-    "bb plugin run aif-chat spawn-worker --target <plan name> --task <taskId> --brief '<absolute brief path>' --json", 'is only a label for the worker', 'so it needs no quotes',
+    "bb plugin run aif-chat spawn-worker --target <plan name> --task <taskId> --brief '<absolute brief path>' --json", 'is only a label for the worker', 'so it needs no quotes and is never read as an option', 'leading `-` and `.` dropped',
     'bb plugin run aif-chat bring-back --worker <id> --json', 'nothing was changed', 'there is nothing to undo', '{ applied: false, empty: true }',
     "--provider 'codex'", "--model 'gpt-6.2-sol'", "--reasoning-level 'high'", "--service-tier 'fast'",
     'BB removes its copy',

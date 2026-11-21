@@ -44,39 +44,32 @@ async function filesUnder(dir: string, prefix = ''): Promise<string[]> {
 
 /**
  * Files the worker changed inside submodules, which a patch of the parent never carries, so the caller refuses
- * instead of leaving them behind. The worker's view of a submodule is compared with what the coordinator would get:
+ * instead of leaving them behind (a refusal can be acted on, a silently dropped file cannot):
+ * - not checked out in the copy: every file the worker put in its folder. Git keeps that folder empty in the copy and
+ *   the parent's `add -A` skips it as a gitlink, so none of it could come back, ignored or not;
  * - checked out in the copy, at any depth: tracked files that differ from the submodule's own HEAD (staged or not) and
  *   new files its ignore rules do not exclude. Each submodule is asked directly, so neither the parent's `status.*` or
- *   `diff.ignoreSubmodules` settings nor an `ignore = all` in a `.gitmodules` hides a change;
- * - not checked out in the copy (its folder is empty there, and the parent's `add -A` skips it as a gitlink): every
- *   file the worker put in it, except those the coordinator's checked-out submodule ignores, since that is where they
- *   would land. A folder replaced by a symlink or a file is itself the change, and nothing outside the copy is read.
- * A submodule that moved to another commit is the parent's gitlink change and is reported by the caller.
+ *   `diff.ignoreSubmodules` settings nor an `ignore = all` in a `.gitmodules` hides a change.
+ * A submodule folder replaced by a symlink or a file is itself the change and is never followed, so nothing outside the
+ * copy is read. A submodule that moved to another commit is the parent's gitlink change and is reported by the caller.
  */
-async function submoduleChanges(top: string, coordinator: string | null, shown = ''): Promise<string[]> {
+async function submoduleChanges(top: string, shown = ''): Promise<string[]> {
   const found: string[] = [];
   for (const entry of (await git(top, ['ls-files', '--stage', '-z'])).split('\0')) {
     if (!entry.startsWith('160000 ')) continue;
     const rel = entry.slice(entry.indexOf('\t') + 1), dir = path.join(top, rel), name = `${shown}${rel}`;
-    const theirs = coordinator && path.join(coordinator, rel);
-    const ours = theirs && await exists(path.join(theirs, '.git')) ? theirs : null;
+    const kind = await lstat(dir).then(stat => stat.isDirectory() ? 'dir' : 'other', () => 'none');
+    if (kind === 'none') continue;
+    if (kind === 'other') { found.push(name); continue; }
     if (!(await exists(path.join(dir, '.git')))) {
-      const kind = await lstat(dir).then(stat => stat.isDirectory() ? 'dir' : 'other', () => 'none');
-      if (kind === 'other') { found.push(name); continue; }
-      const files = await filesUnder(dir);
-      if (!files.length) continue;
-      // `--no-index`: the files do not exist in the coordinator's submodule, only its ignore rules are asked.
-      const ignored = ours
-        ? new Set((await git(ours, ['check-ignore', '--no-index', '--stdin', '-z'], files.join('\0') + '\0').catch(() => '')).split('\0').filter(Boolean))
-        : new Set<string>();
-      found.push(...files.filter(file => !ignored.has(file)).map(file => `${name}/${file}`));
+      found.push(...(await filesUnder(dir)).map(file => `${name}/${file}`));
       continue;
     }
     // --ignore-submodules=dirty: a nested submodule that moved counts here, its own changes are found by the recursion.
     const tracked = await git(dir, ['diff', '--name-only', '-z', '--no-ext-diff', '--no-relative', '--ignore-submodules=dirty', 'HEAD', '--']);
     const added = await git(dir, ['ls-files', '--others', '--exclude-standard', '-z', '--full-name']);
     for (const file of [...tracked.split('\0'), ...added.split('\0')].filter(Boolean)) found.push(`${name}/${file}`);
-    found.push(...await submoduleChanges(dir, ours, `${name}/`));
+    found.push(...await submoduleChanges(dir, `${name}/`));
   }
   return found;
 }
@@ -157,7 +150,7 @@ export async function bringBack(input: { root: string; copy: string }) {
   const files = (await inCopy(['diff', '--cached', '--name-only', '-z', '--no-relative', '--no-renames', '--ignore-submodules=none', base])).split('\0').filter(Boolean);
   // Edits inside a checked-out submodule belong to another repository: neither the tree nor a patch carries them, so
   // refuse instead of reporting a transfer (or nothing to transfer) while they are left behind.
-  const insideSubmodules = await submoduleChanges(theirs.top, mine.top);
+  const insideSubmodules = await submoduleChanges(theirs.top);
   if (insideSubmodules.length) {
     const shown = insideSubmodules.slice(0, 8).map(f => `"${f}"`).join(', ') + (insideSubmodules.length > 8 ? ` и ещё ${insideSubmodules.length - 8}` : '');
     return { applied: false as const, empty: false as const, files, error: `Исполнитель изменил файлы внутри подмодуля (это другой репозиторий, патч их не переносит): ${shown}. Если это собранные файлы, удалите их в копии исполнителя и повторите перенос; иначе сделайте эту задачу сами.` };
