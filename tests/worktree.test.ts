@@ -465,6 +465,16 @@ test('review of 9f6867b, 8fa0a42 and af77a9d: a coordinator\'s case-only rename,
   writeFileSync(path.join(copy.path, 'other.txt'), 'o\n');
   const back = await bringBack({ root: top, copy: copy.path });
   assert.deepEqual([back.error, back.applied, back.files], [undefined, true, ['other.txt']]);
+  // A git the worker left running holds the copy's index: refused before anything changes, then a normal retry.
+  writeFileSync(path.join(copy.path, 'locked.txt'), 'l\n');
+  const lock = sh(copy.root, 'rev-parse', '--path-format=absolute', '--git-path', 'index.lock');
+  writeFileSync(lock, '');
+  const locked = await bringBack({ root: top, copy: copy.path });
+  unlinkSync(lock);
+  assert.match(locked.error ?? '', /Индекс копии исполнителя занят/);
+  assert.equal(existsSync(path.join(top, 'locked.txt')), false, 'nothing changed');
+  const retried = await bringBack({ root: top, copy: copy.path });
+  assert.deepEqual([retried.error, retried.applied, retried.files], [undefined, true, ['locked.txt']]);
   // gc in the coordinator's folder between two bring-backs keeps the baseline of the worker's fix.
   writeFileSync(path.join(copy.path, 'other.txt'), 'o fixed\n');
   sh(top, 'gc', '-q', '--prune=now');
