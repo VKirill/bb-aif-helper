@@ -125,12 +125,6 @@ export async function bringBack(input: { root: string; copy: string }) {
       return { applied: false as const, empty: false as const, files,
         error: `Исполнитель переименовал или удалил папку ${mine.prefix}, в которой работает этот чат: перенесите это вручную, после остальных задач.` };
   }
-  // The copy's index becomes the tree being brought back, before anything changes here: git keeps every object an index
-  // names, so `git gc` never prunes the baseline of the worker's next fix. Only the receipt below decides what counts as
-  // brought back, so a transfer refused after this point is retried as usual. A locked index (a git the worker left
-  // running) refuses the transfer while nothing has changed yet.
-  try { await git(theirs.top, ['read-tree', tree]); }
-  catch (cause) { return { applied: false as const, empty: false as const, files, error: `Индекс копии исполнителя занят, перенос не сделан: ${(cause as Error).message}` }; }
   // The receipt is written after the apply; a copy where it cannot be written is refused before anything changes.
   await writeFile(mark, last ? `${last}\n` : '').catch((cause: Error) => { throw new Error(`Копия исполнителя недоступна для записи: ${cause.message}`); });
   const patch = path.join(dir, `${randomUUID()}.patch`);
@@ -138,6 +132,11 @@ export async function bringBack(input: { root: string; copy: string }) {
     await inCopy([...DIFF, base, `--output=${patch}`]);
     try { await git(mine.top, ['apply', '--check', '--whitespace=nowarn', patch]); }
     catch (cause) { return { applied: false as const, empty: false as const, files, error: (cause as Error).message }; }
+    // Only now, with the patch known to fit, the copy's index becomes the tree being brought back: git keeps every
+    // object an index names, so `git gc` never prunes the baseline of the worker's next fix. A locked index (a git the
+    // worker left running) refuses while nothing has changed; a failed apply below puts the index back on the base.
+    try { await git(theirs.top, ['read-tree', tree]); }
+    catch (cause) { return { applied: false as const, empty: false as const, files, error: `Индекс копии исполнителя занят, перенос не сделан: ${(cause as Error).message}` }; }
     const saved = await Promise.all(files.map(f => save(mine.top, f)));
     // --whitespace=nowarn: `apply.whitespace=fix` in the project would strip the trailing spaces of a Markdown line break.
     const undo = async (error: string) => {
@@ -151,7 +150,7 @@ export async function bringBack(input: { root: string; copy: string }) {
     // folder's only file): the new folder gets the chat folder's permissions back.
     const folder = mine.prefix ? await stat(path.resolve(input.root)).catch(() => null) : null;
     try { await git(mine.top, ['apply', '--whitespace=nowarn', patch]); }
-    catch (cause) { return undo((cause as Error).message); }
+    catch (cause) { await git(theirs.top, ['read-tree', base]).catch(() => undefined); return undo((cause as Error).message); }
     if (folder) await chmod(path.resolve(input.root), folder.mode & 0o7777).catch(() => undefined);
     await writeFile(mark, `${tree}\n`);
     return { applied: true as const, files };

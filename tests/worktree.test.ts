@@ -475,6 +475,17 @@ test('review of 9f6867b, 8fa0a42 and af77a9d: a coordinator\'s case-only rename,
   assert.equal(existsSync(path.join(top, 'locked.txt')), false, 'nothing changed');
   const retried = await bringBack({ root: top, copy: copy.path });
   assert.deepEqual([retried.error, retried.applied, retried.files], [undefined, true, ['locked.txt']]);
+  // A refused transfer (the coordinator has the same new file) keeps the baseline: gc does not prune it, and a file the
+  // worker later ignores is not deleted on retry.
+  writeFileSync(path.join(copy.path, 'collision.txt'), 'w\n');
+  writeFileSync(path.join(top, 'collision.txt'), 'c\n');
+  assert.match((await bringBack({ root: top, copy: copy.path })).error ?? '', /already exists/);
+  unlinkSync(path.join(top, 'collision.txt'));
+  writeFileSync(path.join(copy.path, '.gitignore'), 'previous.txt\n');
+  sh(top, 'gc', '-q', '--prune=now');
+  const afterRefusal = await bringBack({ root: top, copy: copy.path });
+  assert.deepEqual([afterRefusal.error, afterRefusal.applied, [...afterRefusal.files].sort()], [undefined, true, ['.gitignore', 'collision.txt']]);
+  assert.equal(text(path.join(top, 'previous.txt')), 'p\n', 'the coordinator\'s file survives the retry');
   // gc in the coordinator's folder between two bring-backs keeps the baseline of the worker's fix.
   writeFileSync(path.join(copy.path, 'other.txt'), 'o fixed\n');
   sh(top, 'gc', '-q', '--prune=now');
