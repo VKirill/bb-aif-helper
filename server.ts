@@ -984,7 +984,7 @@ export default async function plugin(bb: BbPluginApi) {
     const planName = (target.split(/[\\/]/).pop() ?? 'plan').replace(/\.md$/i, '').replace(/[^A-Za-z0-9._-]+/g, '-').replace(/^[-.]+/, '').slice(0, 60) || 'plan';
     if (command === 'spawn-worker') {
       // Models write `task-1`, `Task 1` or `#1`: keep only the number.
-      const task = options['--task']?.trim().replace(/^(?:task)?[\s#_-]*/i, ''), brief = options['--brief'];
+      const task = options['--task']?.trim().replace(/^(?:task[\s#_-]*|#)/i, ''), brief = options['--brief'];
       if (!target) throw new Error('Укажите план: --target <путь>.');
       if (!/^\d{1,6}(?:\.\d{1,6}){0,5}$/.test(task ?? '')) throw new Error('Укажите номер задачи: --task <id> (например 3 или 1.2).');
       if (!brief) throw new Error('Укажите файл задания: --brief <файл>.');

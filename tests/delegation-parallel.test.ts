@@ -73,11 +73,15 @@ test('every worker ends with handoff_outcome and the coordinator waits for that 
     // Review of 4d3420a: the line may stand anywhere (a blocker explains itself after it), the output is read again after
     // the waits (a worker may finish meanwhile), and a complete report without the line (a pre-upgrade worker) is done.
     assert.ok(text.includes('It is done when the output has a line starting with `handoff_outcome:`'), name);
-    assert.ok(text.includes('read the output again whatever the waits returned'), name);
-    assert.ok(text.includes('a complete final report (what changed, the files, the checks with their results) is done too'), name);
+    assert.ok(text.includes('When it does not resume within those 3 minutes, read the output once more'), name);
+    // Review of ae25d93: keep waiting while the worker keeps resuming (five pauses in a row happen), and judge a report
+    // without the line by its own brief (a research report lists symbols, not checks).
+    assert.ok(text.includes('as many times as it keeps resuming'), name);
+    assert.ok(text.includes('or a complete final report in the form its brief asks for, means done'), name);
+    assert.ok(text.includes('If it does not resume after the reminder either, it stopped without a report.'), name);
     assert.ok(text.includes('bb thread wait <id> --status active --timeout 3m'), name);
     assert.equal(text.includes('`handoff_outcome: blocked_external` when blocked, as above'), name === 'parallel', name);
-    assert.ok(text.includes("`Finish the task and end your report with the handoff_outcome line.` to a temporary UTF-8 file named as above, send it once with `bb thread tell <id> --message-file '<file>'`"), name);
+    assert.ok(text.includes("`Finish the task and end your report with the handoff_outcome line.` to a temporary UTF-8 file named as above, send it with `bb thread tell <id> --message-file '<file>'`"), name);
     assert.ok(!text.includes("bb thread tell <id> '"), name);
   }
 });

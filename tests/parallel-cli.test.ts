@@ -68,7 +68,7 @@ test('spawn-worker starts the owner model on a fresh copy seeded with the coordi
       assert.equal(ok.exitCode, 0, loose);
       assert.equal(spawns[3 + i].title, 'AIF · demo · 3', loose);
     }
-    for (const bad of ['1.', '.2', '1..2', '1 2', 'a', 'task', 'task-', 'task-a']) {
+    for (const bad of ['1.', '.2', '1..2', '1 2', 'a', 'task', 'task-', 'task-a', '-3', '_3', '--3']) {
       const refused = await h.harness.behavior.runCli(['spawn-worker', '--thread', 'thr_test', '--target', '.ai-factory/plans/demo.md', '--task', bad, '--brief', 'C:\\Temp\\brief 2.md']);
       assert.notEqual(refused.exitCode, 0, bad);
     }
