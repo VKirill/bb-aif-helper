@@ -23,7 +23,7 @@ async function setup() {
         // thr_worker finished one turn: started at seq 1, completed at seq 2.
         events: { list: async ({ afterSeq = '0', types, order, limit }: any) => { let rows = [{ seq: 1, type: 'turn/started', createdAt: 0 }, { seq: 2, type: 'turn/completed', createdAt: 0, data: { status: 'completed' } }].filter(e => e.seq > Number(afterSeq) && (!types || types.includes(e.type))); if (order === 'desc') rows = rows.reverse(); return limit ? rows.slice(0, Number(limit)) : rows; },
           wait: async () => null },
-        wait: async () => ({}), output: async () => ({ output: 'Done: src/b.ts' }) } as any,  // guardian: allow — loose mock of the BB SDK and host RPC in this test
+        wait: async () => ({}), output: async () => ({ output: 'Done: src/b.ts' }), queuedMessages: { list: async () => [] } } as any,  // guardian: allow — loose mock of the BB SDK and host RPC in this test
       environments: { get: async ({ environmentId }: any) => envs[environmentId] } as any,  // guardian: allow — loose mock of the BB SDK and host RPC in this test
     },
     experimental_callHostRpc: async call => {

@@ -6,7 +6,7 @@
  */
 import type { BbPluginApi } from '@get-bb/plugin-sdk';
 
-type Threads = Pick<BbPluginApi['sdk']['threads'], 'get' | 'wait' | 'output' | 'events'>;
+type Threads = Pick<BbPluginApi['sdk']['threads'], 'get' | 'wait' | 'output' | 'events' | 'queuedMessages'>;
 type Row = { seq: number | string; type: string; createdAt: number | string; data?: unknown };
 export type WorkerWait = {
   /** working: still busy; idle: its last turn ended; stopped: its last turn was stopped; failed: BB reports an error that no retry cleared. */
@@ -24,15 +24,21 @@ const busy = (status: string) => ['active', 'starting', 'pending'].includes(stat
 const LIFECYCLE = ['turn/started', 'turn/completed', 'system/thread/interrupted'] as const;
 const stop = (e: Row) => e.type === 'system/thread/interrupted' || (e.type === 'turn/completed' && (e.data as { status?: string } | undefined)?.status === 'interrupted');
 
+type Options = { budgetMs?: number; now?: () => number; sleep?: (ms: number) => Promise<void> };
+
 /** One answer within `budgetMs`, so a CLI call never hits BB's command timeout. */
-export async function waitWorker(threads: Threads, threadId: string, after: number, budgetMs = 90_000, now = Date.now): Promise<WorkerWait> {
+export async function waitWorker(threads: Threads, threadId: string, after: number,
+  { budgetMs = 90_000, now = Date.now, sleep = ms => new Promise(resolve => setTimeout(resolve, ms)) }: Options = {}): Promise<WorkerWait> {
   const deadline = now() + budgetMs;
   const left = () => Math.max(0, deadline - now());
   const startedAfter = async () => (await threads.events.list({ threadId, afterSeq: String(after), types: ['turn/started'], order: 'asc', limit: '1' }) as Row[]).length > 0;
   const untilIdle = () => threads.wait({ threadId, status: 'idle', timeoutMs: left() }).catch(() => undefined);
+  // BB's own retry waits in the thread's queue; an exhausted one never runs again.
+  const retrying = async () => (await threads.queuedMessages.list({ threadId })).some(m => m.state !== 'failed_exhausted');
 
-  const first = await threads.get({ threadId });
-  // An error may be followed by BB's automatic retry: give it the budget before calling it a failure.
+  let first = await threads.get({ threadId });
+  // BB may queue its retry a moment after the error shows: look again every second within the budget.
+  while (first.status === 'error' && !(await retrying()) && left() > 0) { await sleep(Math.min(1000, left())); first = await threads.get({ threadId }); }
   if (busy(first.status) || first.status === 'error') await untilIdle();
   else if (first.status === 'idle' && !(await startedAfter())) {
     // Idle since the last look: give it the budget to resume by itself.
@@ -45,25 +51,27 @@ export async function waitWorker(threads: Threads, threadId: string, after: numb
     const thread = await threads.get({ threadId });
     const newest = async (type: typeof LIFECYCLE[number]) => (await threads.events.list({ threadId, types: [type], order: 'desc', limit: '1' }) as Row[])[0];
     const [start, end, interrupt] = await Promise.all(LIFECYCLE.map(newest));
-    return { thread, start, end, interrupt };
+    return { thread, start, end, interrupt, queued: await retrying() };
   };
   const n = (row?: Row) => Number(row?.seq ?? 0);
-  const judge = ({ thread, start, end, interrupt }: Awaited<ReturnType<typeof read>>): WorkerWait['state'] =>
-    // A queued message is BB's own retry or the next prompt: the worker will run again.
-    busy(thread.status) || (thread.queuedMessageCount ?? 0) > 0 || (n(start) > seq && n(start) > n(end)) ? 'working'
+  const judge = ({ thread, start, end, interrupt, queued }: Awaited<ReturnType<typeof read>>): WorkerWait['state'] =>
+    // A pending queued message is BB's own retry or the next prompt: the worker will run again.
+    busy(thread.status) || queued || (n(start) > seq && n(start) > n(end)) ? 'working'
     : thread.status === 'error' ? 'failed'
     // A stop newer than the last finished turn stays a stop, even if a late start of the cancelled turn arrives.
     : thread.status === 'stopping' || n(interrupt) > n(end) || (end && stop(end)) ? 'stopped' : 'idle';
   const before = await read();
   let state = judge(before);
   let output: string | null = null;
+  let latest = before;
   if (state !== 'working') {
     output = (await threads.output({ threadId })).output;
     // The report must belong to the turn judged above: a turn that started meanwhile makes it someone else's.
-    const afterwards = await read();
-    if (judge(afterwards) === 'working' || n(afterwards.start) > n(before.start)) { state = 'working'; output = null; }
+    latest = await read();
+    if (judge(latest) === 'working' || n(latest.start) > n(before.start)) { state = 'working'; output = null; }
   }
   const activity = Math.max(...[before.start, before.end, before.interrupt].map(row => Number(row?.createdAt ?? 0)));
   const idleForMs = state === 'idle' && activity ? Math.max(0, now() - activity) : null;
-  return { state, seq, resumed: await startedAfter(), idleForMs, output };
+  // resumed comes from the same last read as the state, so the two never disagree.
+  return { state, seq, resumed: n(latest.start) > after, idleForMs, output };
 }
