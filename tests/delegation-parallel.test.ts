@@ -69,9 +69,14 @@ test('every worker ends with handoff_outcome and the coordinator waits for that 
   const bb = { mode: 'bb' as const, providerId: 'codex', model: 'gpt-6.2-sol', reasoning: 'high' };
   const research = researchBlock({ research: bb, research2: { mode: 'self' }, research3: { mode: 'self' } })!;
   for (const [name, text, contracts] of [['one worker', contextBlock(bb), 1], ['parallel', contextBlock({ ...bb, parallel: 3 }), 2], ['research', research, 1]] as const) {
-    assert.equal(text.split('End the report with the line `handoff_outcome: done`').length - 1, contracts, name);
-    assert.ok(text.includes('idle without it means it still works'), name);
+    assert.equal(text.split('never while a command still runs in the background, end the report with the line `handoff_outcome: done`').length - 1, contracts, name);
+    // Review of 4d3420a: the line may stand anywhere (a blocker explains itself after it), the output is read again after
+    // the waits (a worker may finish meanwhile), and a complete report without the line (a pre-upgrade worker) is done.
+    assert.ok(text.includes('It is done when the output has a line starting with `handoff_outcome:`'), name);
+    assert.ok(text.includes('read the output again whatever the waits returned'), name);
+    assert.ok(text.includes('a complete final report (what changed, the files, the checks with their results) is done too'), name);
     assert.ok(text.includes('bb thread wait <id> --status active --timeout 3m'), name);
+    assert.equal(text.includes('`handoff_outcome: blocked_external` when blocked, as above'), name === 'parallel', name);
     assert.ok(text.includes("`Finish the task and end your report with the handoff_outcome line.` to a temporary UTF-8 file named as above, send it once with `bb thread tell <id> --message-file '<file>'`"), name);
     assert.ok(!text.includes("bb thread tell <id> '"), name);
   }
