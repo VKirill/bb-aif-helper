@@ -70,8 +70,9 @@ test('an error and a stop are reported as such, not as a slow worker', async () 
   assert.equal((await waitWorker(failed.threads, 'thr_w', 0, failed.opts)).state, 'failed');
   const stopped = worker('idle', [...done, { type: 'system/thread/interrupted', data: { reason: 'manual-stop' } }], null);
   assert.equal((await waitWorker(stopped.threads, 'thr_w', 2, stopped.opts)).state, 'stopped');
+  // A provider cancellation without BB's manual stop event is a failure the coordinator retries.
   const interrupted = worker('idle', [{ type: 'turn/started' }, { type: 'turn/completed', data: { status: 'interrupted' } }], null);
-  assert.equal((await waitWorker(interrupted.threads, 'thr_w', 0, interrupted.opts)).state, 'stopped');
+  assert.equal((await waitWorker(interrupted.threads, 'thr_w', 0, interrupted.opts)).state, 'failed');
 });
 
 test('a worker still busy when the budget runs out is reported working, without a report', async () => {
@@ -243,4 +244,10 @@ test('a resume seen in the last read resets the quiet time', async () => {
   const r = await waitWorker(w.threads, 'thr_w', 2, w.opts);
   assert.equal(r.state, 'working');
   assert.ok(r.quietForMs < 480_000, String(r.quietForMs));
+});
+
+test('a failure seen while the report is read wins over the first verdict', async () => {
+  const w = worker('idle', done, 'Done');
+  w.state.afterOutput.push(() => { w.state.status = 'error'; });
+  assert.equal((await waitWorker(w.threads, 'thr_w', 0, w.opts)).state, 'failed');
 });

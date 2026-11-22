@@ -78,7 +78,8 @@ export async function waitWorker(threads: Threads, threadId: string, after: numb
     // Any other interruption (provider-turn-idle, a host restart) is a failed run the coordinator retries.
     // An exhausted row is a failure only before any turn finished: an old one must not spoil a later successful turn.
     if (lastStop || thread.status === 'error' || (exhausted(q) && !end)) return 'failed';
-    if (end && (end.data as { status?: string } | undefined)?.status === 'interrupted') return 'stopped';
+    // A turn the provider cancelled without BB's manual stop is a failed run, retried like any other.
+    if (end && (end.data as { status?: string } | undefined)?.status === 'interrupted') return 'failed';
     return n(start) > seq && n(start) > n(end) ? 'working' : 'idle';
   };
   const before = await read();
@@ -89,7 +90,9 @@ export async function waitWorker(threads: Threads, threadId: string, after: numb
     output = (await threads.output({ threadId })).output;
     // The report must belong to the turn judged above: a turn that started meanwhile makes it someone else's.
     latest = await read();
-    if (judge(latest) === 'working' || n(latest.start) > n(before.start)) { state = 'working'; output = null; }
+    const again = judge(latest);
+    if (again === 'working' || n(latest.start) > n(before.start)) { state = 'working'; output = null; }
+    else state = again;  // a failure or stop that appeared meanwhile wins over the first verdict
   }
   // Quiet since the newest thing seen, including a turn that started during the last read; a thread with no event yet
   // is quiet since it was created, so a worker held before its first event still reaches the owner.
