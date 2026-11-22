@@ -7,23 +7,6 @@ export const rowActions: Record<string, string> = {
   worktree: 'check-worktree',
   coupling: 'check-coupling',
 };
-/** Plain-language explanation shown under the «?» button of each check row. */
-export const checkHelp: Record<string, string> = {
-  verify: '/aif-verify сверяет сделанное с планом: все ли задачи выполнены, ничего ли не забыто, собирается ли код и проходят ли тесты. Код не меняет, итог — PASS, WARN или FAIL.',
-  rules: '/aif-rules-check проверяет изменённые файлы на соответствие правилам проекта (RULES.md, rules/base.md и правила отдельных областей). Только читает файлы.',
-  security: '/aif-security-checklist ищет проблемы безопасности по OWASP Top 10: инъекции, XSS, секреты в коде, ошибки авторизации, уязвимые зависимости.',
-  review: '/aif-review делает ревью текущих изменений, как опытный коллега: ошибки, риски, производительность, читаемость.',
-  'qa-plan': '/aif-qa готовит тест-план и конкретные сценарии проверки изменения. Сами сценарии не прогоняет.',
-  qa: '/aif-qa-check прогоняет подготовленные QA-сценарии (вы сами или агент) и записывает результат каждого.',
-  coverage: 'Отчёт расширения AIFHub: каждое требование изменения связано с реализацией и проверкой.',
-  readiness: 'Отчёт расширения AIFHub: все обязательные проверки пройдены и задачу можно закрывать через /aif-done.',
-  quality: '/aif-quality-setup audit смотрит, какие линтеры, проверки типов, тесты и git-хуки есть в проекте и чего не хватает. Сами проверки не запускает.',
-  ci: 'Смотрит результат CI (например, GitHub Actions) для текущего коммита. Сам pipeline не создаёт и не меняет.',
-  mode: 'AIFHub OpenSpec: /aif-mode doctor читает конфигурацию и артефакты выбранного change и сообщает о проблемах. Ничего не исправляет.',
-  worktree: 'ai-factory worktree-check --json (AI Factory 2.22+) делает статическую диагностику текущего checkout: конфликты и пробелы coverage. Окружения не запускает и runtime-изоляцию не подтверждает.',
-  coupling: '/aif-review +coupling — необязательный анализ архитектурной связанности по фактическим evidence. Только сообщает о зависимостях, рефакторинг не выполняет.',
-  'completion-hook': 'Completion hook — opt-in для Claude Code: читает наличие .ai-factory/completion-hook/approval.json. Декларация не является PASS, verifier плагин не запускает.',
-};
 /** Optional project commands offered in the tab's «Другие команды» list, with their «?» text. */
 export const toolHelp: Record<string, string> = {
   'roadmap-setup': '/aif-roadmap составляет или обновляет план развития проекта по этапам (ROADMAP.md). По нему /aif-roadmap-next подсказывает, какую задачу планировать следующей, а /aif-plan привязывает планы к этапам. Нужен, когда впереди много этапов.',
@@ -31,6 +14,22 @@ export const toolHelp: Record<string, string> = {
 };
 
 export const supplementaryChecks = new Set(['rules', 'security', 'review', 'qa-plan', 'qa', 'quality', 'ci', 'mode', 'worktree', 'completion-hook', 'coupling']);
+export const checkHelp: Readonly<Record<string, string>> = {
+  verify: 'Сверяет реализацию с выбранным планом и выполняет применимые проверки проекта.',
+  rules: 'Проверяет изменения на соответствие правилам проекта и затронутых областей.',
+  security: 'Проверяет изменения на риски безопасности, от контроля доступа до зависимостей.',
+  review: 'Ищет ошибки и риски в текущих изменениях кода.',
+  'qa-plan': 'Готовит сценарии проверки и ожидаемые результаты.',
+  qa: 'Проверяет подготовленные QA-сценарии и записывает результат по каждому из них.',
+  coverage: 'Показывает связь требований OpenSpec с реализацией и проверками.',
+  readiness: 'Показывает, что нужно для завершения работы по выбранному плану или change.',
+  quality: 'Показывает, какие проверки типов, линтеры, тесты и хуки настроены в проекте.',
+  ci: 'Показывает результаты уже запущенного CI для нужной ревизии.',
+  mode: 'Читает конфигурацию и артефакты выбранного OpenSpec change.',
+  worktree: 'Проверяет конфигурацию ресурсов рабочей копии, например порты и пути.',
+  'completion-hook': 'Показывает состояние настроенного хука завершения.',
+  coupling: 'Проверяет связи между модулями и места, которые приходится менять вместе.',
+};
 const commands: Record<string, string> = {
   'aif-verify': 'verify', 'aif-rules-check': 'rules', 'aif-security-checklist': 'security', 'aif-review': 'review',
 };

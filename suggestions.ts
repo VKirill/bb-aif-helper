@@ -3,6 +3,7 @@
 import { parseReplyGate } from './gate.ts';
 import { briefCommands } from './session-brief.ts';
 import { gateEvidenceCommands } from './gate-evidence-command.ts';
+import { confirmationProse } from './confirmation.ts';
 import type { Action, Suggestions } from './model.ts';
 
 function argumentsAfter(tail: string, code: boolean): string | null {
@@ -38,11 +39,11 @@ function argumentsAfter(tail: string, code: boolean): string | null {
 
 // Prefix-free skill names are invocations only at the start of complete code
 // spans or code lines. Ordinary prose, paths and partial fences are not commands.
-function bareCodeInvocations(text: string) {
-  const result: { name: string; tail: string; index: number; code: boolean }[] = [];
+function readCodeItems<T>(text: string, parse: (body: string, index: number) => T | null): T[] {
+  const result: T[] = [];
   const add = (body: string, index: number, into = result) => {
-    const match = body.match(/^[ \t]*(aif(?:-[a-z0-9]+)*)(?=$|[ \t])/);
-    if (match) into.push({ name: match[1], tail: body.slice(match[0].length), index, code: true });
+    const item = parse(body, index);
+    if (item !== null) into.push(item);
   };
   let fence: { char: string; size: number; items: typeof result } | null = null;
   let offset = 0;
@@ -66,13 +67,29 @@ function bareCodeInvocations(text: string) {
   return result;
 }
 
+export function rulesSyncCommand(text: string, change: string): string | undefined {
+  const bounded = text.slice(0, 1024 * 1024);
+  const prose = confirmationProse(bounded.replace(/(`+)stale-generated-rules\1/gi, 'stale-generated-rules'));
+  if (!/\bstale-generated-rules\b/.test(prose)) return;
+  const commands = readCodeItems(bounded, body => {
+    const command = body.trim();
+    const match = command.match(/^ai-factory[ \t]+aifhub-mode[ \t]+sync[ \t]+--change[ \t]+(?:"([a-z0-9][a-z0-9._-]{0,199})"|'([a-z0-9][a-z0-9._-]{0,199})'|([a-z0-9][a-z0-9._-]{0,199}))[ \t]+--json$/);
+    return match ? { command, change: match[1] ?? match[2] ?? match[3] } : null;
+  });
+  if (commands.every(item => item.change === change)) return commands[0]?.command;
+}
+
 export function extractAifInvocations(text: string): { id: string; command: string }[] {
   const result: { id: string; command: string }[] = [];
   const bounded = text.slice(0, 1024 * 1024);
   const matches = [...bounded.matchAll(/(?<![\w$\\/.-])[/$](aif(?:-[a-z0-9]+)*)(?![\w/-])/g)].map(match => ({
     name: match[1], tail: bounded.slice(match.index! + match[0].length), index: match.index!, code: bounded[match.index! - 1] === '`',
   }));
-  for (const { name, tail, code } of matches.concat(bareCodeInvocations(bounded)).sort((a, b) => a.index - b.index)) {
+  const bare = readCodeItems(bounded, (body, index) => {
+    const match = body.match(/^[ \t]*(aif(?:-[a-z0-9]+)*)(?=$|[ \t])/);
+    return match ? { name: match[1], tail: body.slice(match[0].length), index, code: true } : null;
+  });
+  for (const { name, tail, code } of matches.concat(bare).sort((a, b) => a.index - b.index)) {
     const args = argumentsAfter(tail, code);
     if (args === null) continue;
     const command = name + args;

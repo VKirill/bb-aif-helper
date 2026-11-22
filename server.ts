@@ -8,7 +8,7 @@ import type { DelegationChoice, DelegationDefaults, DelegationRole, DelegationSt
 import { requestSchema, phaseSchema, snapshotSchema, chipScoringStateSchema, type CardRequest, type ChipScoringState, type Snapshot, type Phase, type Suggestions } from './model.ts';
 import { actionPrompt, workflowActions, commitNavigationDeferred } from './workflow.ts';
 import { applyRan, applySkipped, RUN_CONFIRMED_STEPS } from './readiness.ts';
-import { analyzeReply, nextStepItems, withTopic } from './suggestions.ts';
+import { analyzeReply, nextStepItems, withTopic, rulesSyncCommand } from './suggestions.ts';
 import { blockedByGate } from './gate.ts';
 import { attachChatChecks, readChatChecks, type ChatCheck } from './check-history.ts';
 import { lockUnchangedChecks, unchangedCheck, unchangedReason } from './check-actions.ts';
@@ -182,6 +182,11 @@ export default async function plugin(bb: BbPluginApi) {
     noteEnvironment(threadId, environment.id);
     return { thread, environment };
   }
+  function preparationKey({ projectId, hostId, path }: { projectId: string; hostId: string; path: string | null }) {
+    if (projectId !== 'proj_personal') return `preparation-visible:${projectId}`;
+    const folder = createHash('sha256').update(JSON.stringify([hostId, path])).digest('hex');
+    return `preparation-visible:${projectId}:${folder}`;
+  }
   const readConfirmation = async (threadId: string) => pendingConfirmation(await bb.sdk.threads.events.list({ threadId,
     order: 'desc', limit: '100', types: ['item/completed', 'client/turn/requested'] }));
   async function requireConfirmationAnswer(threadId: string) {
@@ -301,6 +306,15 @@ export default async function plugin(bb: BbPluginApi) {
         order: 'desc', limit: '100', types: ['item/completed', 'client/turn/requested'] });
       snapshot.pendingConfirmation = pendingConfirmation(rows);
       await contextReport(input.threadId, environment, snapshot, rows);
+      if (snapshot.profile === 'aifhub-openspec' && snapshot.target?.kind === 'openspec') {
+        const reply = [...rows].sort((a, b) => b.seq - a.seq).find(row => row.type === 'item/completed'
+          && row.data.item.type === 'agentMessage' && !row.data.item.parentToolCallId
+          && row.data.item.text.replace(/::aif-chat\{[^\n]*\}/g, '').trim());
+        if (reply?.type === 'item/completed' && reply.data.item.type === 'agentMessage') {
+          const command = rulesSyncCommand(reply.data.item.text, snapshot.target.id);
+          if (command) snapshot.rulesSync = { command, seq: reply.seq };
+        }
+      }
       if (!snapshot.configured && snapshot.profile === 'none' && !snapshot.target) {
         const savedPlan = await bb.storage.kv.get<ChatPlanRecord>(`chat-plan:${input.threadId}`);
         const accepted = savedPlan?.environmentId === environment.id && savedPlan.root === snapshot.root ? savedPlan : null;
@@ -315,10 +329,14 @@ export default async function plugin(bb: BbPluginApi) {
     }
     if (snapshot.pendingConfirmation !== false) snapshot.threadState = 'awaiting_input';
     if (snapshot.sessionBrief) snapshot.fingerprint = createHash('sha256').update(JSON.stringify([snapshot.fingerprint, snapshot.sessionBrief])).digest('hex');
+    if (snapshot.rulesSync) snapshot.fingerprint = createHash('sha256').update(JSON.stringify([snapshot.fingerprint, snapshot.rulesSync])).digest('hex');
     if (snapshot.chatPlan) snapshot.fingerprint = createHash('sha256').update(JSON.stringify([snapshot.fingerprint, snapshot.chatPlan])).digest('hex');
     snapshot.actions = workflowActions(snapshot);
     await chatChecks(input.threadId, environment.id, environment.hostId, snapshot, fresh);
     lockUnchangedChecks(snapshot);
+    if (snapshot.preparation?.length) {
+      snapshot.preparationVisible = await bb.storage.kv.get<boolean>(preparationKey(environment)) === true;
+    }
     return snapshot;
   }
   async function show(input: CardRequest) {
@@ -402,6 +420,8 @@ export default async function plugin(bb: BbPluginApi) {
     const hidden = dismissed?.sourceKey === sourceKey ? dismissed.ids : [];
     const prefix = ['codex', 'codex-app'].includes(snapshot.runtime) ? '$' : '/';
     const blockedReason = reply.gate?.blocking ? 'Gate содержит блокирующие проблемы.' : reply.warning;
+    const contextBlock = snapshot.rulesSync ? 'Сначала синхронизируйте правила выбранного change.'
+      : sessionBriefBlocked(snapshot) ? 'Сначала восстановите SessionBrief выбранного change.' : null;
     const specialChip = (id: string) => id === IMPROVE_APPROVAL || id === GATE_EVIDENCE_COMMAND || id === SESSION_BRIEF_COMMAND;
     const offered = ids.filter(id => !hidden.includes(id));
     const items: Suggestions['items'] = offered.filter(id => specialChip(id) || snapshot.skills.includes(id) || id === 'aif-chat' || id === reply.next).map(id => id === IMPROVE_APPROVAL && proposal ? {
@@ -424,8 +444,8 @@ export default async function plugin(bb: BbPluginApi) {
       reason: 'Пересобрать контекст только выбранного change; команда объявлена установленным расширением',
       probability: null,
     } : ({ id, command: withTopic(`${prefix}${reply.commands.get(id) ?? id}`, id, reply.next === id ? reply.gate?.suggested_next?.reason : null),
-      available: !reply.error && !blockedByGate(id, reply.gate, reply.warning) && !(id === 'aif-implement' && sessionBriefBlocked(snapshot)) && !(id === 'aif-commit' && commitNavigationDeferred(snapshot)) && !unchangedCheck(snapshot, id, reply.commands.get(id)) && snapshot.profile !== 'invalid' && (snapshot.skills.includes(id) || id === 'aif-chat'),
-      reason: reply.error ?? (id === 'aif-implement' && sessionBriefBlocked(snapshot) ? 'Сначала восстановите SessionBrief выбранного change.' : blockedByGate(id, reply.gate, reply.warning) ? blockedReason! : id === 'aif-commit' && commitNavigationDeferred(snapshot) ? 'Коммиты привязаны к плану; продолжите aif-implement до разрешённого commit-boundary.' : unchangedCheck(snapshot, id, reply.commands.get(id)) ? unchangedReason : snapshot.profile === 'invalid' ? 'Проверьте конфигурацию проекта.' : !(snapshot.skills.includes(id) || id === 'aif-chat') ? `Команда ${id} не установлена для ${snapshot.runtime}. Добавьте этот skill в установку AI Factory проекта.` : reply.next === id ? reply.gate?.suggested_next?.reason ?? 'Следующий шаг из gate' : 'Команда из последнего ответа агента'),
+      available: !reply.error && !blockedByGate(id, reply.gate, reply.warning) && !(id === 'aif-implement' && contextBlock) && !(id === 'aif-commit' && commitNavigationDeferred(snapshot)) && !unchangedCheck(snapshot, id, reply.commands.get(id)) && snapshot.profile !== 'invalid' && (snapshot.skills.includes(id) || id === 'aif-chat'),
+      reason: reply.error ?? (id === 'aif-implement' && contextBlock ? contextBlock : blockedByGate(id, reply.gate, reply.warning) ? blockedReason! : id === 'aif-commit' && commitNavigationDeferred(snapshot) ? 'Коммиты привязаны к плану; продолжите aif-implement до разрешённого commit-boundary.' : unchangedCheck(snapshot, id, reply.commands.get(id)) ? unchangedReason : snapshot.profile === 'invalid' ? 'Проверьте конфигурацию проекта.' : !(snapshot.skills.includes(id) || id === 'aif-chat') ? `Команда ${id} не установлена для ${snapshot.runtime}. Добавьте этот skill в установку AI Factory проекта.` : reply.next === id ? reply.gate?.suggested_next?.reason ?? 'Следующий шаг из gate' : 'Команда из последнего ответа агента'),
       probability: null,
     }));
     if (offered.length > items.length) bb.log.debug(`aif-chat: suggestions threadId=${threadId} shown=${items.length} hiddenUnknown=${offered.length - items.length}`);
@@ -675,6 +695,14 @@ export default async function plugin(bb: BbPluginApi) {
       return { state: thread.environmentId === latest.environmentId ? 'current' as const : 'hidden' as const };
     },
     status: input => status(input, input.checkUpdates, input.force),
+    setPreparationVisibility: async ({ threadId, visible }) => {
+      const { environment } = await context(threadId);
+      const key = preparationKey(environment);
+      if (visible) await bb.storage.kv.set(key, true);
+      else await bb.storage.kv.delete(key);
+      bb.rpc.experimental_invalidateAll();
+      return { visible };
+    },
     planDocument: input => saveCompletedPlan(input.threadId, input.text),
     suggestions: async input => (await suggested(input.threadId)).view,
     delegation: async input => {
@@ -716,10 +744,8 @@ export default async function plugin(bb: BbPluginApi) {
       if (previous) return { sent: false, message: previous.state === 'sent' ? 'Команда уже отправлена.' : 'Исход отправки не подтверждён. Проверьте чат; автоматический повтор отключён.' };
       if (deliveries.some(d => d.state !== 'sent')) throw new Error('Есть отправка с неизвестным исходом. Сначала проверьте чат.');
       const current = await suggested(input.threadId, true);
-      if (current.view.sourceKey !== input.sourceKey || current.view.fingerprint !== input.fingerprint) {
-        bb.log.info(`aif-chat: stale card click threadId=${input.threadId} commandId=${input.commandId}`);
-        return { sent: false, stale: true, message: 'Карточка обновилась. Проверьте задачу и нажмите ещё раз.' };
-      }
+      const stale = { sent: false, stale: true as const, message: 'Предложения изменились. Проверьте обновлённый список перед запуском.' };
+      if (current.view.sourceKey !== input.sourceKey || current.view.fingerprint !== input.fingerprint) return stale;
       const item = current.view.items.find(i => i.id === input.commandId && i.available);
       if (!item || !current.snapshot) throw new Error('Команда недоступна или удалена из предложений.');
       const approval = item.kind === 'improve-approval';
@@ -734,7 +760,7 @@ export default async function plugin(bb: BbPluginApi) {
       const latestProposal = current.proposal ? pendingImproveProposal(await bb.sdk.threads.events.list({ threadId: input.threadId,
         order: 'desc', limit: '100', types: ['item/completed', 'client/turn/requested'] }), latest.output, current.snapshot.target) : null;
       const special = approval || item.label !== undefined;
-      if ((approval && !latestProposal) || suggestionSource(current.snapshot.root, latest.output, latestProposal?.seq) !== input.sourceKey) throw new Error('Последний ответ изменился. Обновите предложения.');
+      if ((approval && !latestProposal) || suggestionSource(current.snapshot.root, latest.output, latestProposal?.seq) !== input.sourceKey) return stale;
       if (!special) {
         bb.log.info(`aif-chat: chip checked threadId=${input.threadId} commandId=${input.commandId}`);
         return { sent: false, message: 'Команда подставлена в поле ввода.', command: item.command,
@@ -766,10 +792,9 @@ export default async function plugin(bb: BbPluginApi) {
       if (existing) return { sent: false, message: existing.state === 'sent' ? 'Команда уже отправлена.' : 'Исход отправки не подтверждён. Проверьте ленту чата; автоматический повтор отключён.' };
       if (deliveries.some(d => d.state !== 'sent')) throw new Error('Есть отправка с неизвестным исходом. Проверьте чат и явно сбросьте её через bb plugin run aif-chat reset-dispatch.');
       const current = await status(input, false, true);
-      if (current.fingerprint !== input.fingerprint) {
-        bb.log.info(`aif-chat: stale card click threadId=${input.threadId} actionId=${input.actionId}`);
-        return { sent: false, stale: true, message: 'Карточка обновилась. Проверьте задачу и нажмите ещё раз.' };
-      }
+      if (current.fingerprint !== input.fingerprint) return {
+        sent: false, stale: true as const, message: 'Карточка устарела. Проверьте обновлённую задачу и нажмите ещё раз.',
+      };
       const candidate = current.actions.find(a => a.id === input.actionId);
       if (candidate?.disabledReason === 'unchanged') throw new Error(unchangedReason);
       if (candidate?.disabledReason === 'context-blocked') throw new Error(candidate.reason);

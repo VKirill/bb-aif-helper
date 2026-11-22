@@ -24,6 +24,79 @@ const cardId = '11111111-1111-4111-8111-111111111111';
 const props = { attributes: { phase: 'plan', card: cardId }, source: `::aif-chat{phase="plan" card="${cardId}"}`, message: { id: 'msg_1', threadId: 'thr_test', turnId: 'turn_1', projectId: 'proj_test' }, openWorkspaceFile: null };
 function data() { const s = snapshot(); s.actions = workflowActions(s); return s; }
 
+test('a stale action refreshes the card and requires a new click', async () => {
+  const initial = data();
+  const updated = { ...initial, fingerprint: 'b'.repeat(64) };
+  const calls: string[] = [];
+  let refreshed = false;
+  const message = 'Карточка устарела. Проверьте обновлённую задачу и нажмите ещё раз.';
+  const slot = renderSlot(app.messageDirectives[0], props, { rpc: {
+    status: input => { if ((input as { force?: boolean }).force) refreshed = true; return refreshed ? updated : initial; },
+    run: input => {
+      calls.push((input as { fingerprint: string }).fingerprint);
+      return calls.length === 1 ? { sent: false, stale: true, message } : { sent: true, message: 'Отправлено' };
+    },
+  } });
+  try {
+    fireEvent.click(await slot.findByRole('button', { name: 'Улучшить план' }));
+    await slot.findByText(message);
+    const action = slot.getByRole('button', { name: 'Улучшить план' }) as HTMLButtonElement;
+    await waitFor(() => assert(!action.disabled && refreshed));
+    assert.equal(slot.queryByRole('alert'), null);
+    assert.deepEqual(calls, [initial.fingerprint]);
+    fireEvent.click(action);
+    await slot.findByText('Отправлено');
+    assert.deepEqual(calls, [initial.fingerprint, updated.fingerprint]);
+  } finally { slot.lifecycle.unmount(); }
+});
+
+test('preparation is hidden until requested and its help and visibility never dispatch workflow actions', async () => {
+  const status = snapshot({ target: null, candidates: [] });
+  status.preparation = [
+    { id: 'describe', label: 'Описать проект', optional: false, state: 'missing', paths: ['.ai-factory/DESCRIPTION.md'] },
+    { id: 'docker', label: 'Настроить Docker', optional: true, state: 'missing', paths: ['Dockerfile'] },
+  ];
+  status.checks = [{ id: 'verify', label: 'Соответствие плану', state: 'notrun', detail: 'Отчёт не найден', path: null, required: false }];
+  status.actions = workflowActions(status);
+  let runs = 0;
+  const slot = renderSlot(app.threadContextCardSections[0], { threadId: 'thr_test' } as any, { rpc: {
+    status: () => status,
+    setPreparationVisibility: (input: any) => {
+      assert.equal(input.threadId, 'thr_test');
+      status.preparationVisible = input.visible;
+      return { visible: input.visible };
+    },
+    run: () => { runs++; return { sent: true, message: 'Отправлено' }; },
+  } });
+  try {
+    const show = await slot.findByRole('button', { name: 'Показать подготовку проекта' });
+    const updates = slot.getByRole('button', { name: 'Версии и обновления' });
+    const refreshStatus = slot.getByRole('button', { name: 'Обновить статус AI Factory' });
+    assert.deepEqual([show, updates, refreshStatus].map(button => button.querySelector('[data-icon]')?.getAttribute('data-icon')),
+      ['ListTodo', 'PackageReceive', 'RotateCcw']);
+    assert.equal(show.getAttribute('aria-expanded'), 'false');
+    assert.equal(slot.queryByRole('region', { name: 'Подготовка проекта' }), null);
+    fireEvent.click(show);
+    const preparation = await slot.findByRole('region', { name: 'Подготовка проекта' });
+    assert.equal(preparation.hidden, false);
+    fireEvent.click(slot.getByText('Дополнительно'));
+    const help = slot.getByRole('button', { name: 'Подробнее: Настроить Docker' });
+    const description = document.getElementById(help.getAttribute('aria-controls')!)!;
+    assert.equal(description.hidden, true);
+    fireEvent.click(help);
+    assert.equal(help.getAttribute('aria-expanded'), 'true');
+    assert.equal(description.hidden, false);
+    assert.match(description.textContent!, /Dockerfile/);
+    fireEvent.click(slot.getByText('Что проверить'));
+    const check = slot.getByRole('button', { name: 'Подробнее: Соответствие плану' });
+    fireEvent.click(check);
+    assert.equal(check.getAttribute('aria-expanded'), 'true');
+    fireEvent.click(slot.getByRole('button', { name: 'Скрыть подготовку проекта' }));
+    await waitFor(() => assert.equal(Boolean(slot.queryByRole('region', { name: 'Подготовка проекта' })), false));
+    assert.equal(runs, 0);
+  } finally { slot.lifecycle.unmount(); }
+});
+
 test('2.22 plan controls, skipped tasks and version-gated diagnostics remain explicit in the panel', async () => {
   const s = snapshot({ fixDefaults: { mode: 'plan', patch: false } });
   s.versions.installed = '2.22.0'; s.versions.globalCli = '2.21.0';
@@ -116,21 +189,35 @@ test('configuration errors do not hide the installation update button', async ()
   const s = snapshot({ profile: 'invalid', target: null, diagnostics: ['Выбранный план/change не найден в допустимых артефактах.'] }); s.actions = workflowActions(s);
   const slot = renderSlot(app.messageDirectives[0], props, { rpc: { status: () => s } });
   try {
+    fireEvent.click(await slot.findByRole('button', { name: 'Версии и обновления' }));
     assert.equal((await slot.findByRole('button', { name: 'Обновить AI Factory' }) as HTMLButtonElement).disabled, false);
     assert.ok(slot.queryByRole('button', { name: 'Выполнить план' }) === null, 'element should be absent');
     assert.ok(slot.queryByRole('button', { name: 'Запустить aif' }) === null, 'element should be absent');
   } finally { slot.lifecycle.unmount(); }
 });
 
-test('without AI Factory the card shows a separate installer and usable bundled flow without automatic dispatch', async () => {
+test('without AI Factory the installer appears only in preparation and the bundled flow remains available', async () => {
   const s = snapshot({ configured: false, profile: 'none', target: null, candidates: [], skills: [], phase: 'unknown' });
+  s.preparation = [{ id: 'install', label: 'Установить AI Factory', optional: false, state: 'missing', paths: ['.ai-factory.json'] }];
   s.actions = workflowActions(s); let runs = 0;
-  const slot = renderSlot(app.messageDirectives[0], props, { rpc: { status: () => s, run: (input: any) => {
-    assert.equal(input.actionId, 'basic-explore'); assert.equal(input.researchTask, 'Почему форма не принимает завтрашнюю дату?'); runs++; return { sent: true, message: 'Отправлено' };
-  } } });
+  const slot = renderSlot(app.messageDirectives[0], props, { rpc: {
+    status: () => s,
+    setPreparationVisibility: (input: any) => {
+      s.preparationVisible = input.visible;
+      return { visible: input.visible };
+    },
+    run: (input: any) => {
+      assert.equal(input.actionId, 'basic-explore'); assert.equal(input.researchTask, 'Почему форма не принимает завтрашнюю дату?'); runs++; return { sent: true, message: 'Отправлено' };
+    },
+  } });
   try {
-    const install = await slot.findByRole('button', { name: 'Установить AI Factory' }) as HTMLButtonElement;
-    assert.equal(install.disabled, false); assert(install.closest('.aif-maintenance'));
+    const showPreparation = await slot.findByRole('button', { name: 'Показать подготовку проекта' });
+    assert.equal(Boolean(slot.queryByRole('button', { name: 'Установить AI Factory' })), false);
+    fireEvent.click(showPreparation);
+    const preparation = await slot.findByRole('region', { name: 'Подготовка проекта' });
+    const install = within(preparation).getByRole('button', { name: 'Установить AI Factory' }) as HTMLButtonElement;
+    assert.equal(install.disabled, false);
+    assert.equal(slot.getAllByRole('button', { name: 'Установить AI Factory' }).length, 1);
     assert.match(slot.getByLabelText('Базовый workflow').textContent!, /исследование → Plan BB → выполнение → проверка → коммит/);
     const explore = slot.getByRole('button', { name: 'Исследовать задачу' }) as HTMLButtonElement;
     assert.equal(explore.disabled, false); assert.equal(runs, 0);
@@ -143,6 +230,27 @@ test('without AI Factory the card shows a separate installer and usable bundled 
     fireEvent.change(field, { target: { value: '  Почему форма не принимает завтрашнюю дату?  ' } });
     fireEvent.click(start); fireEvent.click(start); await waitFor(() => assert.equal(runs, 1));
     await waitFor(() => assert.ok(slot.queryByRole('form', { name: 'Описание исследования' }) === null, 'element should be absent'));
+  } finally { slot.lifecycle.unmount(); }
+});
+
+test('preparation offers an update for a project with AI Factory installed', async () => {
+  const s = snapshot({ preparationVisible: true, preparation: [
+    { id: 'install', label: 'Установить AI Factory', optional: false, state: 'found', paths: ['.ai-factory.json'] },
+  ] });
+  s.actions = workflowActions(s);
+  const dispatched: string[] = [];
+  const slot = renderSlot(app.threadContextCardSections[0], { threadId: 'thr_test' } as any, { rpc: {
+    status: () => s,
+    run: (input: any) => { dispatched.push(input.actionId); return { sent: true, message: 'Отправлено' }; },
+  } });
+  try {
+    const preparation = within(await slot.findByRole('region', { name: 'Подготовка проекта' }));
+    assert(preparation.getByText('AI Factory установлен'));
+    assert.equal(Boolean(preparation.queryByRole('button', { name: 'Установить AI Factory' })), false);
+    const update = preparation.getByRole('button', { name: 'Обновить AI Factory' });
+    assert.deepEqual(dispatched, []);
+    fireEvent.click(update);
+    await waitFor(() => assert.deepEqual(dispatched, ['update-factory']));
   } finally { slot.lifecycle.unmount(); }
 });
 
@@ -365,6 +473,7 @@ test('registered extensions have a separate update button even with an invalid s
   const s = snapshot({ profile: 'invalid', extensions: [{ name: 'aifhub-extension', recordedVersion: '1.7.1', installedVersion: '1.7.1', source: 'local', state: 'present', contributions: [] }] }); s.actions = workflowActions(s);
   const slot = renderSlot(app.messageDirectives[0], props, { rpc: { status: () => s } });
   try {
+    fireEvent.click(await slot.findByRole('button', { name: 'Версии и обновления' }));
     assert.equal((await slot.findByRole('button', { name: 'Обновить расширения' }) as HTMLButtonElement).disabled, false);
     assert.ok(slot.queryByRole('button', { name: 'Выполнить план' }) === null, 'element should be absent');
   } finally { slot.lifecycle.unmount(); }
@@ -375,7 +484,9 @@ test('saved-data state is visible and the refresh button explicitly bypasses the
   const requests: any[] = [];
   const slot = renderSlot(app.messageDirectives[0], props, { rpc: { status: (input: any) => { requests.push(input); return s; } } });
   try {
-    await slot.findByText(/Сохранённые данные.*обновляются в фоне/);
+    const footer = (await slot.findByText('Сохранённые данные')).closest('footer')!;
+    assert.equal(footer.querySelector('time')?.dateTime, s.collectedAt);
+    assert(within(footer).getByText('Обновляются в фоне…'));
     fireEvent.click(slot.getByRole('button', { name: 'Обновить статус AI Factory' }));
     await waitFor(() => assert(requests.some(input => input.force === true)));
     assert.notEqual(requests[0].force, true, 'the shared read never forces');
@@ -437,16 +548,16 @@ test('supplementary rows are optional without downgrading known required gates o
   s.actions = workflowActions(s); let runs = 0;
   const slot = renderSlot(app.messageDirectives[0], props, { rpc: { status: () => s, run: () => { runs++; return { sent: true, message: 'Отправлено' }; } } });
   try {
-    await slot.findByText(/Дополнительные проверки — по выбору/);
+    fireEvent.click(await slot.findByText('Что проверить'));
     const required = slot.getByText('rules').closest('li')!;
-    assert.match(required.textContent!, /нужно для завершения/);
+    assert.match(required.textContent!, /Обязательно/);
     assert(!required.textContent!.includes('по выбору'));
     for (const label of ['security', 'review', 'qa-plan', 'qa', 'quality', 'ci', 'mode']) {
       assert.match(slot.getByText(label).closest('li')!.textContent!, /по выбору/);
     }
     const doctor = slot.getByRole('button', { name: 'Проверить конфигурацию', hidden: true });
     assert.equal(doctor.closest('li'), slot.getByText('mode').closest('li'));
-    fireEvent.click(slot.getByText(/Что проверить/)); assert.equal(runs, 0);
+    assert.equal(runs, 0);
   } finally { slot.lifecycle.unmount(); }
 });
 
@@ -475,10 +586,38 @@ test('checks distinguish completed chat WARN from missing file evidence', async 
       result: { schema_version: 1, gate: 'verify', status: 'warn', blocking: false, blockers: [], affected_files: [], suggested_next: null } } }];
   const slot = renderSlot(app.messageDirectives[0], props, { rpc: { status: () => s } });
   try {
+    fireEvent.click(await slot.findByText('Что проверить'));
     await slot.findByText('WARN · из чата');
-    await slot.findByText(/Актуальность для текущих файлов не подтверждена/);
-    await slot.findByText('Файловый отчёт: не найден.');
+    const details = slot.getByLabelText('Детали проверки «Соответствие плану»');
+    assert.equal(details.closest('details')!.open, false);
+    fireEvent.click(details);
+    assert.equal(details.closest('details')!.open, true);
+    assert(slot.getByText('Актуальность для текущих файлов не подтверждена.'));
+    assert(slot.getByText('Файловый отчёт: не найден.'));
     assert(!slot.queryByText('Unknown launch'));
+  } finally { slot.lifecycle.unmount(); }
+});
+
+test('a blocking check opens the section and shows findings before unconfirmed checks', async () => {
+  const s = data();
+  s.checks = [
+    { id: 'verify', label: 'Соответствие плану', state: 'notrun', detail: 'Артефакт не найден', path: null, required: true },
+    { id: 'review', label: 'Code review', state: 'notrun', detail: '', path: null, required: false, chat: {
+      seq: 12, at: s.collectedAt, target: s.target!.path, freshness: 'unknown',
+      result: { schema_version: 1, gate: 'review', status: 'fail', blocking: true,
+        blockers: [{ id: 'regression', summary: 'Нужно исправить регрессию', severity: 'error' }],
+        affected_files: [], suggested_next: null },
+    } },
+  ];
+  const slot = renderSlot(app.messageDirectives[0], props, { rpc: { status: () => s } });
+  try {
+    const heading = await slot.findByText('Что проверить');
+    const section = heading.closest('details')!;
+    assert.equal(section.open, true);
+    assert.equal(section.querySelector('.aif-check-row')?.getAttribute('data-blocking'), 'true');
+    assert(within(section).getByText('Блокирующие · 1'));
+    assert(within(section).getByText(/Нужно исправить регрессию/));
+    assert.equal(section.querySelector<HTMLDetailsElement>('.aif-check-report')?.open, false);
   } finally { slot.lifecycle.unmount(); }
 });
 
@@ -510,10 +649,12 @@ test('workflow panel reads its owning thread and exposes maintenance without a t
     rpc: { status: (input: any) => { readThreads.push(input.threadId); return s; }, run: () => { runs++; return { sent: true, message: 'Отправлено' }; } },
   });
   try {
-    await slot.findByRole('button', { name: 'Обновить AI Factory' });
     await slot.findByText('Проект не подготовлен к AI Factory');
     await slot.findByText('Основных шагов осталось: 1 из 2');
     assert.equal(slot.queryByRole('button', { name: 'Запустить: Описать проект (/aif или aif-analyze)' }), null, 'navigation shows a prompt, not the step list');
+    fireEvent.click(slot.getByRole('button', { name: 'Версии и обновления' }));
+    await slot.findByRole('button', { name: 'Обновить AI Factory' });
+    fireEvent.click(slot.getByRole('tab', { name: 'Навигация' }));
     fireEvent.click(slot.getByRole('button', { name: 'Подготовить' }));
     assert.equal(slot.getByRole('tab', { name: /Настройки/ }).getAttribute('aria-selected'), 'true');
     await slot.findByRole('button', { name: 'Запустить: Описать проект (/aif или aif-analyze)' });
@@ -637,7 +778,7 @@ test('persistent panel names a prose confirmation and prevents navigation withou
     await slot.findByText(/ожидается подтверждение пользователя/);
     await slot.findByText('0/1 задач');
     assert.equal((slot.getByRole('button', { name: 'Улучшить план' }) as HTMLButtonElement).disabled, true);
-    assert(slot.getByText(/действия доступны после ответа пользователя/));
+    assert(slot.getByText('Действия доступны после ответа пользователя'));
   } finally { slot.lifecycle.unmount(); }
 });
 test('metadata failure removes stale actions instead of keeping executable old snapshot', async () => {
@@ -650,12 +791,17 @@ test('metadata failure removes stale actions instead of keeping executable old s
     assert.ok(slot.queryByRole('button', { name: 'Улучшить план' }) === null, 'element should be absent');
   } finally { slot.lifecycle.unmount(); }
 });
-test('maintenance buttons are visible before plan selection and update dispatch is click-only', async () => {
+test('the updates shortcut opens version controls and dispatch requires an explicit update click', async () => {
   const s = snapshot({ target: null, candidates: [] }); s.actions = workflowActions(s);
   let runs = 0;
   const slot = renderSlot(app.messageDirectives[0], props, { rpc: { status: () => s, run: (v: any) => { assert.equal(v.actionId, 'update-factory'); runs++; return { sent: true, message: 'Отправлено' }; } } });
   try {
+    const updates = await slot.findByRole('button', { name: 'Версии и обновления' });
+    const details = document.getElementById(updates.getAttribute('aria-controls')!) as HTMLDetailsElement;
+    assert.equal(details.open, false);
+    fireEvent.click(updates);
     const update = await slot.findByRole('button', { name: 'Обновить AI Factory' });
+    await waitFor(() => assert.equal(updates.getAttribute('aria-expanded'), 'true'));
     await slot.findByRole('button', { name: 'Запустить aif' }); assert.equal(runs, 0);
     fireEvent.click(update); await waitFor(() => assert.equal(runs, 1));
   } finally { slot.lifecycle.unmount(); }
@@ -959,13 +1105,16 @@ test('each check row has a «?» button that toggles a plain explanation without
   s.actions = workflowActions(s); let runs = 0;
   const slot = renderSlot(app.messageDirectives[0], props, { rpc: { status: () => s, run: () => { runs++; return { sent: true, message: 'Отправлено' }; } } });
   try {
-    const button = await slot.findByRole('button', { name: 'Что проверяет «Соответствие плану»', hidden: true });
-    assert.ok(slot.queryByText(checkHelp.verify) === null, 'element should be absent');
+    fireEvent.click(await slot.findByText('Что проверить'));
+    const button = slot.getByRole('button', { name: 'Подробнее: Соответствие плану' });
+    const explanation = document.getElementById(button.getAttribute('aria-controls')!)!;
+    assert.equal(explanation.hidden, true);
     fireEvent.click(button);
-    await slot.findByText(checkHelp.verify);
+    assert.equal(explanation.textContent, checkHelp.verify);
+    assert.equal(explanation.hidden, false);
     assert.equal(button.getAttribute('aria-expanded'), 'true');
     fireEvent.click(button);
-    await waitFor(() => assert.ok(slot.queryByText(checkHelp.verify) === null, 'element should be absent'));
+    assert.equal(explanation.hidden, true);
     assert.equal(runs, 0);
   } finally { slot.lifecycle.unmount(); }
 });

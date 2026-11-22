@@ -62,21 +62,29 @@ export function workflowActions(s: Snapshot): Action[] {
     maintenance.push({ id: `prep-${step.id}`, label: step.label, command: `${prefix}${command.skill}${command.args ?? ''}`,
       group: 'setup', reason: 'Отдельный шаг подготовки проекта', available: true });
   }
-  const contextBlocked = sessionBriefBlocked(s);
+  const briefBlocked = sessionBriefBlocked(s);
+  const contextBlock = s.rulesSync ? 'Сначала синхронизируйте правила выбранного change.'
+    : briefBlocked ? 'SessionBrief заблокирован по отчёту из чата; сначала восстановите контекст выбранного change' : null;
   const arg = s.target ? ` ${JSON.stringify(s.target.kind === 'openspec' || s.target.kind === 'classic' ? s.target.id : '@' + s.target.path)}` : '';
   const add = (id: string, label: string, skill: string, group: Action['group'], reason: string, target = arg) => {
     const available = s.skills.includes(skill);
-    const blocked = id === 'implement' && contextBlocked;
+    const blocked = id === 'implement' ? contextBlock : null;
     result.push({ id, label, command: `${prefix}${skill}${target}`, group,
-      reason: blocked ? 'SessionBrief заблокирован по отчёту из чата; сначала восстановите контекст выбранного change' : available ? reason : `${reason} · skill не установлен для ${s.runtime}`,
+      reason: blocked ?? (available ? reason : `${reason} · skill не установлен для ${s.runtime}`),
       available: available && !blocked, ...(blocked ? { disabledReason: 'context-blocked' as const } : {}) });
   };
   const allDone = !!s.target?.tasks.length && s.target.tasks.every(t => t.done);
   const verify = s.checks.find(c => c.id === 'verify');
   const failed = s.checks.some(c => c.state === 'fail');
   const hasFindings = s.checks.some(c => c.state === 'fail');
-  if (contextBlocked && s.target?.kind === 'openspec') {
-    add('context-sync', 'Синхронизировать change', 'aif-mode', 'next', 'Первый шаг восстановления контекста выбранного change', ` sync --change ${JSON.stringify(s.target.id)}`);
+  if (s.rulesSync) {
+    result.push({ id: 'rules-sync', label: 'Синхронизировать правила', command: s.rulesSync.command, group: 'next',
+      available: !!s.versions.globalCli && s.extensions.some(extension => extension.name === 'aifhub-extension'
+        && extension.state === 'present' && extension.commands?.includes('aifhub-mode')),
+      reason: 'Запустить синхронизацию правил выбранного change по команде из последнего ответа' });
+  }
+  if (briefBlocked && s.target?.kind === 'openspec') {
+    if (!s.rulesSync) add('context-sync', 'Синхронизировать change', 'aif-mode', 'next', 'Первый шаг восстановления контекста выбранного change', ` sync --change ${JSON.stringify(s.target.id)}`);
     result.push({ id: 'context-compile', label: 'Пересобрать SessionBrief', command: compileBriefCommand(s.target.id), group: 'next',
       available: sessionBriefCommandAvailable(s), reason: 'После sync собрать контекст только выбранного change; успешный запуск не означает PASS реализации' });
   }
@@ -135,6 +143,7 @@ export function workflowActions(s: Snapshot): Action[] {
 export function actionPrompt(s: Snapshot, action: Action): string {
   const basic = basicPrompt(s, action);
   if (basic) return basic;
+  if (action.id === 'rules-sync') return 'Выполни команду из сообщения только для выбранного change. Перепроверь свежесть сгенерированных правил и сообщи фактический результат. Выполнение плана пользователь запускает отдельно.';
   if (action.id === 'context-compile') return `${action.command}\n\nПосле sync пересобери SessionBrief только выбранного change. Затем проверь ai-factory aifhub-session-brief status --change ${JSON.stringify(s.target?.id)} --json. Сообщи фактический итог как SessionBrief: valid/stale/missing/blocked/research/invalid, не называя код 0 доказательством готовности реализации. Сохрани точный owner handoff при блокере. Не запускай sync, выполнение, commit или другие этапы автоматически; обнови карточку после результата.`;
   if (action.id === 'check-worktree') return 'В корне текущего проекта выполни ai-factory worktree-check --json через существующий CLI AI Factory 2.22+. Это read-only статическая диагностика только текущего checkout. Не запускай контейнеры, сервисы или verifier, не создавай mapping и не меняй конфигурацию. Для сравнения с другими checkout нужны явно выбранные пользователем пути. Сообщи conflicts и пробелы coverage отдельно; этот результат не подтверждает runtime-изоляцию и не является PASS остальных gates. Затем обнови статус плагина.';
   if (['fix-new', 'fix-findings', 'execute-fix'].includes(action.id)) return `${action.command}\n\nПримени установленный aif-fix и действующие workflow.fix_mode / workflow.fix_patch; не подставляй --fix-now, --plan-first, --patch или --no-patch без отдельного выбора пользователя. Существующий fix-план и его выполнение остаются у владельца aif-fix. Нажатие не разрешает другие этапы. После шага обнови карточку.`;
