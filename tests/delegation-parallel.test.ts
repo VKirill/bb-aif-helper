@@ -64,28 +64,20 @@ test('contextBlock with parallel spawns workers on BB-made copies and keeps prov
   ]) assert.ok(text.includes(part), part);
 });
 
-test('an idle worker with an interim report still works: the coordinator waits for it to resume, never gives up on time', () => {
-  // Antigravity ends a turn while its tests run in the background and resumes by itself (five pauses in one task):
-  // idle is not done, and BB cannot see those background commands, so no timer may declare a worker stopped.
+test('every wait step uses wait-worker, which sees everything between two calls, and never wakes a worker by itself', () => {
+  // Seven review rounds of `bb thread wait` + `bb thread output` polling kept finding gaps between two commands
+  // (a worker resuming, finishing or failing unseen); the plugin now waits on the event log with a cursor.
   const bb = { mode: 'bb' as const, providerId: 'codex', model: 'gpt-6.2-sol', reasoning: 'high' };
   const research = researchBlock({ research: bb, research2: { mode: 'self' }, research3: { mode: 'self' } })!;
-  // The parallel block also carries the one-worker flow, so its rule appears twice: once per wait step.
+  // The parallel block also carries the one-worker flow, so it has two wait steps.
   for (const [name, text, steps] of [['one worker', contextBlock(bb), 1], ['parallel', contextBlock({ ...bb, parallel: 3 }), 2], ['research', research, 1]] as const) {
     const count = (part: string) => text.split(part).length - 1;
-    assert.equal(count('An empty or interim report ("waiting for the tests") from an idle worker means it still works in the background'), steps, name);
-    // Review of 15a3b27: the report is read again before any reminder, and the reminder asks a finished worker to repeat
-    // its report, since a new turn replaces what `bb thread output` returns.
-    assert.equal(count('Time alone never means a worker stopped.'), steps, name);
-    // Review of 9950a93: short waits, each followed by a fresh read, so a worker that finished meanwhile costs at most
-    // two minutes; and a worker someone stopped by hand is not restarted by a reminder.
-    assert.equal(count('bb thread wait <id> --status active --timeout 2m` and read the report again whatever the wait returned (it may have finished meanwhile)'), steps, name);
-    assert.equal(count('After four such waits in a row without a resume'), steps, name);
-    // Review of 1f0d0b6: `bb thread stop` on an idle thread leaves no event and no state, so the coordinator cannot tell a
-    // stopped worker from a slow one: it never wakes one up by itself and asks the owner instead.
-    assert.equal(count('send it nothing (someone may have stopped it, and BB records no trace of a stop while a thread is idle): ask the owner whether to keep waiting, restart the task or do it yourself'), steps, name);
-    assert.ok(!text.includes('repeat your final report'), name);
-    assert.ok(!text.includes("bb thread tell <id> '"), name);
-    assert.ok(!text.includes('handoff_outcome: done'), name);
+    assert.equal(count('Wait with `bb plugin run aif-chat wait-worker --worker <id> --json`, then call it again with `--after <seq>` from its previous answer'), steps, name);
+    assert.equal(count('an empty or interim one ("waiting for the tests") means it still works in the background'), steps, name);
+    assert.equal(count('Once `idleForMs` passes 480000 with such a report, send it nothing and ask the owner'), steps, name);
+    assert.equal(count('`stopped`: someone stopped it; ask the owner. `failed`: its run failed; handle it as a BB failure.'), steps, name);
+    assert.equal(count('run `bb thread stop <id>` and archive the old worker, so it never writes into the files later'), steps, name);
+    for (const gone of ['bb thread wait <id>', "bb thread tell <id> '", 'handoff_outcome: done', 'repeat your final report']) assert.ok(!text.includes(gone), `${name}: ${gone}`);
   }
 });
 

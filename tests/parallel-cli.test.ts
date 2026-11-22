@@ -19,7 +19,11 @@ async function setup() {
   };
   const h = createFakePluginHost({ pluginId: 'aif-chat', agentSkillIds: ['aif-chat'], experimental_hostEntry: true,
     sdk: {
-      threads: { get: async ({ threadId }: any) => threads[threadId], list: async () => [], spawn: async (args: any) => { spawns.push(args); return { ...threads.thr_test, id: 'thr_new' }; } } as any,  // guardian: allow — loose mock of the BB SDK and host RPC in this test
+      threads: { get: async ({ threadId }: any) => threads[threadId], list: async () => [], spawn: async (args: any) => { spawns.push(args); return { ...threads.thr_test, id: 'thr_new' }; },
+        // thr_worker finished one turn: started at seq 1, completed at seq 2.
+        events: { list: async ({ afterSeq = '0', types, order, limit }: any) => { let rows = [{ seq: 1, type: 'turn/started', createdAt: 0 }, { seq: 2, type: 'turn/completed', createdAt: 0, data: { status: 'completed' } }].filter(e => e.seq > Number(afterSeq) && (!types || types.includes(e.type))); if (order === 'desc') rows = rows.reverse(); return limit ? rows.slice(0, Number(limit)) : rows; },
+          wait: async () => null },
+        wait: async () => ({}), output: async () => ({ output: 'Done: src/b.ts' }) } as any,  // guardian: allow — loose mock of the BB SDK and host RPC in this test
       environments: { get: async ({ environmentId }: any) => envs[environmentId] } as any,  // guardian: allow — loose mock of the BB SDK and host RPC in this test
     },
     experimental_callHostRpc: async call => {
@@ -97,5 +101,21 @@ test('a coordinator with the old block calling groups or checkpoint gets an erro
     const old = await h.harness.behavior.runCli(['checkpoint', '--thread', 'thr_test', '--target', '.ai-factory/plans/demo.md', '--group', '1', '--json']);
     assert.match(JSON.parse(old.stdout!).error, /checkpoint удалена/);
     assert.equal(calls.length, 0, 'nothing is read or changed on the machine');
+  } finally { await h.harness.lifecycle.dispose(); }
+});
+
+test('wait-worker answers for a child of this chat only, with the cursor for the next call', async () => {
+  const { h } = await setup();
+  try {
+    const result = await h.harness.behavior.runCli(['wait-worker', '--thread', 'thr_test', '--worker', 'thr_worker', '--json']);
+    assert.equal(result.exitCode, 0, result.stderr);
+    const answer = JSON.parse(result.stdout!);
+    assert.deepEqual([answer.state, answer.seq, answer.resumed, answer.output], ['idle', 2, true, 'Done: src/b.ts']);
+    const foreign = await h.harness.behavior.runCli(['wait-worker', '--thread', 'thr_test', '--worker', 'thr_other', '--json']);
+    assert.match(`${foreign.stdout ?? ''}${foreign.stderr ?? ''}`, /не исполнитель этого чата/);
+    for (const bad of ['-1', '1.5', 'x']) {
+      const refused = await h.harness.behavior.runCli(['wait-worker', '--thread', 'thr_test', '--worker', 'thr_worker', '--after', bad, '--json']);
+      assert.match(`${refused.stdout ?? ''}${refused.stderr ?? ''}`, /--after/, bad);
+    }
   } finally { await h.harness.lifecycle.dispose(); }
 });

@@ -24,6 +24,7 @@ import { IMPROVE_APPROVAL, pendingImproveProposal } from './improve-approval.ts'
 import { readSessionBrief, sessionBriefBlocked, sessionBriefCommandAvailable, briefCommands, SESSION_BRIEF_COMMAND, type SessionBriefReport } from './session-brief.ts';
 import { GATE_EVIDENCE_COMMAND, gateEvidenceCommandAvailable } from './gate-evidence-command.ts';
 import { registerWorktreeProvider, WORKTREE_PROVIDER_ID } from './worktree-provider.ts';
+import { waitWorker } from './worker-wait.ts';
 export { rpcContract } from './contract.ts';
 type Selection = { environmentId: string; target: string; phase: Phase; newTask?: boolean };
 type Delivery = { requestId: string; fingerprint: string; actionId: string; state: 'attempting' | 'sent' | 'uncertain'; at: number };
@@ -1027,15 +1028,16 @@ export default async function plugin(bb: BbPluginApi) {
     name: 'aif-chat', summary: 'AI Factory versions, live workflow card and read-only plan/check progress',
     commands: [...['status', 'show', 'save-plan', 'mark-verified', 'check-updates', 'reset', 'reset-dispatch'].map(name => ({ name, summary: name === 'show' ? 'Show a live chat card' : name, usage: `bb plugin run aif-chat ${name} [--thread <id>] [--target <path>] [--phase <phase>] [--json]` })),
       { name: 'spawn-worker', summary: 'Start a parallel worker on its own copy of the project', usage: 'bb plugin run aif-chat spawn-worker --target <plan> --task <id> --brief <file> [--json]' },
-      { name: 'bring-back', summary: 'Apply a parallel worker\'s changes to this workspace', usage: 'bb plugin run aif-chat bring-back --worker <thread id> [--json]' }],
+      { name: 'bring-back', summary: 'Apply a parallel worker\'s changes to this workspace', usage: 'bb plugin run aif-chat bring-back --worker <thread id> [--json]' },
+      { name: 'wait-worker', summary: 'Wait up to 90 s for a worker of this chat, with no gap between calls', usage: 'bb plugin run aif-chat wait-worker --worker <thread id> [--after <seq>] [--json]' }],
     async run(argv, ctx) {
       try {
         const [command = 'help', ...args] = argv;
-        if (command === 'help' || command === '--help') return { exitCode: 0, stdout: 'bb plugin run aif-chat status|show|save-plan|mark-verified|check-updates|reset|reset-dispatch|spawn-worker|bring-back [--thread ID] [--target PATH] [--phase explore|plan|improve|implement|verify|fix|done] [--json]' };
+        if (command === 'help' || command === '--help') return { exitCode: 0, stdout: 'bb plugin run aif-chat status|show|save-plan|mark-verified|check-updates|reset|reset-dispatch|spawn-worker|bring-back|wait-worker [--thread ID] [--target PATH] [--phase explore|plan|improve|implement|verify|fix|done] [--json]' };
         const options: Record<string, string> = {}; let json = false;
         for (let i = 0; i < args.length; i++) {
           if (args[i] === '--json') { json = true; continue; }
-          if (!['--thread', '--target', '--phase', '--max', '--group', '--token', '--task', '--brief', '--worker'].includes(args[i]) || !args[i + 1] || args[i + 1].startsWith('--')) throw new Error('Неизвестный аргумент или отсутствует значение.');
+          if (!['--thread', '--target', '--phase', '--max', '--group', '--token', '--task', '--brief', '--worker', '--after'].includes(args[i]) || !args[i + 1] || args[i + 1].startsWith('--')) throw new Error('Неизвестный аргумент или отсутствует значение.');
           if (args[i] in options) throw new Error('Повторяющийся аргумент.');
           const name = args[i]; options[name] = args[++i];
         }
@@ -1080,6 +1082,17 @@ export default async function plugin(bb: BbPluginApi) {
         if (command === 'groups' || command === 'checkpoint') {
           const error = `Команда ${command} удалена: перечитайте блок параллельного режима в .ai-factory/skill-context/aif-implement/SKILL.md (откройте вкладку AI Factory), а до этого работайте одним исполнителем.`;
           return json ? { exitCode: 0, stdout: JSON.stringify({ error }) } : { exitCode: 1, stderr: error };
+        }
+        if (command === 'wait-worker') {
+          // Any child of this chat: a parallel worker, the one-worker flow's thread or a research worker.
+          const workerId = options['--worker'], after = options['--after'] ?? '0';
+          if (!/^[\w-]{1,200}$/.test(workerId ?? '')) throw new Error('Укажите исполнителя: --worker <id треда>.');
+          if (!/^\d{1,15}$/.test(after)) throw new Error('--after — номер события из прошлого ответа (seq).');
+          const worker = await bb.sdk.threads.get({ threadId: workerId });
+          if (worker.parentThreadId !== input.threadId) throw new Error(`Тред ${workerId} не исполнитель этого чата.`);
+          const result = await waitWorker(bb.sdk.threads, workerId, Number(after));
+          const text = `${result.state} seq=${result.seq}${result.idleForMs === null ? '' : ` idleForMs=${result.idleForMs}`}\n${result.output ?? ''}`;
+          return { exitCode: 0, stdout: json ? JSON.stringify(result) : text };
         }
         if (command === 'spawn-worker' || command === 'bring-back') {
           const result = await parallelCommand(command, input.threadId, input.target, options);
