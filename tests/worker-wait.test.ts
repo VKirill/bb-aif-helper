@@ -11,7 +11,7 @@ function worker(status: string, events: { type: string; data?: unknown }[], outp
   const step = () => { const next = state.script.shift(); next?.(); };
   const threads = {
     get: async () => { const status = state.status; state.afterGet.shift()?.(); return { status }; },
-    queuedMessages: { list: async () => state.queue.map(s => ({ state: s })) },
+    queuedMessages: { list: async () => state.queue.map(s => { const [st, kind] = s.split(':'); return { state: st, waitingOn: kind ? { kind } : null }; }) },
     output: async () => { const output = state.output; state.afterOutput.shift()?.(); return { output }; },
     wait: async ({ timeoutMs }: { timeoutMs: number }) => {
       while (state.status !== 'idle' && state.script.length) step();
@@ -40,7 +40,7 @@ const done = [{ type: 'turn/started' }, { type: 'turn/completed', data: { status
 test('a busy worker is waited for until idle, and its report comes with the cursor', async () => {
   const w = worker('active', [{ type: 'turn/started' }], null);
   w.state.script.push(() => { w.add('turn/completed', { status: 'completed' }); w.state.status = 'idle'; w.state.output = 'Done: src/a.ts'; });
-  const r = await waitWorker(w.threads, 'thr_w', 0);
+  const r = await waitWorker(w.threads, 'thr_w', 0, w.opts);
   assert.deepEqual([r.state, r.seq, r.resumed, r.output], ['idle', 2, true, 'Done: src/a.ts']);
 });
 
@@ -48,13 +48,13 @@ test('an idle worker that resumes by itself after the cursor is followed to its 
   const w = worker('idle', done, 'waiting for tsc');
   w.state.script.push(() => { w.add('turn/started'); w.state.status = 'active'; },
     () => { w.add('turn/completed', { status: 'completed' }); w.state.status = 'idle'; w.state.output = 'Done, tsc passes'; });
-  const r = await waitWorker(w.threads, 'thr_w', 2);
+  const r = await waitWorker(w.threads, 'thr_w', 2, w.opts);
   assert.deepEqual([r.state, r.seq, r.resumed, r.output], ['idle', 4, true, 'Done, tsc passes']);
 });
 
 test('a resume that started and finished between two calls is not missed', async () => {
   const w = worker('idle', [...done, { type: 'turn/started' }, { type: 'turn/completed', data: { status: 'completed' } }], 'Done');
-  const r = await waitWorker(w.threads, 'thr_w', 2);
+  const r = await waitWorker(w.threads, 'thr_w', 2, w.opts);
   assert.deepEqual([r.state, r.seq, r.resumed, r.output], ['idle', 4, true, 'Done']);
 });
 
@@ -67,16 +67,16 @@ test('an idle worker that does not resume returns after the budget with how long
 
 test('an error and a stop are reported as such, not as a slow worker', async () => {
   const failed = worker('error', done, null);
-  assert.equal((await waitWorker(failed.threads, 'thr_w', 0)).state, 'failed');
+  assert.equal((await waitWorker(failed.threads, 'thr_w', 0, failed.opts)).state, 'failed');
   const stopped = worker('idle', [...done, { type: 'system/thread/interrupted', data: { reason: 'manual-stop' } }], null);
-  assert.equal((await waitWorker(stopped.threads, 'thr_w', 2)).state, 'stopped');
+  assert.equal((await waitWorker(stopped.threads, 'thr_w', 2, stopped.opts)).state, 'stopped');
   const interrupted = worker('idle', [{ type: 'turn/started' }, { type: 'turn/completed', data: { status: 'interrupted' } }], null);
-  assert.equal((await waitWorker(interrupted.threads, 'thr_w', 0)).state, 'stopped');
+  assert.equal((await waitWorker(interrupted.threads, 'thr_w', 0, interrupted.opts)).state, 'stopped');
 });
 
 test('a worker still busy when the budget runs out is reported working, without a report', async () => {
   const w = worker('active', [{ type: 'turn/started' }], 'partial');
-  const r = await waitWorker(w.threads, 'thr_w', 0);
+  const r = await waitWorker(w.threads, 'thr_w', 0, w.opts);
   assert.deepEqual([r.state, r.output], ['working', null]);
 });
 
@@ -155,4 +155,36 @@ test('resumed and the state come from the same read: a resume seen at the end me
   w.state.afterGet.push(() => undefined, () => undefined, () => { w.add('turn/started'); w.state.status = 'active'; });
   const r = await waitWorker(w.threads, 'thr_w', 1, w.opts);
   assert.deepEqual([r.state, r.output, r.resumed], ['working', null, true]);
+});
+
+test('a stopped worker with a follow-up BB holds is stopped, not working forever', async () => {
+  const w = worker('idle', [{ type: 'turn/started' }, { type: 'system/thread/interrupted', data: { reason: 'manual-stop' } }], null);
+  w.state.queue = ['waiting:stopping'];
+  const r = await waitWorker(w.threads, 'thr_w', 0, w.opts);
+  assert.equal(r.state, 'stopped');
+  assert.equal((await waitWorker(w.threads, 'thr_w', r.seq, w.opts)).state, 'stopped');
+});
+
+test('a superseded old retry does not hide the finished report', async () => {
+  const w = worker('idle', done, 'Done');
+  w.state.queue = ['waiting:superseded'];
+  assert.deepEqual(Object.values(await waitWorker(w.threads, 'thr_w', 0, w.opts)).slice(0, 1).concat((await waitWorker(w.threads, 'thr_w', 0, w.opts)).output), ['idle', 'Done']);
+});
+
+test('a first prompt that exhausted its retries before any turn is failed, without waiting out the budget', async () => {
+  const w = worker('idle', [], null);
+  w.state.queue = ['failed_exhausted'];
+  const start = w.now();
+  assert.equal((await waitWorker(w.threads, 'thr_w', 0, w.opts)).state, 'failed');
+  assert.equal(w.now() - start, 0);
+});
+
+test('a turn that fails during the wait is followed while BB queues its retry a second later', async () => {
+  const w = worker('active', [{ type: 'turn/started' }], null);
+  w.state.script.push(() => { w.add('turn/completed', { status: 'failed' }); w.state.status = 'error'; },
+    () => { w.state.queue = ['queued']; },
+    () => { w.state.queue = []; w.add('turn/started'); w.state.status = 'active'; },
+    () => { w.add('turn/completed', { status: 'completed' }); w.state.status = 'idle'; w.state.output = 'Done'; });
+  const r = await waitWorker(w.threads, 'thr_w', 0, w.opts);
+  assert.deepEqual([r.state, r.output], ['idle', 'Done']);
 });
