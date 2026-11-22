@@ -6,12 +6,12 @@ import { waitWorker } from '../worker-wait.ts';
 function worker(status: string, events: { type: string; data?: unknown }[], output: string | null) {
   let clock = 1_000_000;
   const log = events.map((e, i) => ({ seq: i + 1, createdAt: clock, ...e }));
-  const state = { status, output, script: [] as (() => void)[], afterGet: [] as (() => void)[] };
+  const state = { status, output, queued: 0, script: [] as (() => void)[], afterGet: [] as (() => void)[], afterOutput: [] as (() => void)[] };
   const add = (type: string, data?: unknown) => log.push({ seq: log.length + 1, createdAt: clock, type, data });
   const step = () => { const next = state.script.shift(); next?.(); };
   const threads = {
-    get: async () => { const status = state.status; state.afterGet.shift()?.(); return { status }; },
-    output: async () => ({ output: state.output }),
+    get: async () => { const status = state.status, queuedMessageCount = state.queued; state.afterGet.shift()?.(); return { status, queuedMessageCount }; },
+    output: async () => { const output = state.output; state.afterOutput.shift()?.(); return { output }; },
     wait: async ({ timeoutMs }: { timeoutMs: number }) => {
       while (state.status !== 'idle' && state.script.length) step();
       if (state.status !== 'idle') { clock += timeoutMs; throw new Error('timeout'); }
@@ -110,4 +110,25 @@ test('a worker that resumes right after its status was read is reported working,
   w.state.afterGet.push(() => undefined, () => { w.add('turn/started'); w.state.status = 'active'; });
   const r = await waitWorker(w.threads, 'thr_w', 2, 90_000, w.now);
   assert.deepEqual([r.state, r.idleForMs, r.output], ['working', null, null]);
+});
+
+test('an error with BB\'s retry still queued is working, not failed, even past the budget', async () => {
+  const w = worker('error', [{ type: 'turn/started' }, { type: 'turn/completed', data: { status: 'failed' } }], null);
+  w.state.queued = 1;  // the retry waits in the queue for a later moment
+  const r = await waitWorker(w.threads, 'thr_w', 2, 90_000, w.now);
+  assert.deepEqual([r.state, r.output], ['working', null]);
+});
+
+test('a report read while a new turn starts is not handed out as the final one', async () => {
+  const w = worker('idle', done, 'waiting for tsc');
+  w.state.afterOutput.push(() => { w.add('turn/started'); w.state.status = 'active'; w.state.output = 'half done'; });
+  const r = await waitWorker(w.threads, 'thr_w', 0, 90_000, w.now);
+  assert.deepEqual([r.state, r.output], ['working', null]);
+});
+
+test('a stop during startup stays a stop when the cancelled turn\'s start arrives late', async () => {
+  const w = worker('idle', [...done, { type: 'system/thread/interrupted', data: { reason: 'manual-stop' } }, { type: 'turn/started' }], null);
+  const r = await waitWorker(w.threads, 'thr_w', 0, 90_000, w.now);
+  assert.equal(r.state, 'stopped');
+  assert.equal((await waitWorker(w.threads, 'thr_w', r.seq, 90_000, w.now)).state, 'stopped');
 });

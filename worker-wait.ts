@@ -41,15 +41,29 @@ export async function waitWorker(threads: Threads, threadId: string, after: numb
   // The cursor is taken before the state is read: anything that happens after it is seen by the next call.
   const [last] = await threads.events.list({ threadId, order: 'desc', limit: '1' }) as Row[];
   const seq = Math.max(after, Number(last?.seq ?? 0));
-  const thread = await threads.get({ threadId });
-  // The newest lifecycle event decides, read after the status: an old stop does not outweigh a later successful turn,
-  // and a turn that started after the cursor means it works even if the status read just before missed it.
-  const [latest] = await threads.events.list({ threadId, types: [...LIFECYCLE], order: 'desc', limit: '1' }) as Row[];
-  const startedNow = latest?.type === 'turn/started' && Number(latest.seq) > seq;
-  const state: WorkerWait['state'] = busy(thread.status) || startedNow ? 'working'
+  const read = async () => {
+    const thread = await threads.get({ threadId });
+    const newest = async (type: typeof LIFECYCLE[number]) => (await threads.events.list({ threadId, types: [type], order: 'desc', limit: '1' }) as Row[])[0];
+    const [start, end, interrupt] = await Promise.all(LIFECYCLE.map(newest));
+    return { thread, start, end, interrupt };
+  };
+  const n = (row?: Row) => Number(row?.seq ?? 0);
+  const judge = ({ thread, start, end, interrupt }: Awaited<ReturnType<typeof read>>): WorkerWait['state'] =>
+    // A queued message is BB's own retry or the next prompt: the worker will run again.
+    busy(thread.status) || (thread.queuedMessageCount ?? 0) > 0 || (n(start) > seq && n(start) > n(end)) ? 'working'
     : thread.status === 'error' ? 'failed'
-    : thread.status === 'stopping' || (latest && stop(latest)) ? 'stopped' : 'idle';
-  const idleForMs = state === 'idle' && latest?.type === 'turn/completed' ? Math.max(0, now() - Number(latest.createdAt)) : null;
-  const output = state === 'working' ? null : (await threads.output({ threadId })).output;
+    // A stop newer than the last finished turn stays a stop, even if a late start of the cancelled turn arrives.
+    : thread.status === 'stopping' || n(interrupt) > n(end) || (end && stop(end)) ? 'stopped' : 'idle';
+  const before = await read();
+  let state = judge(before);
+  let output: string | null = null;
+  if (state !== 'working') {
+    output = (await threads.output({ threadId })).output;
+    // The report must belong to the turn judged above: a turn that started meanwhile makes it someone else's.
+    const afterwards = await read();
+    if (judge(afterwards) === 'working' || n(afterwards.start) > n(before.start)) { state = 'working'; output = null; }
+  }
+  const activity = Math.max(...[before.start, before.end, before.interrupt].map(row => Number(row?.createdAt ?? 0)));
+  const idleForMs = state === 'idle' && activity ? Math.max(0, now() - activity) : null;
   return { state, seq, resumed: await startedAfter(), idleForMs, output };
 }
