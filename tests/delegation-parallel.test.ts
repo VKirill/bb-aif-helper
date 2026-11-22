@@ -77,6 +77,9 @@ test('every wait step uses wait-worker, which sees everything between two calls,
     assert.equal(count('Once `idleForMs` passes 480000 with such a report, send it nothing and ask the owner'), steps, name);
     assert.equal(count('`stopped`: someone stopped it; ask the owner. `failed`: its run failed; handle it as a BB failure.'), steps, name);
     assert.equal(count('run `bb thread stop <id>` and archive the old worker, so it never writes into the files later'), steps, name);
+    // Review of 26af3e3: `stopped` is never retried as a BB failure.
+    if (name === 'parallel') assert.ok(text.includes('`wait-worker` answering `failed`): retry once, then do that task yourself with the one-worker flow. A `stopped` worker is not a failure: someone stopped it, so ask the owner.'));
+    assert.ok(!text.includes('a worker that stopped without a report'), name);
     for (const gone of ['bb thread wait <id>', "bb thread tell <id> '", 'handoff_outcome: done', 'repeat your final report']) assert.ok(!text.includes(gone), `${name}: ${gone}`);
   }
 });

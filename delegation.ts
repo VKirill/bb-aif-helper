@@ -284,7 +284,7 @@ Finish with a report: what changed; the list of files you modified; the checks y
 Find the cause before you act; never repeat the same step unchanged.
 - A check failed or the work has a gap: fix a small one yourself, or write the exact error to a temporary UTF-8 file whose name has only letters, digits, \`-\`, \`_\` and \`.\`, in a folder whose path has no \`'\` and send it with \`bb thread tell <id> --message-file '<file>'\` (the error itself never goes on the command line: an apostrophe or \`$\` in it breaks the shell), wait, and bring the worker back again.
 - Two workers changed the same lines (\`bring-back\` error): keep what is already back, then redo that task after the layer with a fresh worker, whose copy then holds the other task's changes.
-- BB failed (\`spawn-worker\` error, a host that is not connected, a worker that stopped without a report): retry once, then do that task yourself with the one-worker flow.
+- BB failed (\`spawn-worker\` error, a host that is not connected, \`wait-worker\` answering \`failed\`): retry once, then do that task yourself with the one-worker flow. A \`stopped\` worker is not a failure: someone stopped it, so ask the owner.
 - A task fails for the same cause three times: mark it \`- [!] Task N: … <!-- failed: <reason> -->\`, finish the tasks that do not depend on it, and ask the owner, naming the cause and the assumption you doubt.
 - Stop and ask the owner at once when a worker answers \`blocked_external\` or the requirements conflict, when a worker changed files outside its task that other tasks also change, or when a step needs secrets, a production server or deleting data.
 
