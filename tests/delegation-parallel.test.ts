@@ -73,12 +73,15 @@ test('an idle worker with an interim report still works: the coordinator waits f
   for (const [name, text, steps] of [['one worker', contextBlock(bb), 1], ['parallel', contextBlock({ ...bb, parallel: 3 }), 2], ['research', research, 1]] as const) {
     const count = (part: string) => text.split(part).length - 1;
     assert.equal(count('An empty or interim report ("waiting for the tests") from an idle worker means it still works in the background'), steps, name);
-    assert.equal(count('bb thread wait <id> --status active --timeout 8m'), steps, name);
     // Review of 15a3b27: the report is read again before any reminder, and the reminder asks a finished worker to repeat
     // its report, since a new turn replaces what `bb thread output` returns.
-    assert.equal(count('and read the report again, whatever the wait returned (it may have finished meanwhile)'), steps, name);
     assert.equal(count("`If you have finished, repeat your final report; otherwise finish the task and send it.` to a temporary UTF-8 file named as above, send it with `bb thread tell <id> --message-file '<file>'`"), steps, name);
     assert.equal(count('Time alone never means a worker stopped.'), steps, name);
+    // Review of 9950a93: short waits, each followed by a fresh read, so a worker that finished meanwhile costs at most
+    // two minutes; and a worker someone stopped by hand is not restarted by a reminder.
+    assert.equal(count('bb thread wait <id> --status active --timeout 2m` and read the report again whatever the wait returned (it may have finished meanwhile)'), steps, name);
+    assert.equal(count('After four such waits in a row without a resume'), steps, name);
+    assert.equal(count('a `status` of `interrupted` there means someone stopped the worker, so send nothing and ask the owner'), steps, name);
     assert.ok(!text.includes("bb thread tell <id> '"), name);
     assert.ok(!text.includes('handoff_outcome: done'), name);
   }
