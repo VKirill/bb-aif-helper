@@ -8,7 +8,7 @@ import plugin from '../server.ts';
 import { snapshot } from './fixtures.ts';
 import { workflowActions } from '../workflow.ts';
 import {
-  CONTEXT_PATH, PLAN_CONTEXT_PATH, RESEARCH_PATH, contextBlock, modelSpec, parseResearch, parseSpec,
+  CONTEXT_PATH, PLAN_CONTEXT_PATH, RESEARCH_PATH, contextBlock, modelSpec, parseResearch, parseSpec, researchBlock,
   readDelegation, serialByRoot, writeDelegation,
 } from '../delegation.ts';
 import type { DelegationChoice, DelegationRole, DelegationState } from '../delegation.ts';
@@ -57,11 +57,24 @@ test('contextBlock with parallel spawns workers on BB-made copies and keeps prov
     'a task that only checks something', 'already in this workspace', 'exactly where the plan says', 'single-commit',
     'the last commit plus your uncommitted work', 'Parallel layers need no commits of their own',
     "bb thread tell <id> --message-file '<file>'",
-    "bb plugin run aif-chat spawn-worker --target <plan name> --task <taskId> --brief '<absolute brief path>' --json", 'is only a label for the worker', 'so it needs no quotes and is never read as an option', 'leading `-` and `.` dropped',
+    "bb plugin run aif-chat spawn-worker --target <plan name> --task <task number, e.g. 3 or 1.2> --brief '<absolute brief path>' --json", 'is only a label for the worker', 'so it needs no quotes and is never read as an option', 'leading `-` and `.` dropped',
     'bb plugin run aif-chat bring-back --worker <id> --json', 'nothing was changed', 'there is nothing to undo', '{ applied: false, empty: true }',
     "--provider 'codex'", "--model 'gpt-6.2-sol'", "--reasoning-level 'high'", "--service-tier 'fast'",
     'BB removes its copy',
   ]) assert.ok(text.includes(part), part);
+});
+
+test('every worker ends with handoff_outcome and the coordinator waits for that line, not for idle', () => {
+  // Antigravity ends a turn while its tests run in the background and resumes by itself: idle is not done.
+  const bb = { mode: 'bb' as const, providerId: 'codex', model: 'gpt-6.2-sol', reasoning: 'high' };
+  const research = researchBlock({ research: bb, research2: { mode: 'self' }, research3: { mode: 'self' } })!;
+  for (const [name, text, contracts] of [['one worker', contextBlock(bb), 1], ['parallel', contextBlock({ ...bb, parallel: 3 }), 2], ['research', research, 1]] as const) {
+    assert.equal(text.split('End the report with the line `handoff_outcome: done`').length - 1, contracts, name);
+    assert.ok(text.includes('idle without it means it still works'), name);
+    assert.ok(text.includes('bb thread wait <id> --status active --timeout 3m'), name);
+    assert.ok(text.includes("`Finish the task and end your report with the handoff_outcome line.` to a temporary UTF-8 file named as above, send it once with `bb thread tell <id> --message-file '<file>'`"), name);
+    assert.ok(!text.includes("bb thread tell <id> '"), name);
+  }
 });
 
 test('writeDelegation stores parallel in phases.implement.model and manages the aif-plan block', async () => {

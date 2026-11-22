@@ -62,11 +62,17 @@ test('spawn-worker starts the owner model on a fresh copy seeded with the coordi
     assert.equal(nested.exitCode, 0, nested.stderr);
     assert.match(spawns[2].environment.inputs.name, /^demo-1\.2-[0-9a-f]{8}$/);
     assert.equal(spawns[2].title, 'AIF · demo · 1.2');
-    for (const bad of ['1.', '.2', '1..2', '1 2', 'a']) {
+    // Models write the id as `task-3`, `Task 3` or `#3`: the number is what counts.
+    for (const [i, loose] of ['task-3', 'Task 3', '#3', ' TASK_3 '].entries()) {
+      const ok = await h.harness.behavior.runCli(['spawn-worker', '--thread', 'thr_test', '--target', '.ai-factory/plans/demo.md', '--task', loose, '--brief', 'C:\\Temp\\brief 2.md']);
+      assert.equal(ok.exitCode, 0, loose);
+      assert.equal(spawns[3 + i].title, 'AIF · demo · 3', loose);
+    }
+    for (const bad of ['1.', '.2', '1..2', '1 2', 'a', 'task', 'task-', 'task-a']) {
       const refused = await h.harness.behavior.runCli(['spawn-worker', '--thread', 'thr_test', '--target', '.ai-factory/plans/demo.md', '--task', bad, '--brief', 'C:\\Temp\\brief 2.md']);
       assert.notEqual(refused.exitCode, 0, bad);
     }
-    assert.equal(spawns.length, 3);
+    assert.equal(spawns.length, 7);
   } finally { await h.harness.lifecycle.dispose(); }
 });
 
