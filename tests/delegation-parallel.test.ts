@@ -74,7 +74,7 @@ test('every wait step uses wait-worker, which sees everything between two calls,
     const count = (part: string) => text.split(part).length - 1;
     assert.equal(count('Wait with `bb plugin run aif-chat wait-worker --worker <id> --json`, then call it again with `--after <seq>` from its previous answer'), steps, name);
     assert.equal(count('an empty or interim one ("waiting for the tests") means it still works in the background'), steps, name);
-    assert.equal(count('Once `idleForMs` passes 480000 with such a report, send it nothing and ask the owner'), steps, name);
+    assert.equal(count('once `quietForMs` passes 480000 and the worker is not done'), steps, name);
     assert.equal(count('`stopped`: someone stopped it; ask the owner. `failed`: its run failed; handle it as a BB failure.'), steps, name);
     assert.equal(count('run `bb thread stop <id>` and archive the old worker, so it never writes into the files later'), steps, name);
     // Review of 26af3e3: `stopped` is never retried as a BB failure.

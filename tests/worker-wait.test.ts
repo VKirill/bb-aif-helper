@@ -62,7 +62,7 @@ test('an idle worker that does not resume returns after the budget with how long
   const w = worker('idle', done, 'waiting for tsc');
   const r = await waitWorker(w.threads, 'thr_w', 2, w.opts);
   assert.deepEqual([r.state, r.seq, r.resumed, r.output], ['idle', 2, false, 'waiting for tsc']);
-  assert.equal(r.idleForMs, 90_000);
+  assert.equal(r.quietForMs, 90_000);
 });
 
 test('an error and a stop are reported as such, not as a slow worker', async () => {
@@ -110,7 +110,7 @@ test('a worker that resumes right after its status was read is reported working,
   // The first read waits out the budget; the resume lands between the second status read and the event read.
   w.state.afterGet.push(() => undefined, () => { w.add('turn/started'); w.state.status = 'active'; });
   const r = await waitWorker(w.threads, 'thr_w', 2, w.opts);
-  assert.deepEqual([r.state, r.idleForMs, r.output], ['working', null, null]);
+  assert.deepEqual([r.state, r.output], ['working', null]);
 });
 
 test('an error with BB\'s retry still queued is working, not failed, even past the budget', async () => {
@@ -157,12 +157,35 @@ test('resumed and the state come from the same read: a resume seen at the end me
   assert.deepEqual([r.state, r.output, r.resumed], ['working', null, true]);
 });
 
-test('a stopped worker with a follow-up BB holds is stopped, not working forever', async () => {
+test('a follow-up BB holds after a stop is working, and quietForMs bounds it instead of polling forever', async () => {
   const w = worker('idle', [{ type: 'turn/started' }, { type: 'system/thread/interrupted', data: { reason: 'manual-stop' } }], null);
-  w.state.queue = ['waiting:stopping'];
+  w.state.queue = ['waiting:thread-busy'];
+  let r = await waitWorker(w.threads, 'thr_w', 0, w.opts);
+  for (let i = 0; i < 5; i++) r = await waitWorker(w.threads, 'thr_w', r.seq, w.opts);
+  assert.equal(r.state, 'working');
+  assert.ok(r.quietForMs >= 480_000, String(r.quietForMs));
+});
+
+test('a manual stop with nothing left to run is stopped; a provider that missed its start is failed', async () => {
+  const stopped = worker('idle', [...done, { type: 'system/thread/interrupted', data: { reason: 'manual-stop' } }], null);
+  assert.equal((await waitWorker(stopped.threads, 'thr_w', 0, stopped.opts)).state, 'stopped');
+  const missed = worker('error', [{ type: 'turn/started' }, { type: 'system/thread/interrupted', data: { reason: 'provider-turn-idle' } }], null);
+  assert.equal((await waitWorker(missed.threads, 'thr_w', 0, missed.opts)).state, 'failed');
+});
+
+test('a follow-up waiting for a stop to settle or for a concurrency slot is working, not stopped', async () => {
+  for (const row of ['waiting:stopping', 'waiting:thread-busy', 'queued']) {
+    const w = worker('idle', [...done, { type: 'system/thread/interrupted', data: { reason: 'manual-stop' } }], null);
+    w.state.queue = [row];
+    assert.equal((await waitWorker(w.threads, 'thr_w', 0, w.opts)).state, 'working', row);
+  }
+});
+
+test('a worker waiting for an approval is working, with its quiet time growing', async () => {
+  const w = worker('active', [{ type: 'turn/started' }], null);
   const r = await waitWorker(w.threads, 'thr_w', 0, w.opts);
-  assert.equal(r.state, 'stopped');
-  assert.equal((await waitWorker(w.threads, 'thr_w', r.seq, w.opts)).state, 'stopped');
+  assert.equal(r.state, 'working');
+  assert.ok(r.quietForMs >= 90_000);
 });
 
 test('a superseded old retry does not hide the finished report', async () => {
@@ -172,11 +195,13 @@ test('a superseded old retry does not hide the finished report', async () => {
 });
 
 test('a first prompt that exhausted its retries before any turn is failed, without waiting out the budget', async () => {
-  const w = worker('idle', [], null);
-  w.state.queue = ['failed_exhausted'];
-  const start = w.now();
-  assert.equal((await waitWorker(w.threads, 'thr_w', 0, w.opts)).state, 'failed');
-  assert.equal(w.now() - start, 0);
+  for (const status of ['idle', 'pending']) {
+    const w = worker(status, [], null);
+    w.state.queue = ['failed_exhausted'];
+    const start = w.now();
+    assert.equal((await waitWorker(w.threads, 'thr_w', 0, w.opts)).state, 'failed', status);
+    assert.equal(w.now() - start, 0, status);
+  }
 });
 
 test('a turn that fails during the wait is followed while BB queues its retry a second later', async () => {

@@ -3,6 +3,11 @@
  * `bb thread output`; between two commands a worker could resume, finish or fail unseen (Antigravity ends a
  * turn while its tests run in the background and resumes by itself). Here every answer carries the event
  * cursor `seq`, and the next call looks at what happened after it, so nothing between calls is lost.
+ *
+ * BB's queue has many paused and held states (thread-busy, stopping, concurrency, approvals, superseded
+ * retries…), and no rule built from them alone stays right. So the state rests on explicit facts only, and
+ * `quietForMs` — time since the thread's newest event — bounds every case: whatever the state, a worker
+ * that is not done and has been quiet long enough goes to the owner instead of being polled forever.
  */
 import type { BbPluginApi } from '@get-bb/plugin-sdk';
 
@@ -10,28 +15,24 @@ type Threads = Pick<BbPluginApi['sdk']['threads'], 'get' | 'wait' | 'output' | '
 type Row = { seq: number | string; type: string; createdAt: number | string; data?: unknown };
 type Queued = { state: string; waitingOn?: { kind: string } | null };
 export type WorkerWait = {
-  /** working: it runs or BB will run it again by itself; idle: its last turn ended; stopped: someone stopped it or BB holds
-   * it for an answer; failed: BB reports an error and no retry is left. */
+  /** working: a turn runs, is on its way, or BB still holds a message for it; idle: its last turn ended;
+   * stopped: someone stopped it by hand and nothing is left to run; failed: BB reports an error with no retry left. */
   state: 'working' | 'idle' | 'stopped' | 'failed';
   /** Pass as `--after` to the next call. */
   seq: number;
   /** A turn started after the previous cursor. */
   resumed: boolean;
-  /** Time since its last turn activity, while idle. */
-  idleForMs: number | null;
+  /** Time since the thread's newest event, whatever the state. */
+  quietForMs: number;
   output: string | null;
 };
 
-const LIFECYCLE = ['turn/started', 'turn/completed', 'system/thread/interrupted'] as const;
-const stop = (e: Row) => e.type === 'system/thread/interrupted' || (e.type === 'turn/completed' && (e.data as { status?: string } | undefined)?.status === 'interrupted');
-// What BB itself will dispatch later; a message held for an answer, a plugin or a stop does not run by itself, and a superseded one never does.
-const RUNS_LATER = new Set(['time', 'thread-busy', 'turn-starting', 'provisioning', 'host-offline', 'app-update']);
-const HELD = new Set(['interaction', 'plugin', 'stopping']);
-const pending = (q: Queued[]) => q.some(m => ['queued', 'scheduled', 'claimed', 'failed_retrying'].includes(m.state) || (m.state === 'waiting' && RUNS_LATER.has(m.waitingOn?.kind ?? '')));
-const held = (q: Queued[]) => q.some(m => m.state === 'waiting' && HELD.has(m.waitingOn?.kind ?? ''));
+// Any message BB may still run counts; only an exhausted or superseded one never will. quietForMs bounds the rest.
+const live = (q: Queued[]) => q.some(m => m.state !== 'failed_exhausted' && m.waitingOn?.kind !== 'superseded');
 const exhausted = (q: Queued[]) => q.some(m => m.state === 'failed_exhausted');
-// pending and starting are a turn on its way, not a finished one.
-const busy = (status: string) => ['active', 'pending', 'starting'].includes(status);
+// pending and starting are a turn on its way, except a pending thread whose first prompt has exhausted its retries.
+const busy = (status: string, q: Queued[]) => status === 'active' || status === 'starting' || (status === 'pending' && !(exhausted(q) && !live(q)));
+const reason = (row?: Row) => (row?.data as { reason?: string } | undefined)?.reason;
 
 type Options = { budgetMs?: number; now?: () => number; sleep?: (ms: number) => Promise<void> };
 
@@ -46,12 +47,13 @@ export async function waitWorker(threads: Threads, threadId: string, after: numb
   // Wait until the state settles or the budget runs out.
   for (let first = true; left() > 0; first = false) {
     const [thread, q] = await Promise.all([threads.get({ threadId }), queue()]);
-    if (busy(thread.status) || pending(q)) {
+    if (busy(thread.status, q) || live(q)) {
+      const before = now();
       await threads.wait({ threadId, status: 'idle', timeoutMs: left() }).catch(() => undefined);
-      // An idle that follows still needs a look: BB may queue its retry a moment after a turn fails.
-      if (left() > 0) await sleep(Math.min(1000, left()));
-    } else if (thread.status === 'error' && !exhausted(q) && !held(q)) await sleep(Math.min(1000, left()));
-    else if (first && thread.status === 'idle' && !held(q) && !exhausted(q) && !(await startedAfter())) {
+      // A paused queue row keeps the thread idle while BB holds it: re-checking it each second would only spin.
+      if (now() - before < 1000 && left() > 0) await sleep(Math.min(1000, left()));
+    } else if (thread.status === 'error' && !exhausted(q)) await sleep(Math.min(1000, left()));  // BB may queue its retry a moment later
+    else if (first && thread.status === 'idle' && !exhausted(q) && !(await startedAfter())) {
       // Idle since the last look: give it the budget to resume by itself.
       if (!await threads.events.wait({ threadId, afterSeq: String(after), type: 'turn/started', waitMs: String(left()) })) break;
     } else break;
@@ -62,16 +64,21 @@ export async function waitWorker(threads: Threads, threadId: string, after: numb
   const seq = Math.max(after, Number(last?.seq ?? 0));
   const read = async () => {
     const [thread, q] = await Promise.all([threads.get({ threadId }), queue()]);
-    const newest = async (type: typeof LIFECYCLE[number]) => (await threads.events.list({ threadId, types: [type], order: 'desc', limit: '1' }) as Row[])[0];
-    const [start, end, interrupt] = await Promise.all(LIFECYCLE.map(newest));
+    const newest = async (type: 'turn/started' | 'turn/completed' | 'system/thread/interrupted') => (await threads.events.list({ threadId, types: [type], order: 'desc', limit: '1' }) as Row[])[0];
+    const [start, end, interrupt] = await Promise.all((['turn/started', 'turn/completed', 'system/thread/interrupted'] as const).map(newest));
     return { thread, q, start, end, interrupt };
   };
   const n = (row?: Row) => Number(row?.seq ?? 0);
-  const judge = ({ thread, q, start, end, interrupt }: Awaited<ReturnType<typeof read>>): WorkerWait['state'] =>
-    busy(thread.status) || pending(q) || (n(start) > seq && n(start) > n(end)) ? 'working'
+  const judge = ({ thread, q, start, end, interrupt }: Awaited<ReturnType<typeof read>>): WorkerWait['state'] => {
+    if (busy(thread.status, q) || live(q)) return 'working';
     // A stop newer than the last finished turn stays a stop, even if a late start of the cancelled turn arrives.
-    : thread.status === 'stopping' || held(q) || n(interrupt) > n(end) || (end && stop(end)) ? 'stopped'
-    : thread.status === 'error' || exhausted(q) ? 'failed' : 'idle';
+    const lastStop = n(interrupt) > n(end) ? interrupt : undefined;
+    if (lastStop && reason(lastStop) === 'manual-stop' || thread.status === 'stopping') return 'stopped';
+    // Any other interruption (provider-turn-idle, a host restart) is a failed run the coordinator retries.
+    if (lastStop || thread.status === 'error' || exhausted(q)) return 'failed';
+    if (end && (end.data as { status?: string } | undefined)?.status === 'interrupted') return 'stopped';
+    return n(start) > seq && n(start) > n(end) ? 'working' : 'idle';
+  };
   const before = await read();
   let state = judge(before);
   let output: string | null = null;
@@ -82,8 +89,7 @@ export async function waitWorker(threads: Threads, threadId: string, after: numb
     latest = await read();
     if (judge(latest) === 'working' || n(latest.start) > n(before.start)) { state = 'working'; output = null; }
   }
-  const activity = Math.max(...[before.start, before.end, before.interrupt].map(row => Number(row?.createdAt ?? 0)));
-  const idleForMs = state === 'idle' && activity ? Math.max(0, now() - activity) : null;
+  const quietForMs = last ? Math.max(0, now() - Number(last.createdAt)) : 0;
   // resumed comes from the same last read as the state, so the two never disagree.
-  return { state, seq, resumed: n(latest.start) > after, idleForMs, output };
+  return { state, seq, resumed: n(latest.start) > after, quietForMs, output };
 }

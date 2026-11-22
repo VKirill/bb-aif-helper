@@ -1091,7 +1091,7 @@ export default async function plugin(bb: BbPluginApi) {
           const worker = await bb.sdk.threads.get({ threadId: workerId });
           if (worker.parentThreadId !== input.threadId) throw new Error(`Тред ${workerId} не исполнитель этого чата.`);
           const result = await waitWorker(bb.sdk.threads, workerId, Number(after));
-          const text = `${result.state} seq=${result.seq}${result.idleForMs === null ? '' : ` idleForMs=${result.idleForMs}`}\n${result.output ?? ''}`;
+          const text = `${result.state} seq=${result.seq} quietForMs=${result.quietForMs}\n${result.output ?? ''}`;
           return { exitCode: 0, stdout: json ? JSON.stringify(result) : text };
         }
         if (command === 'spawn-worker' || command === 'bring-back') {
