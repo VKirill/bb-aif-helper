@@ -7,10 +7,10 @@ function worker(status: string, events: { type: string; data?: unknown }[], outp
   let clock = 1_000_000;
   const log = events.map((e, i) => ({ seq: i + 1, createdAt: clock, ...e }));
   const state = { status, output, queue: [] as string[], script: [] as (() => void)[], afterGet: [] as (() => void)[], afterOutput: [] as (() => void)[] };
-  const add = (type: string, data?: unknown) => log.push({ seq: log.length + 1, createdAt: clock, type, data });
+  const add = (type: string, data?: unknown) => log.push({ seq: log.length + 1, createdAt: clock, type, data });  // stamped with the fake clock
   const step = () => { const next = state.script.shift(); next?.(); };
   const threads = {
-    get: async () => { const status = state.status; state.afterGet.shift()?.(); return { status }; },
+    get: async () => { const status = state.status; state.afterGet.shift()?.(); return { status, createdAt: 1_000_000 }; },
     queuedMessages: { list: async () => state.queue.map(s => { const [st, kind] = s.split(':'); return { state: st, waitingOn: kind ? { kind } : null }; }) },
     output: async () => { const output = state.output; state.afterOutput.shift()?.(); return { output }; },
     wait: async ({ timeoutMs }: { timeoutMs: number }) => {
@@ -212,4 +212,35 @@ test('a turn that fails during the wait is followed while BB queues its retry a 
     () => { w.add('turn/completed', { status: 'completed' }); w.state.status = 'idle'; w.state.output = 'Done'; });
   const r = await waitWorker(w.threads, 'thr_w', 0, w.opts);
   assert.deepEqual([r.state, r.output], ['idle', 'Done']);
+});
+
+test('a worker held before its first event is quiet since its creation, so the owner question still comes', async () => {
+  const w = worker('pending', [], null);
+  w.state.queue = ['waiting:thread-busy'];
+  let r = await waitWorker(w.threads, 'thr_w', 0, w.opts);
+  for (let i = 0; i < 5; i++) r = await waitWorker(w.threads, 'thr_w', r.seq, w.opts);
+  assert.deepEqual([r.state, r.seq], ['working', 0]);
+  assert.ok(r.quietForMs >= 480_000, String(r.quietForMs));
+});
+
+test('a thread still stopping is working until the event says which stop it was', async () => {
+  const w = worker('stopping', [{ type: 'turn/started' }], null);
+  w.state.script.push(() => { w.add('system/thread/interrupted', { reason: 'provider-turn-idle' }); w.state.status = 'idle'; });
+  assert.equal((await waitWorker(w.threads, 'thr_w', 0, w.opts)).state, 'failed');
+});
+
+test('an old exhausted row does not make a later successful turn look failed', async () => {
+  const w = worker('idle', done, 'Done: src/a.ts');
+  w.state.queue = ['failed_exhausted'];
+  const r = await waitWorker(w.threads, 'thr_w', 0, w.opts);
+  assert.deepEqual([r.state, r.output], ['idle', 'Done: src/a.ts']);
+});
+
+test('a resume seen in the last read resets the quiet time', async () => {
+  const w = worker('idle', done, 'waiting for tsc');
+  w.tickIdle(600_000);
+  w.state.afterGet.push(() => undefined, () => { w.add('turn/started'); w.state.status = 'active'; });
+  const r = await waitWorker(w.threads, 'thr_w', 2, w.opts);
+  assert.equal(r.state, 'working');
+  assert.ok(r.quietForMs < 480_000, String(r.quietForMs));
 });

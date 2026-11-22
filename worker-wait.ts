@@ -31,7 +31,8 @@ export type WorkerWait = {
 const live = (q: Queued[]) => q.some(m => m.state !== 'failed_exhausted' && m.waitingOn?.kind !== 'superseded');
 const exhausted = (q: Queued[]) => q.some(m => m.state === 'failed_exhausted');
 // pending and starting are a turn on its way, except a pending thread whose first prompt has exhausted its retries.
-const busy = (status: string, q: Queued[]) => status === 'active' || status === 'starting' || (status === 'pending' && !(exhausted(q) && !live(q)));
+// stopping is a stop on its way, not a verdict: BB's start watchdog stops a turn too, and the event that follows says which.
+const busy = (status: string, q: Queued[]) => status === 'active' || status === 'starting' || status === 'stopping' || (status === 'pending' && !(exhausted(q) && !live(q)));
 const reason = (row?: Row) => (row?.data as { reason?: string } | undefined)?.reason;
 
 type Options = { budgetMs?: number; now?: () => number; sleep?: (ms: number) => Promise<void> };
@@ -73,9 +74,10 @@ export async function waitWorker(threads: Threads, threadId: string, after: numb
     if (busy(thread.status, q) || live(q)) return 'working';
     // A stop newer than the last finished turn stays a stop, even if a late start of the cancelled turn arrives.
     const lastStop = n(interrupt) > n(end) ? interrupt : undefined;
-    if (lastStop && reason(lastStop) === 'manual-stop' || thread.status === 'stopping') return 'stopped';
+    if (lastStop && reason(lastStop) === 'manual-stop') return 'stopped';
     // Any other interruption (provider-turn-idle, a host restart) is a failed run the coordinator retries.
-    if (lastStop || thread.status === 'error' || exhausted(q)) return 'failed';
+    // An exhausted row is a failure only before any turn finished: an old one must not spoil a later successful turn.
+    if (lastStop || thread.status === 'error' || (exhausted(q) && !end)) return 'failed';
     if (end && (end.data as { status?: string } | undefined)?.status === 'interrupted') return 'stopped';
     return n(start) > seq && n(start) > n(end) ? 'working' : 'idle';
   };
@@ -89,7 +91,10 @@ export async function waitWorker(threads: Threads, threadId: string, after: numb
     latest = await read();
     if (judge(latest) === 'working' || n(latest.start) > n(before.start)) { state = 'working'; output = null; }
   }
-  const quietForMs = last ? Math.max(0, now() - Number(last.createdAt)) : 0;
+  // Quiet since the newest thing seen, including a turn that started during the last read; a thread with no event yet
+  // is quiet since it was created, so a worker held before its first event still reaches the owner.
+  const seen = Math.max(Number(last?.createdAt ?? 0), ...[latest.start, latest.end, latest.interrupt].map(row => Number(row?.createdAt ?? 0)));
+  const quietForMs = Math.max(0, now() - (seen || Number((latest.thread as { createdAt?: number }).createdAt ?? now())));
   // resumed comes from the same last read as the state, so the two never disagree.
   return { state, seq, resumed: n(latest.start) > after, quietForMs, output };
 }
