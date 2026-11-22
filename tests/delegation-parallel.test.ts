@@ -64,25 +64,20 @@ test('contextBlock with parallel spawns workers on BB-made copies and keeps prov
   ]) assert.ok(text.includes(part), part);
 });
 
-test('every worker ends with handoff_outcome and the coordinator waits for that line, not for idle', () => {
-  // Antigravity ends a turn while its tests run in the background and resumes by itself: idle is not done.
+test('an idle worker with an interim report still works: the coordinator waits for it to resume, never gives up on time', () => {
+  // Antigravity ends a turn while its tests run in the background and resumes by itself (five pauses in one task):
+  // idle is not done, and BB cannot see those background commands, so no timer may declare a worker stopped.
   const bb = { mode: 'bb' as const, providerId: 'codex', model: 'gpt-6.2-sol', reasoning: 'high' };
   const research = researchBlock({ research: bb, research2: { mode: 'self' }, research3: { mode: 'self' } })!;
-  for (const [name, text, contracts] of [['one worker', contextBlock(bb), 1], ['parallel', contextBlock({ ...bb, parallel: 3 }), 2], ['research', research, 1]] as const) {
-    assert.equal(text.split('never while a command still runs in the background, end the report with the line `handoff_outcome: done`').length - 1, contracts, name);
-    // Review of 4d3420a: the line may stand anywhere (a blocker explains itself after it), the output is read again after
-    // the waits (a worker may finish meanwhile), and a complete report without the line (a pre-upgrade worker) is done.
-    assert.ok(text.includes('It is done when the output has a line starting with `handoff_outcome:`'), name);
-    assert.ok(text.includes('When it does not resume within those 3 minutes, read the output once more'), name);
-    // Review of ae25d93: keep waiting while the worker keeps resuming (five pauses in a row happen), and judge a report
-    // without the line by its own brief (a research report lists symbols, not checks).
-    assert.ok(text.includes('as many times as it keeps resuming'), name);
-    assert.ok(text.includes('or a complete final report in the form its brief asks for, means done'), name);
-    assert.ok(text.includes('If it does not resume after the reminder either, it stopped without a report.'), name);
-    assert.ok(text.includes('bb thread wait <id> --status active --timeout 3m'), name);
-    assert.equal(text.includes('`handoff_outcome: blocked_external` when blocked, as above'), name === 'parallel', name);
-    assert.ok(text.includes("`Finish the task and end your report with the handoff_outcome line.` to a temporary UTF-8 file named as above, send it with `bb thread tell <id> --message-file '<file>'`"), name);
+  // The parallel block also carries the one-worker flow, so its rule appears twice: once per wait step.
+  for (const [name, text, steps] of [['one worker', contextBlock(bb), 1], ['parallel', contextBlock({ ...bb, parallel: 3 }), 2], ['research', research, 1]] as const) {
+    const count = (part: string) => text.split(part).length - 1;
+    assert.equal(count('An empty or interim report ("waiting for the tests") from an idle worker means it still works in the background'), steps, name);
+    assert.equal(count('bb thread wait <id> --status active --timeout 8m'), steps, name);
+    assert.equal(count("`Finish the task and send your final report.` to a temporary UTF-8 file named as above, send it with `bb thread tell <id> --message-file '<file>'`"), steps, name);
+    assert.equal(count('Time alone never means a worker stopped.'), steps, name);
     assert.ok(!text.includes("bb thread tell <id> '"), name);
+    assert.ok(!text.includes('handoff_outcome: done'), name);
   }
 });
 
