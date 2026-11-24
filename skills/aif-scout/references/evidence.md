@@ -1,4 +1,4 @@
-# Контракт доказательств, схемы и вердикты
+# Контракт доказательств и форматы
 
 ## 1. Раскладка файлов
 
@@ -9,7 +9,7 @@
 - `opportunities.yaml` — карточки идей (только для режима `ideas`).
 - `report.md` — итоговый синтез со счётчиком доступа и разделами `## Установлено`, `## Неизвестно`, `## Следующий шаг`.
 
-## 2. Примеры YAML (строго по схемам `model.ts`)
+## 2. Примеры YAML
 
 ### `plan.yaml` (`scoutPlanSchema`)
 
@@ -79,7 +79,6 @@ opportunities:
     status: draft
 ```
 
-<!-- Копия словарей из model.ts для агента; актуальность сверяет tests/scout-references.test.ts -->
 ## Словари
 
 - SCOUT_MODES: `dev`, `ideas`
@@ -92,9 +91,6 @@ opportunities:
 - SCOUT_FINDING_TYPES: `fact`, `opinion`, `pain`, `wish`, `workaround`, `metric`, `competitor-capability`
 - SCOUT_DECISION_IMPACT: `yes`, `no`, `unknown`
 - SCOUT_SEVERITY: `rare-critical`, `frequent-background`, `unknown`
-- SCOUT_VERDICTS: `READY`, `READY_WITH_GAPS`, `NOT_READY`
-- SCOUT_COVERAGE: `COVERED`, `PARTIAL`, `MISSING`
-- SCOUT_PROBLEM_CODES: `schema`, `orphan_card`, `duplicate_id`, `missing_required`, `partial`, `confidence_cap`, `counter_missing`, `inflation`, `single_source_spread`, `unsupported_claim`, `unknown_ref`, `forbidden_phrase`, `report_section`, `no_opportunities`, `opportunity_incomplete`, `market_both`
 
 ## 3. Уверенность, потолки и эхо-источники
 
@@ -115,26 +111,3 @@ opportunities:
   - «никто не решает / nobody solves / у конкурентов нет» — без угла по конкурентам;
   - «пользователи хотят / users want» — без находок `type: wish` или `type: pain`;
   - «основная боль / main pain» — без опоры на корпус.
-
-## 5. Вердикты `scout-check` и коды проблем
-
-Вердикты: `READY` (все обязательные углы покрыты и проверены) · `READY_WITH_GAPS` (выводы применимы с оговорками, пробелы перечислены) · `NOT_READY` (блокирующая ошибка: нужен один ремонт или доразведка).
-
-| Код | Что значит и что делать |
-|---|---|
-| `schema` | Ошибка структуры/ключа YAML в плане, карточке или `opportunities.yaml` — исправить по схемам раздела 2 |
-| `orphan_card` | Карточка ссылается на `scout`, которого нет в `plan.yaml` — привязать к углу плана или удалить |
-| `duplicate_id` | Повторяющийся `F<id>` или `O<id>` — перенумеровать ID уникально |
-| `missing_required` | Обязательный угол плана не покрыт ни одной карточкой — дозапустить разведчика по углу |
-| `partial` | Угол покрыт только `SNIPPET_ONLY` или `metadata_only` — дочитать первоисточники через `WebFetch`/`gh` |
-| `confidence_cap` | Уверенность выше потолка: `high` при < 3 URL или статусе `INFERRED`; `med`/`high` при одном URL, `SNIPPET_ONLY` или без `full`/`excerpt` — понизить `confidence` до `low`/`med` или добавить источники |
-| `counter_missing` | Нет `counter_evidence` при непустой карточке без записи в `not_found` — добавить контрпример или отчёт о поиске |
-| `inflation` | Доля находок с `confidence: high` > 50% — пересмотреть оценки и убрать завышение |
-| `single_source_spread` | Один URL опирает > 3 находок — объединить дубли или найти независимые источники |
-| `unsupported_claim` | Пункт списка в `## Установлено` (вместе со строками продолжения) без ссылки в скобках `(F<id>)` — привязать ID находки или убрать из раздела |
-| `unknown_ref` | Ссылка на несуществующий `F<id>` в любом разделе отчёта или в идее — исправить ID или вернуть находку в корпус |
-| `forbidden_phrase` | Запрещённое обобщение без нужного угла/находок — переформулировать в рамках корпуса или собрать вход |
-| `report_section` | В `report.md` нет `## Установлено`, `## Неизвестно` или `## Следующий шаг` — дописать раздел |
-| `no_opportunities` | В режиме `ideas` отсутствует или пуст `opportunities.yaml` — оформить карточки идей по корпусу |
-| `opportunity_incomplete` | У идеи нет `why_existing_misses_it` или ссылок `evidence` — заполнить из корпуса |
-| `market_both` | У идеи указан `market: both`, но в `evidence` нет находок с обоих рынков — уточнить рынок или добрать второй |

@@ -88,7 +88,6 @@ Gate должен завершать ответ. Если после корре�
 bb plugin run aif-chat status --json
 bb plugin run aif-chat show --phase plan --target .ai-factory/plans/my-feature.md
 bb plugin run aif-chat check-updates --json
-bb plugin run aif-chat scout-check --dir .ai-factory/scout/<slug> --json
 ```
 
 - `status` читает локальное состояние.
@@ -99,23 +98,6 @@ bb plugin run aif-chat scout-check --dir .ai-factory/scout/<slug> --json
 - `spawn-worker`, `wait-worker`, `bring-back` — шаги параллельного `/aif-implement` (запуск исполнителя в копии с незакоммиченной работой координатора, ожидание исполнителя без пропусков между вызовами, перенос его правок); их вызывает координатор, см. [workflow](workflow.md#параллельное-выполнение-задач-плана).
 - `reset` очищает сохранённый выбор цели и этапа этого чата.
 - `reset-dispatch` очищает историю доставки; применяйте только после проверки неопределённой отправки.
-- `scout-check --dir <.ai-factory/scout/<slug>> [--json]` проверяет материалы `/aif-scout`. Принимает только путь вида `.ai-factory/scout/<slug>` внутри проекта; читает `plan.yaml`, до 40 файлов `corpus/*.yaml` (не более 256 KiB в UTF-8 каждый) и необязательные `report.md` и `opportunities.yaml`. Вердикты `READY` и `READY_WITH_GAPS` завершаются с кодом `0`, `NOT_READY` — с кодом `1` (`--json` остаётся в `stdout`); ошибки аргументов, пути и чтения файлов пишутся в `stderr` с кодом `1`. Коды проблем (`problems[].code` из `model.ts`):
-  - `schema` — ошибка синтаксиса или схемы YAML в плане, карточке или `opportunities.yaml`.
-  - `orphan_card` — карточка ссылается на угол `scout`, которого нет в `plan.yaml`.
-  - `duplicate_id` — повторяющийся идентификатор находки `F<id>` или идеи `O<id>`.
-  - `missing_required` — у угла плана нет ни одной находки (`block` при `required: true`, `gap` для необязательного угла).
-  - `partial` — угол покрыт только неполными или косвенными находками (`SNIPPET_ONLY` / `metadata_only` / `INFERRED`).
-  - `confidence_cap` — уверенность `high` не подтверждена (один URL, `SNIPPET_ONLY` / `INFERRED` или нет `full` / `excerpt`).
-  - `counter_missing` — в карточке (в том числе у зеркального угла) пусты и `counter_evidence`, и `not_found`.
-  - `inflation` — доля находок с уверенностью `high` превышает 50% (при 4 и более находках).
-  - `single_source_spread` — один и тот же URL опирает более 3 находок.
-  - `unsupported_claim` — пункт списка в разделе отчёта «Установлено» не ссылается на `F<id>`.
-  - `unknown_ref` — отчёт или карточка идеи ссылается на несуществующий `F<id>`.
-  - `forbidden_phrase` — в отчёте есть запрещённое обобщение без подтверждающих данных в корпусе.
-  - `report_section` — в `report.md` отсутствует обязательный раздел (`Установлено`, `Неизвестно` или `Следующий шаг`).
-  - `no_opportunities` — в режиме `ideas` отсутствует или пуст `opportunities.yaml`.
-  - `opportunity_incomplete` — у идеи не заполнены `why_existing_misses_it` или ссылки `evidence`.
-  - `market_both` — у идеи указано `market: both`, но `evidence` не покрывает два разных `market_lang`.
 
 Общие аргументы:
 

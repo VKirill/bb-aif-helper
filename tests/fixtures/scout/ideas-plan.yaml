@@ -1,9 +1,0 @@
-question: "Какие боли при отладке локальных MCP-серверов не закрыты существующими инструментами"
-mode: ideas
-depth: quick
-as_of: 2026-11-24
-angles:
-  - id: ideas-pains
-    role: discovery
-    hypothesis: "Разработчики теряют ошибки запуска MCP-сервера до инициализации транспорта"
-    required: true

@@ -14,9 +14,6 @@ import { planSettings, supportsAif222 } from './aif222.ts';
 const exec = promisify(execFile);
 const MAX_FILE = 1024 * 1024;
 const MAX_FILES = 200;
-const SCOUT_MAX_FILE = 256 * 1024;
-const SCOUT_MAX_CARDS = 40;
-const SCOUT_DIR_RE = /^\.ai-factory\/scout\/[a-z0-9][a-z0-9-]{0,79}$/;
 const hash = (v: string | Buffer) => createHash('sha256').update(v).digest('hex');
 const obj = (v: unknown): Record<string, any> => v && typeof v === 'object' && !Array.isArray(v) ? v as Record<string, any> : {};
 const str = (v: unknown): string | null => typeof v === 'string' && v.trim() ? v : null;
@@ -108,12 +105,12 @@ class Reader {
     }
     return current;
   }
-  async read(rel: string, maxBytes = MAX_FILE): Promise<string | null> {
+  async read(rel: string): Promise<string | null> {
     if (this.seen.size >= MAX_FILES && !this.seen.has(rel)) throw new Error('Превышен лимит чтения metadata.');
     const filename = await this.resolve(rel);
     try {
       const stat = await fs.stat(filename);
-      if (!stat.isFile() || stat.size > maxBytes) throw new Error(`Артефакт не является файлом или больше ${maxBytes === MAX_FILE ? '1 MiB' : `${Math.round(maxBytes / 1024)} KiB`}: ${rel}`);
+      if (!stat.isFile() || stat.size > MAX_FILE) throw new Error(`Артефакт не является файлом или больше 1 MiB: ${rel}`);
       const text = await fs.readFile(filename, 'utf8');
       this.seen.set(rel, hash(text));
       return text;
@@ -150,33 +147,13 @@ class Reader {
     this.seen.set(rel, hash(JSON.stringify([await fs.readlink(link), destination])));
     return text;
   }
-  async list(rel: string, includeSymlinks = false): Promise<{ name: string; directory: boolean }[]> {
+  async list(rel: string): Promise<{ name: string; directory: boolean }[]> {
     try {
       const items = await fs.readdir(await this.resolve(rel), { withFileTypes: true });
       if (items.length > 300) throw new Error(`Слишком много записей: ${rel}`);
-      return items.filter(e => includeSymlinks || !e.isSymbolicLink()).map(e => ({ name: e.name, directory: e.isDirectory() })).sort((a, b) => a.name.localeCompare(b.name));
+      return items.filter(e => !e.isSymbolicLink()).map(e => ({ name: e.name, directory: e.isDirectory() })).sort((a, b) => a.name.localeCompare(b.name));
     } catch (e: any) { if (e.code === 'ENOENT') return []; throw e; }
   }
-}
-
-export async function readScoutCorpus(root: string, dir: string): Promise<{ plan: string; cards: { name: string; text: string }[]; report: string | null; opportunities: string | null }> {
-  const scoutDir = safeRelative(dir);
-  if (!SCOUT_DIR_RE.test(scoutDir)) throw new Error('Папка разведки должна быть .ai-factory/scout/<slug>.');
-  const realRoot = await fs.realpath(root);
-  if (!(await fs.stat(realRoot)).isDirectory()) throw new Error('Рабочая папка недоступна.');
-  const read = new Reader(realRoot);
-  const plan = await read.read(`${scoutDir}/plan.yaml`, SCOUT_MAX_FILE);
-  if (plan === null) throw new Error(`Нет plan.yaml в ${scoutDir}.`);
-  const entries = (await read.list(`${scoutDir}/corpus`, true)).filter(item => !item.directory && item.name.endsWith('.yaml'));
-  if (entries.length > SCOUT_MAX_CARDS) throw new Error('В corpus/ больше 40 карточек.');
-  const cards: { name: string; text: string }[] = [];
-  for (const entry of entries) {
-    const text = await read.read(`${scoutDir}/corpus/${entry.name}`, SCOUT_MAX_FILE);
-    if (text !== null) cards.push({ name: entry.name, text });
-  }
-  const report = await read.read(`${scoutDir}/report.md`, SCOUT_MAX_FILE);
-  const opportunities = await read.read(`${scoutDir}/opportunities.yaml`, SCOUT_MAX_FILE);
-  return { plan, cards, report, opportunities };
 }
 
 async function git(root: string, args: string[], signal?: AbortSignal, trim = true): Promise<string | null> {

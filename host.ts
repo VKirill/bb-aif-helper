@@ -3,7 +3,7 @@ import path from 'node:path';
 import { experimental_defineHostEntry } from '@get-bb/plugin-sdk';
 import type { ExperimentalHostRpcContext, ExperimentalHostWatchEvent } from '@get-bb/plugin-sdk';
 import { hostContract, hostSignals } from './contract.ts';
-import { collectSnapshot, readScoutCorpus } from './reader.ts';
+import { collectSnapshot } from './reader.ts';
 import { readDelegation, writeDelegation } from './delegation.ts';
 import { savePlanDocument, markPlanVerified } from './plan-document.ts';
 import { WATCH_IGNORED, relevantChange } from './live-updates.ts';
@@ -88,7 +88,6 @@ export default experimental_defineHostEntry({
     headCommit: input => headCommit(input),
     bringBack: input => bringBack(input),
     readBrief: input => readBrief(input),
-    scoutCorpus: input => readScoutCorpus(input.root, input.dir),
     watch: async (input, context) => {
       const root = input.root;
       if (watches.has(root)) return { ok: true as const };

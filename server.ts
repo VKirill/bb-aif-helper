@@ -25,7 +25,6 @@ import { readSessionBrief, sessionBriefBlocked, sessionBriefCommandAvailable, br
 import { GATE_EVIDENCE_COMMAND, gateEvidenceCommandAvailable } from './gate-evidence-command.ts';
 import { registerWorktreeProvider, WORKTREE_PROVIDER_ID } from './worktree-provider.ts';
 import { waitWorker } from './worker-wait.ts';
-import { checkScout, formatScoutCheck } from './scout.ts';
 export { rpcContract } from './contract.ts';
 type Selection = { environmentId: string; target: string; phase: Phase; newTask?: boolean };
 type Delivery = { requestId: string; fingerprint: string; actionId: string; state: 'attempting' | 'sent' | 'uncertain'; at: number };
@@ -1056,16 +1055,15 @@ export default async function plugin(bb: BbPluginApi) {
     commands: [...['status', 'show', 'save-plan', 'mark-verified', 'check-updates', 'reset', 'reset-dispatch'].map(name => ({ name, summary: name === 'show' ? 'Show a live chat card' : name, usage: `bb plugin run aif-chat ${name} [--thread <id>] [--target <path>] [--phase <phase>] [--json]` })),
       { name: 'spawn-worker', summary: 'Start a parallel worker on its own copy of the project', usage: 'bb plugin run aif-chat spawn-worker --target <plan> --task <id> --brief <file> [--json]' },
       { name: 'bring-back', summary: 'Apply a parallel worker\'s changes to this workspace', usage: 'bb plugin run aif-chat bring-back --worker <thread id> [--json]' },
-      { name: 'wait-worker', summary: 'Wait up to 90 s for a worker of this chat, with no gap between calls', usage: 'bb plugin run aif-chat wait-worker --worker <thread id> [--after <seq>] [--json]' },
-      { name: 'scout-check', summary: 'Check /aif-scout finding cards and report', usage: 'bb plugin run aif-chat scout-check --dir <.ai-factory/scout/<slug>> [--json]' }],
+      { name: 'wait-worker', summary: 'Wait up to 90 s for a worker of this chat, with no gap between calls', usage: 'bb plugin run aif-chat wait-worker --worker <thread id> [--after <seq>] [--json]' }],
     async run(argv, ctx) {
       try {
         const [command = 'help', ...args] = argv;
-        if (command === 'help' || command === '--help') return { exitCode: 0, stdout: 'bb plugin run aif-chat status|show|save-plan|mark-verified|check-updates|reset|reset-dispatch|spawn-worker|bring-back|wait-worker|scout-check [--thread ID] [--target PATH] [--dir PATH] [--phase explore|plan|improve|implement|verify|fix|done] [--json]' };
+        if (command === 'help' || command === '--help') return { exitCode: 0, stdout: 'bb plugin run aif-chat status|show|save-plan|mark-verified|check-updates|reset|reset-dispatch|spawn-worker|bring-back|wait-worker [--thread ID] [--target PATH] [--phase explore|plan|improve|implement|verify|fix|done] [--json]' };
         const options: Record<string, string> = {}; let json = false;
         for (let i = 0; i < args.length; i++) {
           if (args[i] === '--json') { json = true; continue; }
-          if (!['--thread', '--target', '--phase', '--max', '--group', '--token', '--task', '--brief', '--worker', '--after', '--dir'].includes(args[i]) || !args[i + 1] || args[i + 1].startsWith('--')) throw new Error('Неизвестный аргумент или отсутствует значение.');
+          if (!['--thread', '--target', '--phase', '--max', '--group', '--token', '--task', '--brief', '--worker', '--after'].includes(args[i]) || !args[i + 1] || args[i + 1].startsWith('--')) throw new Error('Неизвестный аргумент или отсутствует значение.');
           if (args[i] in options) throw new Error('Повторяющийся аргумент.');
           const name = args[i]; options[name] = args[++i];
         }
@@ -1125,14 +1123,6 @@ export default async function plugin(bb: BbPluginApi) {
         if (command === 'spawn-worker' || command === 'bring-back') {
           const result = await parallelCommand(command, input.threadId, input.target, options);
           return { exitCode: result.ok ? 0 : 1, stdout: json ? JSON.stringify(result.data) : result.text };
-        }
-        if (command === 'scout-check') {
-          const dir = options['--dir'];
-          if (!dir) throw new Error('Укажите папку разведки через --dir.');
-          const { environment } = await context(input.threadId);
-          const corpus = await host.call('scoutCorpus', { root: environment.path!, dir }, { hostId: environment.hostId });
-          const result = checkScout(corpus);
-          return { exitCode: result.verdict === 'NOT_READY' ? 1 : 0, stdout: json ? JSON.stringify(result) : formatScoutCheck(result) };
         }
         if (!['status', 'show', 'check-updates'].includes(command)) throw new Error('Неизвестная команда.');
         if (command === 'show') {
