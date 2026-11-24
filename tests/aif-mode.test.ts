@@ -46,6 +46,8 @@ test('mode instructions reach only top-level threads of an enabled project', asy
     assert.deepEqual(enabled.skills, ['aif-chat', 'aif-scout']);
     assert(enabled.instructions?.includes('## AI Factory mode'));
     assert(enabled.instructions?.includes('/aif-scout'));
+    assert(enabled.instructions?.includes('offer `/aif-scout <topic>` as a next step'));
+    assert(!provider(agentContext('thr_parent')).instructions?.includes('/aif-scout <topic>'));
     assert(!provider(agentContext('thr_parent')).instructions?.includes('## AI Factory mode'));
     assert(!provider(agentContext(null, 'proj_other')).instructions?.includes('## AI Factory mode'));
     await h.harness.behavior.setSettings({ enabled: false });

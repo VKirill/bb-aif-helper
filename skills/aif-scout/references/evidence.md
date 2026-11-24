@@ -11,7 +11,9 @@
 
 ## 2. Примеры YAML
 
-### `plan.yaml` (`scoutPlanSchema`)
+Примеры показывают форму полей, а не настоящие находки: адреса и цитаты в них вымышлены.
+
+### `plan.yaml`
 
 ```yaml
 question: "Ограничения stdio-транспорта MCP при падении дочернего сервера"
@@ -31,7 +33,7 @@ angles:
     required: true
 ```
 
-### Карточка разведчика `corpus/<angle>.yaml` (`scoutCardSchema`)
+### Карточка разведчика 1 `corpus/<angle>.yaml`
 
 ```yaml
 scout: dev-tracker
@@ -39,19 +41,19 @@ as_of: 2026-11-24
 tools: [gh, WebFetch]
 queries_run: 5
 findings:
-  - id: F1
+  - id: F101
     claim: "При SIGKILL дочернего процесса буфер stderr в Node.js может не дойти до родителя"
     type: fact
     origin: vendor
     evidence:
-      - url: https://github.com/modelcontextprotocol/typescript-sdk/issues/123
+      - url: https://github.com/example-org/example-sdk/issues/1
         capture: full
         source_date: 2026-09-02
         quote: "stderr pipe closes before flush on abrupt exit"
     market_lang: en
     version_scope: ">=1.0 <1.5"
     status: VERIFIED
-    confidence: med
+    confidence: low  # один URL: потолок low (раздел 3)
     changes_decision: yes
     cannot_claim: "что потеря stderr воспроизводится при штатном завершении"
 counter_evidence: []  # each item has the same fields as a finding (id, claim, type, origin, evidence, status, confidence, changes_decision)
@@ -62,7 +64,7 @@ open_questions:
   - "Воспроизводится ли потеря при graceful shutdown через stdin EOF"
 ```
 
-### `opportunities.yaml` (`scoutOpportunitiesSchema`, режим `ideas`)
+### `opportunities.yaml` (режим `ideas`)
 
 ```yaml
 opportunities:
@@ -71,7 +73,7 @@ opportunities:
     user_context: "Разработчики интеграций на Node.js при отладке локальных плагинов"
     workaround_today: "Оборачивают запуск сервера в shell-скрипт с tee в временный лог"
     why_existing_misses_it: "Штатный SDK отбрасывает незакрытый stderr после обрыва pipe"
-    evidence: [F1]
+    evidence: [F101]
     counterpoints: []
     market: en
     severity: rare-critical

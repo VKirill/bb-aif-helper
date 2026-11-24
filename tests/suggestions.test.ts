@@ -230,6 +230,13 @@ test('inline code spans keep the full one-line command with its arguments', () =
 test('a comma inside a code span stays in the topic; in prose it ends the invocation', () => {
   assert.deepEqual(extractAifInvocations('Run `/aif-scout Compare Playwright, Cypress, and WebdriverIO`.'),
     [{ id: 'aif-scout', command: 'aif-scout Compare Playwright, Cypress, and WebdriverIO' }]);
+  assert.deepEqual(extractAifInvocations('```\n/aif-scout Compare Playwright, Cypress, and WebdriverIO\n```'),
+    [{ id: 'aif-scout', command: 'aif-scout Compare Playwright, Cypress, and WebdriverIO' }]);
+  assert.deepEqual(extractAifInvocations("`/aif-scout What's the simplest approach?`"),
+    [{ id: 'aif-scout', command: "aif-scout What's the simplest approach?" }]);
+  assert.deepEqual(extractAifInvocations('`/aif-scout Compare Node.js & Deno on Windows`'),
+    [{ id: 'aif-scout', command: 'aif-scout Compare Node.js & Deno on Windows' }]);
+  assert.deepEqual(extractAifInvocations('`/aif-fix x && rm -rf y`'), [{ id: 'aif-fix', command: 'aif-fix x' }]);
   assert.deepEqual(extractAifInvocations('Run /aif-scout Playwright, then decide.'),
     [{ id: 'aif-scout', command: 'aif-scout Playwright' }]);
 });
