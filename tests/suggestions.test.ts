@@ -227,6 +227,12 @@ test('inline code spans keep the full one-line command with its arguments', () =
   ]);
   assert.equal(analyzeReply(reply).commands.get('aif-fix'), command);
 });
+test('a comma inside a code span stays in the topic; in prose it ends the invocation', () => {
+  assert.deepEqual(extractAifInvocations('Run `/aif-scout Compare Playwright, Cypress, and WebdriverIO`.'),
+    [{ id: 'aif-scout', command: 'aif-scout Compare Playwright, Cypress, and WebdriverIO' }]);
+  assert.deepEqual(extractAifInvocations('Run /aif-scout Playwright, then decide.'),
+    [{ id: 'aif-scout', command: 'aif-scout Playwright' }]);
+});
 test('a span variant with arguments replaces the bare command; the first one wins', () => {
   assert.deepEqual(extractAifInvocations('/aif-plan then `/aif-plan full #1` then `/aif-plan other`'),
     [{ id: 'aif-plan', command: 'aif-plan full #1' }]);

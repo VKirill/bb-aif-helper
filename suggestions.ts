@@ -12,7 +12,8 @@ function argumentsAfter(tail: string, code: boolean): string | null {
   while (/^[ \t]/.test(tail.slice(offset, offset + 1))) {
     while (/[ \t]/.test(tail[offset] ?? '') && offset < tail.length) offset++;
     const start = offset;
-    if (!tail[offset] || /[\r\n`;,|&<>\x00-\x1f]/.test(tail[offset]) || /^[/$]aif\b/.test(tail.slice(offset))) break;
+    // In a code span a comma belongs to the topic ("Compare A, B"); in prose it ends the invocation.
+    if (!tail[offset] || (code ? /[\r\n`;|&<>\x00-\x1f]/ : /[\r\n`;,|&<>\x00-\x1f]/).test(tail[offset]) || /^[/$]aif\b/.test(tail.slice(offset))) break;
     let quote = '';
     while (offset < tail.length) {
       const char = tail[offset];
@@ -23,7 +24,7 @@ function argumentsAfter(tail: string, code: boolean): string | null {
         if (char === quote) quote = '';
       } else {
         if (char === '"' || char === "'") quote = char;
-        else if (/[ \t`;,|&<>]/.test(char) || (char === '$' && tail[offset + 1] === '(')) break;
+        else if ((code ? /[ \t`;|&<>]/ : /[ \t`;,|&<>]/).test(char) || (char === '$' && tail[offset + 1] === '(')) break;
       }
       offset++;
     }

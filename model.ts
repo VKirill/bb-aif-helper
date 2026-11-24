@@ -201,7 +201,8 @@ export const scoutPlanSchema = z.object({
   mode: z.enum(SCOUT_MODES),
   depth: z.enum(SCOUT_DEPTHS).default('normal'),
   as_of: scoutDate,
-  angles: z.array(scoutAngleSchema).min(1).max(12),
+  angles: z.array(scoutAngleSchema).min(1).max(12)
+    .refine(angles => new Set(angles.map(a => a.id)).size === angles.length, 'id углов должны быть уникальны'),
 }).strict();
 
 export const scoutEvidenceSchema = z.object({

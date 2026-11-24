@@ -199,7 +199,7 @@ test('6a. report checks: refs in any section, every list marker, blank report', 
   const contradictions = checkScout({
     plan: devPlan,
     cards,
-    report: reportOk.replace('## Неизвестно', '## Противоречия\n- F4 против F999.\n\n## Неизвестно'),
+    report: reportOk.replace('## Неизвестно', '## Противоречия\n- (F4) против (F999).\n\n## Неизвестно'),
   });
   assert.ok(contradictions.problems.some((p) => p.code === 'unknown_ref' && p.ref === 'F999'));
 
@@ -225,6 +225,52 @@ test('6b. confidence caps follow the weakest link', () => {
   const snippetMed = devCardTracker.replace('status: REPORTED\n    confidence: low', 'status: SNIPPET_ONLY\n    confidence: med');
   const r2 = checkScout({ plan: devPlan, cards: [{ name: 'd.yaml', text: devCardDocs }, { name: 't.yaml', text: snippetMed }] });
   assert.ok(r2.problems.some((p) => p.code === 'confidence_cap' && p.ref === 'F4'));
+});
+
+test('6c. second review round: readable sources, counter-evidence caps, wrapped citations, plain F1 text, competitor and heading phrases', () => {
+  const cards = [
+    { name: 'dev-card-docs.yaml', text: devCardDocs },
+    { name: 'dev-card-tracker.yaml', text: devCardTracker },
+  ];
+
+  // high with three URLs of which only one is readable.
+  const unreadableHigh = devCardDocs
+    .replace('status: VERIFIED\n    confidence: med', 'status: VERIFIED\n    confidence: high')
+    .replace('capture: excerpt\n        source_date: 2026-10-01', 'capture: unavailable\n        source_date: 2026-10-01')
+    .replace('    market_lang: en\n    version_scope', '    market_lang: en\n    version_scope')
+    .replace(/(      - url: https:\/\/github.com\/modelcontextprotocol\/typescript-sdk\/blob\/main\/README.md\n)/, '      - url: https://example.org/unavailable\n        capture: unavailable\n$1');
+  const r1 = checkScout({ plan: devPlan, cards: [{ name: 'd.yaml', text: unreadableHigh }, cards[1]] });
+  assert.ok(r1.problems.some((p) => p.code === 'confidence_cap' && p.ref === 'F1'));
+
+  const highCounter = devCardDocs.replace(/(  - id: F3[\s\S]*?confidence: )low/, '$1high');
+  const r2 = checkScout({ plan: devPlan, cards: [{ name: 'd.yaml', text: highCounter }, cards[1]] });
+  assert.ok(r2.problems.some((p) => p.code === 'confidence_cap' && p.ref === 'F3'));
+
+  const wrapped = reportOk.replace('при SIGKILL (F1).', 'при SIGKILL\n  (F1).');
+  assert.equal(checkScout({ plan: devPlan, cards, report: wrapped }).verdict, 'READY');
+
+  const keyText = reportOk.replace('при SIGKILL (F1).', 'при SIGKILL; справка открывается клавишей F7 (F1).');
+  assert.equal(checkScout({ plan: devPlan, cards, report: keyText }).verdict, 'READY');
+
+  const competitor = checkScout({ plan: devPlan, cards, report: reportOk.replace('## Неизвестно', '- У конкурентов нет поддержки записи stderr (F1).\n\n## Неизвестно') });
+  assert.ok(competitor.problems.some((p) => p.code === 'forbidden_phrase'));
+
+  const title = checkScout({ plan: devPlan, cards, report: reportOk.replace(/^# .*$/m, '# Частота сбоев растёт') });
+  assert.ok(title.problems.some((p) => p.code === 'forbidden_phrase'));
+});
+
+test('6d. snippet-only findings never cover an angle; plan angle ids are unique', () => {
+  const snippetTracker = devCardTracker
+    .replace('status: REPORTED\n    confidence: low', 'status: SNIPPET_ONLY\n    confidence: low')
+    .replace('status: VERIFIED\n    confidence: med', 'status: SNIPPET_ONLY\n    confidence: low')
+    .replace('capture: metadata_only\n        source_date: 2026-09-02', 'capture: excerpt\n        source_date: 2026-09-02');
+  const r = checkScout({ plan: devPlan, cards: [{ name: 'd.yaml', text: devCardDocs }, { name: 't.yaml', text: snippetTracker }] });
+  assert.deepEqual(r.coverage.find((c) => c.angle === 'dev-tracker'), { angle: 'dev-tracker', state: 'PARTIAL' });
+
+  const dupPlan = devPlan.replace('  - id: dev-tracker', '  - id: dev-docs');
+  const d = checkScout({ plan: dupPlan, cards: [] });
+  assert.equal(d.verdict, 'NOT_READY');
+  assert.ok(d.problems.some((p) => p.code === 'schema'));
 });
 
 test('7. report validation: unsupported_claim, unknown_ref F999, and missing section Неизвестно', () => {

@@ -34,7 +34,7 @@ description: Run parallel external web scouts that research a topic from indepen
 
 `RESEARCH.md` и `INDEX.md` принадлежат `/aif-explore` — не создавай и не редактируй их. Папка `.ai-factory/scout/` лежит вне `.ai-factory/research/`, поэтому `/aif-explore ultra` с тем же slug не конфликтует с ней.
 
-Повторный запуск по той же теме с другим набором углов: перед новой волной перенеси прежние `plan.yaml`, `corpus/`, `opportunities.yaml` и `report.md` в `archive/<as_of>/` этой же папки. Иначе старые карточки останутся в корпусе, и `scout-check` вернёт `orphan_card`.
+Повторный запуск по той же теме с другим набором углов: перед новой волной создай новую папку `archive/<YYYY-MM-DD-HHMM>/` (имя, которого ещё нет) и перенеси в неё прежние `plan.yaml`, `corpus/`, `opportunities.yaml` и `report.md`. Иначе старые карточки останутся в корпусе, и `scout-check` вернёт `orphan_card`.
 
 ## Процесс
 
@@ -56,7 +56,7 @@ description: Run parallel external web scouts that research a topic from indepen
 7. **Линзы на общем корпусе.** Разбери общий корпус через линзы: боли и сбои, язык, критерии выбора, обходы и замены, обещания vs опыт, пробелы → идеи, контра (линза «новое» — только по находкам с двумя разными `source_date`). В `quick` линзы выполняет сам координатор; в `normal`/`deep` можно выделить субагентов. Для `ideas` сформируй `opportunities.yaml` по схеме из [references/evidence.md](references/evidence.md).
 8. **Сборка `report.md`.**
    - Шапка: счётчик источников (`sources` и разбивка по `capture`: `full`, `excerpt`, `metadata_only`, `unavailable`), ограничения из preflight.
-   - Обязательные разделы: `## Установлено` (каждый пункт списка со ссылкой `F<id>`), противоречия (обе стороны со ссылками, без усреднения), `## Неизвестно`, `## Следующий шаг`.
+   - Обязательные разделы: `## Установлено` (каждый пункт списка со ссылкой в скобках: `(F101)` или `(F101, F102)`; голое `F1` в тексте ссылкой не считается), противоречия (обе стороны со ссылками, без усреднения), `## Неизвестно`, `## Следующий шаг`.
 9. **Проверка скриптом.** Запусти `bb plugin run aif-chat scout-check --dir .ai-factory/scout/<slug> --json`. При `NOT_READY` сделай **один** ремонт (поправь отчёт/карточки по списку `problems` или добери один недостающий угол) и повтори `scout-check`; при повторном сбое честно покажи пробелы. Вердикт ставит только скрипт.
 10. **Насыщение.** Запускай следующую волну только по триггеру (обязательный угол `MISSING`/`PARTIAL` или противоречие в решающем пункте). Останавливай поиск, когда новые запросы повторяют уже найденное.
 11. **Итог в чат.** Сообщи вердикт `scout-check`, счётчик источников, 3 строки (`Установлено / Неизвестно / Следующий шаг`), путь к `report.md` и подсказку `` `/aif-explore ultra <тема>` `` (он перенесёт выводы в `RESEARCH.md`). Автоматические находки имеют статус `draft`; `plan_ready` ставит человек.
@@ -74,6 +74,7 @@ description: Run parallel external web scouts that research a topic from indepen
   ```bash
   bb thread spawn --project "$BB_PROJECT_ID" --environment "$BB_ENVIRONMENT_ID" --parent-self --lifecycle-owner-thread "$BB_THREAD_ID" --parent-notifications off <spawn flags> --title 'AIF research · aif-scout · <angle-id>' --prompt-file '<prompt>' --json
   ```
+  В PowerShell переменные BB — это `$env:BB_PROJECT_ID`, `$env:BB_ENVIRONMENT_ID` и `$env:BB_THREAD_ID`, а не `$BB_PROJECT_ID`.
 - **Ожидание воркера:**
   ```bash
   bb plugin run aif-chat wait-worker --worker <id> --json

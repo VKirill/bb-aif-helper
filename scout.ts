@@ -30,6 +30,8 @@ const CAPTURE_RANK: Record<ScoutCapture, number> = {
   unavailable: 0,
 };
 
+const READABLE = (capture: ScoutCapture): boolean => capture === 'full' || capture === 'excerpt';
+
 const CONFIDENCE_RANK: Record<ScoutFinding['confidence'], number> = { low: 0, med: 1, high: 2 };
 
 const EMPTY_COUNTS: ScoutCheck['counts'] = {
@@ -61,7 +63,7 @@ const FORBIDDEN_RULES: readonly ForbiddenRule[] = [
     message: (phrase) => `Запрещённая фраза «${phrase}»: для оценки динамики пункт должен ссылаться на находки минимум с двумя разными source_date.`,
   },
   {
-    regex: /(?<![\p{L}\p{N}_])(никто не (?:решает|делает|закрывает)|nobody (?:solves|does|offers)|no one (?:solves|does|offers))(?![\p{L}\p{N}_])/iu,
+    regex: /(?<![\p{L}\p{N}_])(никто не (?:решает|делает|закрывает)|у конкурентов (?:нет|не)|ни у кого нет|nobody (?:solves|does|offers)|no one (?:solves|does|offers)|competitors (?:don't|do not|lack)|no competitor)(?![\p{L}\p{N}_])/iu,
     allowed: (findings) => findings.some((f) => f.type === 'competitor-capability'),
     message: (phrase) => `Запрещённая фраза «${phrase}»: нет находок с типом competitor-capability.`,
   },
@@ -243,7 +245,7 @@ function evaluateCoverage(
           : `Необязательный угол «${angle.id}» не имеет находок.`,
         ref: angle.id,
       });
-    } else if (angleFindings.some((f) => f.status !== 'INFERRED' && f.evidence.some((e) => e.capture === 'full' || e.capture === 'excerpt'))) {
+    } else if (angleFindings.some((f) => (f.status === 'VERIFIED' || f.status === 'REPORTED') && f.evidence.some((e) => READABLE(e.capture)))) {
       state = 'COVERED';
     } else {
       state = 'PARTIAL';
@@ -290,24 +292,27 @@ function checkFindingQuality(
     }
 
     for (const f of card.findings) {
-      const uniqueUrls = new Set(f.evidence.map((e) => normalizeUrl(e.url)));
-      for (const url of uniqueUrls) {
+      for (const url of new Set(f.evidence.map((e) => normalizeUrl(e.url)))) {
         urlSpread.set(url, (urlSpread.get(url) ?? 0) + 1);
       }
+    }
 
-      // Weakest-link cap from references/evidence.md: snippets or a single URL allow only low, high needs ≥ 3 URLs.
-      const weakCapture = f.evidence.every((e) => e.capture === 'metadata_only' || e.capture === 'unavailable');
+    // Counter-evidence is held to the same caps: it can override a finding in the synthesis.
+    for (const f of [...card.findings, ...card.counter_evidence]) {
+      const uniqueUrls = new Set(f.evidence.map((e) => normalizeUrl(e.url)));
+      const readableUrls = new Set(f.evidence.filter((e) => READABLE(e.capture)).map((e) => normalizeUrl(e.url)));
+      // Weakest-link cap from references/evidence.md: snippets or a single URL allow only low, high needs ≥ 3 read URLs.
       const cap: ScoutFinding['confidence'] =
-        f.status === 'SNIPPET_ONLY' || weakCapture || uniqueUrls.size <= 1
+        f.status === 'SNIPPET_ONLY' || !readableUrls.size || uniqueUrls.size <= 1
           ? 'low'
-          : f.status === 'INFERRED' || uniqueUrls.size < 3
+          : f.status === 'INFERRED' || readableUrls.size < 3
             ? 'med'
             : 'high';
       if (CONFIDENCE_RANK[f.confidence] > CONFIDENCE_RANK[cap]) {
         problems.push({
           code: 'confidence_cap',
           severity: 'gap',
-          message: `Уверенность ${f.confidence} у ${f.id} выше допустимой ${cap} (источников ${uniqueUrls.size}, статус ${f.status}${weakCapture ? ', нет full/excerpt' : ''}).`,
+          message: `Уверенность ${f.confidence} у ${f.id} выше допустимой ${cap} (источников ${uniqueUrls.size}, прочитано ${readableUrls.size}, статус ${f.status}).`,
           ref: f.id,
         });
       }
@@ -337,22 +342,21 @@ function checkFindingQuality(
   }
 }
 
-function checkReport(
-  report: string,
-  allFindings: ScoutFinding[],
-  findingById: Map<string, ScoutFinding>,
-  knownIds: Set<string>,
-  problems: ScoutProblem[],
-): void {
-  const lines = report.split(/\r?\n/);
-  const foundSections = new Set<'established' | 'unknown' | 'nextStep'>();
-  const reportedUnknownRefs = new Set<string>();
-  const reportedPhrases = new Set<string>();
-  let fence: { char: string; size: number } | null = null;
-  // The section the current line belongs to; null before the first known heading or after an unknown one.
-  let section: { key: 'established' | 'unknown' | 'nextStep'; level: number } | null = null;
+// A citation is a bracketed group of finding ids: (F101) or (F101, F102); a bare F1 is ordinary text.
+const CITATION_RE = /[(\[]\s*(F\d+(?:\s*[,;]\s*F\d+)*)\s*[)\]]/g;
+const LIST_ITEM_RE = /^\s*(?:[-*+]|\d+[.)])\s+\S/;
 
-  for (const line of lines) {
+type SectionKey = 'established' | 'unknown' | 'nextStep';
+interface ReportBlock { text: string; item: boolean; section: SectionKey | null }
+
+/** Split a report into headings, paragraph lines and list items (with their indented continuation lines). */
+function reportBlocks(report: string, foundSections: Set<SectionKey>): ReportBlock[] {
+  const blocks: ReportBlock[] = [];
+  let fence: { char: string; size: number } | null = null;
+  let section: { key: SectionKey; level: number } | null = null;
+  let item: ReportBlock | null = null;
+
+  for (const line of report.split(/\r?\n/)) {
     if (fence) {
       const close = line.match(/^ {0,3}(`{3,}|~{3,})[ \t]*$/);
       if (close && close[1][0] === fence.char && close[1].length >= fence.size) fence = null;
@@ -361,32 +365,59 @@ function checkReport(
     const open = line.match(/^ {0,3}(`{3,}|~{3,})/);
     if (open) {
       fence = { char: open[1][0], size: open[1].length };
+      item = null;
       continue;
     }
 
     const heading = line.match(/^ {0,3}(#{1,6})\s+(.+?)\s*#*\s*$/);
     if (heading) {
+      item = null;
       const level = heading[1].length;
-      const text = heading[2].trim().toLowerCase();
-      const matched = SECTION_HEADINGS.find((s) => s.names.includes(text));
+      const matched = SECTION_HEADINGS.find((h) => h.names.includes(heading[2].trim().toLowerCase()));
       if (matched) {
         foundSections.add(matched.key);
         section = { key: matched.key, level };
       } else if (section && level <= section.level) {
         section = null;
       }
+      blocks.push({ text: line, item: false, section: section?.key ?? null });
       continue;
     }
 
-    const stripped = line.replace(/https?:\/\/[^\s)>\]]+/g, '');
-    const refs = [...stripped.matchAll(/(?<![\p{L}\p{N}_])(F\d+)(?![\p{L}\p{N}_])/gu)].map((m) => m[1]);
+    if (LIST_ITEM_RE.test(line)) {
+      item = { text: line, item: true, section: section?.key ?? null };
+      blocks.push(item);
+    } else if (item && /^\s+\S/.test(line)) {
+      item.text += `\n${line}`;
+    } else if (line.trim()) {
+      item = null;
+      blocks.push({ text: line, item: false, section: section?.key ?? null });
+    }
+  }
+  return blocks;
+}
 
-    if (section?.key === 'established' && /^\s*(?:[-*+]|\d+[.)])\s+\S/.test(line) && !refs.length) {
+function checkReport(
+  report: string,
+  allFindings: ScoutFinding[],
+  findingById: Map<string, ScoutFinding>,
+  knownIds: Set<string>,
+  problems: ScoutProblem[],
+): void {
+  const foundSections = new Set<SectionKey>();
+  const reportedUnknownRefs = new Set<string>();
+  const reportedPhrases = new Set<string>();
+
+  for (const block of reportBlocks(report, foundSections)) {
+    const stripped = block.text.replace(/https?:\/\/[^\s)>\]]+/g, '');
+    const refs = [...stripped.matchAll(CITATION_RE)].flatMap((m) => m[1].split(/\s*[,;]\s*/));
+
+    if (block.section === 'established' && block.item && !refs.length) {
       problems.push({
         code: 'unsupported_claim',
         severity: 'block',
-        message: 'Пункт раздела «Установлено» не ссылается на находку F<id>.',
-        ref: line.trim().slice(0, 80),
+        message: 'Пункт раздела «Установлено» не ссылается на находку (F<id>).',
+        ref: block.text.trim().slice(0, 80),
       });
     }
 
@@ -403,7 +434,7 @@ function checkReport(
     }
 
     // Open questions and next steps may name a trend without asserting it.
-    if (section?.key === 'unknown' || section?.key === 'nextStep') continue;
+    if (block.section === 'unknown' || block.section === 'nextStep') continue;
     const cited = refs.flatMap((id) => findingById.get(id) ?? []);
     for (const rule of FORBIDDEN_RULES) {
       const match = rule.regex.exec(stripped);
@@ -418,13 +449,13 @@ function checkReport(
     }
   }
 
-  for (const s of SECTION_HEADINGS) {
-    if (!foundSections.has(s.key)) {
+  for (const h of SECTION_HEADINGS) {
+    if (!foundSections.has(h.key)) {
       problems.push({
         code: 'report_section',
         severity: 'block',
-        message: `В отчёте отсутствует обязательный раздел «${s.label}».`,
-        ref: s.label,
+        message: `В отчёте отсутствует обязательный раздел «${h.label}».`,
+        ref: h.label,
       });
     }
   }
