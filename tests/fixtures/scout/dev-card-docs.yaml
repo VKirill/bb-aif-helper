@@ -36,7 +36,7 @@ findings:
     market_lang: en
     version_scope: "Node >=20"
     status: REPORTED
-    confidence: med
+    confidence: low
     changes_decision: no
 counter_evidence:
   - id: F3

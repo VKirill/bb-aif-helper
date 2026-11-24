@@ -1057,7 +1057,7 @@ export default async function plugin(bb: BbPluginApi) {
       { name: 'spawn-worker', summary: 'Start a parallel worker on its own copy of the project', usage: 'bb plugin run aif-chat spawn-worker --target <plan> --task <id> --brief <file> [--json]' },
       { name: 'bring-back', summary: 'Apply a parallel worker\'s changes to this workspace', usage: 'bb plugin run aif-chat bring-back --worker <thread id> [--json]' },
       { name: 'wait-worker', summary: 'Wait up to 90 s for a worker of this chat, with no gap between calls', usage: 'bb plugin run aif-chat wait-worker --worker <thread id> [--after <seq>] [--json]' },
-      { name: 'scout-check', summary: 'Check /aif-scout finding cards and report', usage: 'bb plugin run aif-chat scout-check --dir <.ai-factory/research/<slug>/scout> [--json]' }],
+      { name: 'scout-check', summary: 'Check /aif-scout finding cards and report', usage: 'bb plugin run aif-chat scout-check --dir <.ai-factory/scout/<slug>> [--json]' }],
     async run(argv, ctx) {
       try {
         const [command = 'help', ...args] = argv;

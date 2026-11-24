@@ -25,14 +25,16 @@ description: Run parallel external web scouts that research a topic from indepen
 
 ## Где лежит результат
 
-Все файлы пишутся только в `.ai-factory/research/<slug>/scout/`, где `<slug>` — английский kebab-case по теме:
+Все файлы пишутся только в `.ai-factory/scout/<slug>/`, где `<slug>` — английский kebab-case по теме:
 
 - `plan.yaml` — план и контракт исследования;
 - `corpus/<angle-id>.yaml` — сырые карточки разведчиков;
 - `opportunities.yaml` — карточки идей (только для режима `ideas`);
 - `report.md` — итоговый синтез со счётчиком источников.
 
-`RESEARCH.md` и `INDEX.md` принадлежат `/aif-explore` — не создавай и не редактируй их.
+`RESEARCH.md` и `INDEX.md` принадлежат `/aif-explore` — не создавай и не редактируй их. Папка `.ai-factory/scout/` лежит вне `.ai-factory/research/`, поэтому `/aif-explore ultra` с тем же slug не конфликтует с ней.
+
+Повторный запуск по той же теме с другим набором углов: перед новой волной перенеси прежние `plan.yaml`, `corpus/`, `opportunities.yaml` и `report.md` в `archive/<as_of>/` этой же папки. Иначе старые карточки останутся в корпусе, и `scout-check` вернёт `orphan_card`.
 
 ## Процесс
 
@@ -43,18 +45,19 @@ description: Run parallel external web scouts that research a topic from indepen
 4. **Показать план.** Выведи владельцу углы, число разведчиков, выбранные модели, платные источники и бюджет запросов. Жди подтверждения владельца (кроме случая, когда он уже явно разрешил запуск).
 5. **Запуск разведчиков.**
    - Прочитай блок `bb-aif-helper:research` в `.ai-factory/skill-context/global-skill-context.md`.
-   - Разведчик N получает модель слота N (угол 1 → слот 1, угол 2 → слот 2, остальные → слот 3) и спавнится командой `bb thread spawn` с флагами этого блока.
+   - Разведчик N берёт строку «Research worker N» этого блока (угол 1 → строка 1, угол 2 → строка 2, остальные → строка 3): в ней уже учтена подстановка слота 1 вместо пустого. Строка с `spawn flags` — спавни командой `bb thread spawn` с этими флагами.
    - Заголовок треда строго `AIF research · aif-scout · <angle-id>` — панель отслеживает модель по этому префиксу.
-   - Подготовь по одному промпт-файлу в UTF-8 на угол по шаблону [references/scout-brief.md](references/scout-brief.md) с вставленным примером карточки из [references/evidence.md](references/evidence.md) (разведчик не видит файлов плагина) в `$BB_THREAD_STORAGE/tmp/` или папке чата (имя без пробелов/спецсимволов, путь без `'`).
+   - Подготовь по одному промпт-файлу в UTF-8 на угол по шаблону [references/scout-brief.md](references/scout-brief.md) с вставленными из [references/evidence.md](references/evidence.md) примером карточки, разделом «Словари» и правилами уверенности из раздела 3 (разведчик не видит файлов плагина) в `$BB_THREAD_STORAGE/tmp/` или папке чата (имя без пробелов/спецсимволов, путь без `'`).
+   - Каждому разведчику N задай свой диапазон номеров находок `F<N>01`–`F<N>99`: номера должны быть уникальны во всём корпусе, иначе `scout-check` вернёт `duplicate_id`.
    - Запускай углы параллельно. Исключение: разведчик с Telegram (`telegram-user`) работает один и строго последовательно.
    - Жди каждого через `bb plugin run aif-chat wait-worker --worker <id> --json`, повторяя с `--after <seq>`. При `working` или промежуточном `idle` продолжай ждать; при `quietForMs > 480000` и незавершённом отчёте ничего не пиши воркеру и спроси владельца. Перед перезапуском или перехватом выполни `bb thread stop <id>` и архивируй старого воркера.
-   - Если слот равен `self`, блок `bb-aif-helper:research` отсутствует или `bb thread spawn` недоступен — запусти своих субагентов (Agent/Task) с тем же заданием из [references/scout-brief.md](references/scout-brief.md).
+   - Если строка разведчика говорит `your own native subagent`, блока `bb-aif-helper:research` нет или `bb thread spawn` недоступен — запусти своего субагента (Agent/Task) с тем же заданием из [references/scout-brief.md](references/scout-brief.md).
 6. **Сбор карточек.** Разведчики работают только на чтение и возвращают **одну** карточку YAML в финальном ответе. Координатор сохраняет её в `corpus/<angle-id>.yaml` без правок по существу. Если карточка невалидна — попроси разведчика исправить её **один раз** (`bb thread tell <id> --message-file <file>`).
-7. **Линзы на общем корпусе.** Разбери общий корпус через линзы: боли и сбои, язык, критерии выбора, обходы и замены, обещания vs опыт, пробелы → идеи, контра (линза «новое» — только при наличии двух `as_of`-периодов). В `quick` линзы выполняет сам координатор; в `normal`/`deep` можно выделить субагентов. Для `ideas` сформируй `opportunities.yaml` по схеме из [references/evidence.md](references/evidence.md).
+7. **Линзы на общем корпусе.** Разбери общий корпус через линзы: боли и сбои, язык, критерии выбора, обходы и замены, обещания vs опыт, пробелы → идеи, контра (линза «новое» — только по находкам с двумя разными `source_date`). В `quick` линзы выполняет сам координатор; в `normal`/`deep` можно выделить субагентов. Для `ideas` сформируй `opportunities.yaml` по схеме из [references/evidence.md](references/evidence.md).
 8. **Сборка `report.md`.**
    - Шапка: счётчик источников (`sources` и разбивка по `capture`: `full`, `excerpt`, `metadata_only`, `unavailable`), ограничения из preflight.
    - Обязательные разделы: `## Установлено` (каждый пункт списка со ссылкой `F<id>`), противоречия (обе стороны со ссылками, без усреднения), `## Неизвестно`, `## Следующий шаг`.
-9. **Проверка скриптом.** Запусти `bb plugin run aif-chat scout-check --dir .ai-factory/research/<slug>/scout --json`. При `NOT_READY` сделай **один** ремонт (поправь отчёт/карточки по списку `problems` или добери один недостающий угол) и повтори `scout-check`; при повторном сбое честно покажи пробелы. Вердикт ставит только скрипт.
+9. **Проверка скриптом.** Запусти `bb plugin run aif-chat scout-check --dir .ai-factory/scout/<slug> --json`. При `NOT_READY` сделай **один** ремонт (поправь отчёт/карточки по списку `problems` или добери один недостающий угол) и повтори `scout-check`; при повторном сбое честно покажи пробелы. Вердикт ставит только скрипт.
 10. **Насыщение.** Запускай следующую волну только по триггеру (обязательный угол `MISSING`/`PARTIAL` или противоречие в решающем пункте). Останавливай поиск, когда новые запросы повторяют уже найденное.
 11. **Итог в чат.** Сообщи вердикт `scout-check`, счётчик источников, 3 строки (`Установлено / Неизвестно / Следующий шаг`), путь к `report.md` и подсказку `` `/aif-explore ultra <тема>` `` (он перенесёт выводы в `RESEARCH.md`). Автоматические находки имеют статус `draft`; `plan_ready` ставит человек.
 
@@ -77,5 +80,5 @@ description: Run parallel external web scouts that research a topic from indepen
   ```
 - **Проверка результата:**
   ```bash
-  bb plugin run aif-chat scout-check --dir .ai-factory/research/<slug>/scout --json
+  bb plugin run aif-chat scout-check --dir .ai-factory/scout/<slug> --json
   ```

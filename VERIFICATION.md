@@ -7,9 +7,9 @@
 Сценарий ручной проверки (выполняется после выкладки плагина):
 
 1. В проекте с настроенными моделями «Разведчик 1–3» (или `self`) запустить `/aif-scout` в режиме `dev` и глубине `quick` по публичному вопросу (например, об ограничениях stdio-транспорта MCP) и подтвердить план углов.
-2. Проверить в «В работе», что созданы дочерние треды с заголовками `AIF research · aif-scout · <angle>` и запущены на моделях выбранных слотов (без предупреждения `⚠ Ожидалась модель …`), а в `.ai-factory/research/<slug>/scout/` сохранены `plan.yaml`, карточки `corpus/*.yaml` и `report.md` без создания или изменения `RESEARCH.md` и `INDEX.md`.
-3. Выполнить `bb plugin run aif-chat scout-check --dir .ai-factory/research/<slug>/scout --json`: команда возвращает вердикт `READY` или `READY_WITH_GAPS` с кодом выхода `0` (`NOT_READY` — с кодом `1` и JSON в `stdout`), ненулевым счётчиком источников и покрытием углов.
-4. Негативный случай CLI: выполнить `bb plugin run aif-chat scout-check --dir docs --json` (каталог вне `.ai-factory/research/<slug>/scout`) — команда завершается с кодом выхода `1` и сообщением `Папка разведки должна быть .ai-factory/research/<slug>/scout.` в `stderr`.
+2. Проверить в «В работе», что созданы дочерние треды с заголовками `AIF research · aif-scout · <angle>` и запущены на моделях выбранных слотов (без предупреждения `⚠ Ожидалась модель …`), а в `.ai-factory/scout/<slug>/` сохранены `plan.yaml`, карточки `corpus/*.yaml` и `report.md` без создания или изменения `RESEARCH.md` и `INDEX.md`.
+3. Выполнить `bb plugin run aif-chat scout-check --dir .ai-factory/scout/<slug> --json`: команда возвращает вердикт `READY` или `READY_WITH_GAPS` с кодом выхода `0` (`NOT_READY` — с кодом `1` и JSON в `stdout`), ненулевым счётчиком источников и покрытием углов.
+4. Негативный случай CLI: выполнить `bb plugin run aif-chat scout-check --dir docs --json` (каталог вне `.ai-factory/scout/<slug>`) — команда завершается с кодом выхода `1` и сообщением `Папка разведки должна быть .ai-factory/scout/<slug>.` в `stderr`.
 
 ## Содержимое gate и порядок блоков — 0.8.26
 

@@ -151,7 +151,7 @@ bb plugin run aif-chat check-updates --json
 - **Режимы:** `dev` (документация, GitHub issues/PR/releases, Stack Overflow, HN) и `ideas` (боли, самодельные обходы, конкуренты, форумы, Хабр, публичные Telegram-каналы; дополнительно формирует карточки идей `opportunities.yaml`).
 - **Глубина:** `quick` (2–3 разведчика), `normal` (4–5 по умолчанию), `deep` (6–8, включается автоматически для тем про деньги, безопасность, лицензии и необратимые решения).
 - **Модели:** разведчики запускаются дочерними тредами `AIF research · aif-scout · <angle-id>` на моделях «Разведчик 1–3» из блока «Исполнители» панели; при выборе `self` или недоступности `bb thread spawn` используются собственные субагенты агента.
-- **Где лежат результаты:** только в `.ai-factory/research/<slug>/scout/` (`plan.yaml`, `corpus/<angle-id>.yaml`, `opportunities.yaml` для `ideas`, `report.md`). Проверить корпус и отчёт можно командой `bb plugin run aif-chat scout-check --dir .ai-factory/research/<slug>/scout [--json]`. Переносит выводы в `RESEARCH.md` команда `/aif-explore ultra <тема>`.
+- **Где лежат результаты:** только в `.ai-factory/scout/<slug>/` (`plan.yaml`, `corpus/<angle-id>.yaml`, `opportunities.yaml` для `ideas`, `report.md`). Проверить корпус и отчёт можно командой `bb plugin run aif-chat scout-check --dir .ai-factory/scout/<slug> [--json]`. Переносит выводы в `RESEARCH.md` команда `/aif-explore ultra <тема>`.
 - **Ограничения источников:** Reddit отдаёт только сниппеты выдачи (`SNIPPET_ONLY`, уверенность не выше `low`), а чтение Telegram через `telegram-user` доступно только на хосте с активной сессией и выполняется последовательно.
 
 ### Планы и карточки в чате

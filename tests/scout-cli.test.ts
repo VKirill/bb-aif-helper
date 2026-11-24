@@ -4,8 +4,8 @@ import { createFakePluginHost, makeThreadResponse } from '@get-bb/plugin-sdk/tes
 import plugin from '../server.ts';
 
 const ROOT = 'C:\\Users\\Dev User\\репо';
-const VALID_DIR = '.ai-factory/research/mcp-stdio/scout';
-const CYRILLIC_SPACE_DIR = '.ai-factory/research/обзор mcp/scout';
+const VALID_DIR = '.ai-factory/scout/mcp-stdio';
+const CYRILLIC_SPACE_DIR = '.ai-factory/scout/обзор mcp';
 
 const READY_PLAN = `question: "Как работает stdio в MCP?"
 mode: dev
@@ -33,7 +33,7 @@ findings:
         source_date: "2026-11-24"
         quote: "Messages are delimited by newlines."
     status: VERIFIED
-    confidence: med
+    confidence: low
     changes_decision: yes
 counter_evidence: []
 not_found:
@@ -136,7 +136,7 @@ test('scout-check prints human-readable verdict without --json and passes spaces
 
 test('scout-check returns exit 1 with host error text in stderr', async () => {
   const { h } = await setup(() => {
-    throw new Error('Папка разведки должна быть .ai-factory/research/<slug>/scout.');
+    throw new Error('Папка разведки должна быть .ai-factory/scout/<slug>.');
   });
   try {
     const result = await h.harness.behavior.runCli(['scout-check', '--thread', 'thr_test', '--dir', 'outside/dir', '--json']);

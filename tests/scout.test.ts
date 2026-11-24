@@ -8,7 +8,8 @@ import { checkScout, formatScoutCheck } from '../scout.ts';
 const FIXTURES_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), 'fixtures/scout');
 
 function readFixture(name: string): string {
-  return readFileSync(path.join(FIXTURES_DIR, name), 'utf8');
+  // Windows checkouts may use CRLF; the tests edit fixtures with LF strings.
+  return readFileSync(path.join(FIXTURES_DIR, name), 'utf8').replace(/\r\n/g, '\n');
 }
 
 const devPlan = readFixture('dev-plan.yaml');
@@ -49,7 +50,7 @@ test('1. valid dev plan + cards + report -> READY, distinct URL counts by best c
 test('2. card with only SNIPPET_ONLY/metadata_only findings -> READY_WITH_GAPS, PARTIAL coverage, partial problem', () => {
   const snippetOnlyTracker = devCardTracker
     .replace('capture: full', 'capture: metadata_only')
-    .replace('status: VERIFIED', 'status: SNIPPET_ONLY');
+    .replace('status: VERIFIED\n    confidence: med', 'status: SNIPPET_ONLY\n    confidence: low');
 
   const result = checkScout({
     plan: devPlan,
@@ -158,38 +159,72 @@ test('5. confidence high with one URL -> confidence_cap', () => {
   );
 });
 
-test('6. report with "растёт" and one as_of -> forbidden_phrase block; two as_of dates -> allowed', () => {
-  const reportWithGrowth = reportOk.replace(
-    '## Следующий шаг',
-    '- Частота сбоев растёт от релиза к релизу (F4).\n\n## Следующий шаг',
-  );
+test('6. trend phrase needs cited findings with two source_date; open questions may name a trend', () => {
+  const cards = [
+    { name: 'dev-card-docs.yaml', text: devCardDocs },
+    { name: 'dev-card-tracker.yaml', text: devCardTracker },
+  ];
+  const withClaim = (claim: string) => reportOk.replace('## Неизвестно', `${claim}\n\n## Неизвестно`);
 
-  const blocked = checkScout({
-    plan: devPlan,
-    cards: [
-      { name: 'dev-card-docs.yaml', text: devCardDocs },
-      { name: 'dev-card-tracker.yaml', text: devCardTracker },
-    ],
-    report: reportWithGrowth,
-  });
-
+  // F4 has a single source_date: no time series behind the claim.
+  const blocked = checkScout({ plan: devPlan, cards, report: withClaim('- Частота сбоев растёт от релиза к релизу (F4).') });
   assert.equal(blocked.verdict, 'NOT_READY');
-  assert.ok(
-    blocked.problems.some((p) => p.code === 'forbidden_phrase' && p.severity === 'block'),
-  );
+  assert.ok(blocked.problems.some((p) => p.code === 'forbidden_phrase' && p.severity === 'block'));
 
-  const secondDateTracker = devCardTracker.replace('as_of: 2026-11-24', 'as_of: 2026-10-01');
-  const allowed = checkScout({
+  // A different card as_of is not a time series of the cited finding.
+  const otherAsOf = checkScout({
     plan: devPlan,
-    cards: [
-      { name: 'dev-card-docs.yaml', text: devCardDocs },
-      { name: 'dev-card-tracker.yaml', text: secondDateTracker },
-    ],
-    report: reportWithGrowth,
+    cards: [cards[0], { name: 'dev-card-tracker.yaml', text: devCardTracker.replace('as_of: 2026-11-24', 'as_of: 2026-10-01') }],
+    report: withClaim('- Частота сбоев растёт от релиза к релизу (F3).'),
   });
+  assert.ok(otherAsOf.problems.some((p) => p.code === 'forbidden_phrase'));
 
+  // F5 cites sources from two dates.
+  const allowed = checkScout({ plan: devPlan, cards, report: withClaim('- Частота сбоев растёт от релиза к релизу (F5).') });
   assert.equal(allowed.verdict, 'READY');
-  assert.equal(allowed.problems.some((p) => p.code === 'forbidden_phrase'), false);
+
+  const question = checkScout({
+    plan: devPlan,
+    cards,
+    report: reportOk.replace('## Следующий шаг', '- Растёт ли частота потерь stderr в новых версиях, пока неизвестно.\n\n## Следующий шаг'),
+  });
+  assert.equal(question.verdict, 'READY');
+});
+
+test('6a. report checks: refs in any section, every list marker, blank report', () => {
+  const cards = [
+    { name: 'dev-card-docs.yaml', text: devCardDocs },
+    { name: 'dev-card-tracker.yaml', text: devCardTracker },
+  ];
+  const contradictions = checkScout({
+    plan: devPlan,
+    cards,
+    report: reportOk.replace('## Неизвестно', '## Противоречия\n- F4 против F999.\n\n## Неизвестно'),
+  });
+  assert.ok(contradictions.problems.some((p) => p.code === 'unknown_ref' && p.ref === 'F999'));
+
+  for (const marker of ['+ ', '1) ']) {
+    const result = checkScout({
+      plan: devPlan,
+      cards,
+      report: reportOk.replace('- Спецификация разрешает писать диагностику в stderr, но не гарантирует сохранность при SIGKILL (F1).', `${marker}Спецификация разрешает писать диагностику в stderr.`),
+    });
+    assert.ok(result.problems.some((p) => p.code === 'unsupported_claim'), marker);
+  }
+
+  const blank = checkScout({ plan: devPlan, cards, report: '   \n' });
+  assert.equal(blank.verdict, 'NOT_READY');
+  assert.equal(blank.problems.filter((p) => p.code === 'report_section').length, 3);
+});
+
+test('6b. confidence caps follow the weakest link', () => {
+  const twoUrlHigh = devCardDocs.replace('status: VERIFIED\n    confidence: med', 'status: VERIFIED\n    confidence: high');
+  const r1 = checkScout({ plan: devPlan, cards: [{ name: 'd.yaml', text: twoUrlHigh }, { name: 't.yaml', text: devCardTracker }] });
+  assert.ok(r1.problems.some((p) => p.code === 'confidence_cap' && p.ref === 'F1'));
+
+  const snippetMed = devCardTracker.replace('status: REPORTED\n    confidence: low', 'status: SNIPPET_ONLY\n    confidence: med');
+  const r2 = checkScout({ plan: devPlan, cards: [{ name: 'd.yaml', text: devCardDocs }, { name: 't.yaml', text: snippetMed }] });
+  assert.ok(r2.problems.some((p) => p.code === 'confidence_cap' && p.ref === 'F4'));
 });
 
 test('7. report validation: unsupported_claim, unknown_ref F999, and missing section Неизвестно', () => {

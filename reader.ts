@@ -16,7 +16,7 @@ const MAX_FILE = 1024 * 1024;
 const MAX_FILES = 200;
 const SCOUT_MAX_FILE = 256 * 1024;
 const SCOUT_MAX_CARDS = 40;
-const SCOUT_DIR_RE = /^\.ai-factory\/research\/[a-z0-9][a-z0-9-]{0,79}\/scout$/;
+const SCOUT_DIR_RE = /^\.ai-factory\/scout\/[a-z0-9][a-z0-9-]{0,79}$/;
 const hash = (v: string | Buffer) => createHash('sha256').update(v).digest('hex');
 const obj = (v: unknown): Record<string, any> => v && typeof v === 'object' && !Array.isArray(v) ? v as Record<string, any> : {};
 const str = (v: unknown): string | null => typeof v === 'string' && v.trim() ? v : null;
@@ -161,7 +161,7 @@ class Reader {
 
 export async function readScoutCorpus(root: string, dir: string): Promise<{ plan: string; cards: { name: string; text: string }[]; report: string | null; opportunities: string | null }> {
   const scoutDir = safeRelative(dir);
-  if (!SCOUT_DIR_RE.test(scoutDir)) throw new Error('Папка разведки должна быть .ai-factory/research/<slug>/scout.');
+  if (!SCOUT_DIR_RE.test(scoutDir)) throw new Error('Папка разведки должна быть .ai-factory/scout/<slug>.');
   const realRoot = await fs.realpath(root);
   if (!(await fs.stat(realRoot)).isDirectory()) throw new Error('Рабочая папка недоступна.');
   const read = new Reader(realRoot);

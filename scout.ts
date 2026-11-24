@@ -30,6 +30,8 @@ const CAPTURE_RANK: Record<ScoutCapture, number> = {
   unavailable: 0,
 };
 
+const CONFIDENCE_RANK: Record<ScoutFinding['confidence'], number> = { low: 0, med: 1, high: 2 };
+
 const EMPTY_COUNTS: ScoutCheck['counts'] = {
   sources: 0,
   full: 0,
@@ -47,29 +49,30 @@ const SECTION_HEADINGS: readonly { key: 'established' | 'unknown' | 'nextStep'; 
 
 interface ForbiddenRule {
   regex: RegExp;
-  allowed: (cards: ScoutCard[], findings: ScoutFinding[]) => boolean;
+  /** `cited` are the findings referenced on the same report line as the phrase. */
+  allowed: (findings: ScoutFinding[], cited: ScoutFinding[]) => boolean;
   message: (phrase: string) => string;
 }
 
 const FORBIDDEN_RULES: readonly ForbiddenRule[] = [
   {
     regex: /(?<![\p{L}\p{N}_])(раст[её]т|растущ\p{L}*|growing|is growing|on the rise)(?![\p{L}\p{N}_])/iu,
-    allowed: (cards) => new Set(cards.map((c) => c.as_of)).size >= 2,
-    message: (phrase) => `Запрещённая фраза «${phrase}»: для оценки динамики нужны минимум две разные даты as_of в карточках.`,
+    allowed: (_findings, cited) => new Set(cited.flatMap((f) => f.evidence.map((e) => e.source_date).filter(Boolean))).size >= 2,
+    message: (phrase) => `Запрещённая фраза «${phrase}»: для оценки динамики пункт должен ссылаться на находки минимум с двумя разными source_date.`,
   },
   {
     regex: /(?<![\p{L}\p{N}_])(никто не (?:решает|делает|закрывает)|nobody (?:solves|does|offers)|no one (?:solves|does|offers))(?![\p{L}\p{N}_])/iu,
-    allowed: (_cards, findings) => findings.some((f) => f.type === 'competitor-capability'),
+    allowed: (findings) => findings.some((f) => f.type === 'competitor-capability'),
     message: (phrase) => `Запрещённая фраза «${phrase}»: нет находок с типом competitor-capability.`,
   },
   {
     regex: /(?<![\p{L}\p{N}_])(пользователи хотят|users want)(?![\p{L}\p{N}_])/iu,
-    allowed: (_cards, findings) => findings.some((f) => f.type === 'wish' || f.type === 'pain'),
+    allowed: (findings) => findings.some((f) => f.type === 'wish' || f.type === 'pain'),
     message: (phrase) => `Запрещённая фраза «${phrase}»: нет находок с типом wish или pain.`,
   },
   {
     regex: /(?<![\p{L}\p{N}_])(основная боль|главная боль|main pain|the biggest pain)(?![\p{L}\p{N}_])/iu,
-    allowed: (_cards, findings) => findings.some((f) => f.type === 'pain' && f.confidence !== 'low'),
+    allowed: (findings) => findings.some((f) => f.type === 'pain' && f.confidence !== 'low'),
     message: (phrase) => `Запрещённая фраза «${phrase}»: нет находок с типом pain и уверенностью выше low.`,
   },
 ];
@@ -292,14 +295,19 @@ function checkFindingQuality(
         urlSpread.set(url, (urlSpread.get(url) ?? 0) + 1);
       }
 
-      if (f.confidence !== 'high') continue;
-      const weakStatus = f.status === 'SNIPPET_ONLY' || f.status === 'INFERRED';
+      // Weakest-link cap from references/evidence.md: snippets or a single URL allow only low, high needs ≥ 3 URLs.
       const weakCapture = f.evidence.every((e) => e.capture === 'metadata_only' || e.capture === 'unavailable');
-      if (uniqueUrls.size <= 1 || weakStatus || weakCapture) {
+      const cap: ScoutFinding['confidence'] =
+        f.status === 'SNIPPET_ONLY' || weakCapture || uniqueUrls.size <= 1
+          ? 'low'
+          : f.status === 'INFERRED' || uniqueUrls.size < 3
+            ? 'med'
+            : 'high';
+      if (CONFIDENCE_RANK[f.confidence] > CONFIDENCE_RANK[cap]) {
         problems.push({
           code: 'confidence_cap',
           severity: 'gap',
-          message: `Уверенность high у ${f.id} не подтверждена (один источник, статус ${f.status} или нет full/excerpt).`,
+          message: `Уверенность ${f.confidence} у ${f.id} выше допустимой ${cap} (источников ${uniqueUrls.size}, статус ${f.status}${weakCapture ? ', нет full/excerpt' : ''}).`,
           ref: f.id,
         });
       }
@@ -331,17 +339,18 @@ function checkFindingQuality(
 
 function checkReport(
   report: string,
-  cards: ScoutCard[],
   allFindings: ScoutFinding[],
+  findingById: Map<string, ScoutFinding>,
   knownIds: Set<string>,
   problems: ScoutProblem[],
 ): void {
   const lines = report.split(/\r?\n/);
   const foundSections = new Set<'established' | 'unknown' | 'nextStep'>();
   const reportedUnknownRefs = new Set<string>();
+  const reportedPhrases = new Set<string>();
   let fence: { char: string; size: number } | null = null;
-  let inEstablished = false;
-  let establishedLevel = 0;
+  // The section the current line belongs to; null before the first known heading or after an unknown one.
+  let section: { key: 'established' | 'unknown' | 'nextStep'; level: number } | null = null;
 
   for (const line of lines) {
     if (fence) {
@@ -362,24 +371,17 @@ function checkReport(
       const matched = SECTION_HEADINGS.find((s) => s.names.includes(text));
       if (matched) {
         foundSections.add(matched.key);
-        if (matched.key === 'established') {
-          inEstablished = true;
-          establishedLevel = level;
-        } else {
-          inEstablished = false;
-        }
-      } else if (inEstablished && level <= establishedLevel) {
-        inEstablished = false;
+        section = { key: matched.key, level };
+      } else if (section && level <= section.level) {
+        section = null;
       }
       continue;
     }
 
-    if (!inEstablished) continue;
-
     const stripped = line.replace(/https?:\/\/[^\s)>\]]+/g, '');
     const refs = [...stripped.matchAll(/(?<![\p{L}\p{N}_])(F\d+)(?![\p{L}\p{N}_])/gu)].map((m) => m[1]);
 
-    if (/^\s*(?:[-*]|\d+\.)\s+\S/.test(line) && !refs.length) {
+    if (section?.key === 'established' && /^\s*(?:[-*+]|\d+[.)])\s+\S/.test(line) && !refs.length) {
       problems.push({
         code: 'unsupported_claim',
         severity: 'block',
@@ -399,28 +401,30 @@ function checkReport(
         });
       }
     }
-  }
 
-  for (const section of SECTION_HEADINGS) {
-    if (!foundSections.has(section.key)) {
-      problems.push({
-        code: 'report_section',
-        severity: 'block',
-        message: `В отчёте отсутствует обязательный раздел «${section.label}».`,
-        ref: section.label,
-      });
-    }
-  }
-
-  for (const rule of FORBIDDEN_RULES) {
-    if (rule.allowed(cards, allFindings)) continue;
-    const match = rule.regex.exec(report);
-    if (match) {
+    // Open questions and next steps may name a trend without asserting it.
+    if (section?.key === 'unknown' || section?.key === 'nextStep') continue;
+    const cited = refs.flatMap((id) => findingById.get(id) ?? []);
+    for (const rule of FORBIDDEN_RULES) {
+      const match = rule.regex.exec(stripped);
+      if (!match || reportedPhrases.has(match[0].toLowerCase()) || rule.allowed(allFindings, cited)) continue;
+      reportedPhrases.add(match[0].toLowerCase());
       problems.push({
         code: 'forbidden_phrase',
         severity: 'block',
         message: rule.message(match[0]),
         ref: match[0],
+      });
+    }
+  }
+
+  for (const s of SECTION_HEADINGS) {
+    if (!foundSections.has(s.key)) {
+      problems.push({
+        code: 'report_section',
+        severity: 'block',
+        message: `В отчёте отсутствует обязательный раздел «${s.label}».`,
+        ref: s.label,
       });
     }
   }
@@ -552,8 +556,8 @@ export function checkScout(input: CheckScoutInput): ScoutCheck {
 
   checkFindingQuality(validCards, angleById, allFindings, problems);
 
-  if (typeof input.report === 'string' && input.report.trim().length > 0) {
-    checkReport(input.report, cards, allFindings, knownIds, problems);
+  if (typeof input.report === 'string') {
+    checkReport(input.report, allFindings, findingById, knownIds, problems);
   }
 
   if (plan.mode === 'ideas') {

@@ -14,7 +14,7 @@ findings:
         quote: "Server exits before handshake and the client shows only EOF."
     market_lang: en
     status: VERIFIED
-    confidence: med
+    confidence: low
     changes_decision: yes
   - id: F2
     claim: "Команды в рунете оборачивают запуск MCP-сервера в shell-скрипт с tee в файл лога"
@@ -27,7 +27,7 @@ findings:
         quote: "Пришлось обернуть команду запуска в tee, иначе причину падения не увидеть."
     market_lang: ru
     status: REPORTED
-    confidence: med
+    confidence: low
     changes_decision: yes
 counter_evidence: []
 not_found:
