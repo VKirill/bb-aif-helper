@@ -1,0 +1,16 @@
+question: "Ограничения stdio-транспорта MCP при падении дочернего процесса"
+mode: dev
+depth: normal
+as_of: 2026-11-24
+angles:
+  - id: dev-docs
+    role: discovery
+    hypothesis: "Спецификация и SDK документируют обработку обрыва stdio-потоков"
+    required: true
+    market: en
+  - id: dev-tracker
+    role: constraint
+    hypothesis: "Проблема с потерей stderr зависит от ОС и буферизации процесса"
+    mirror_of: dev-docs
+    required: true
+    market: en

@@ -1,0 +1,12 @@
+opportunities:
+  - id: O1
+    unmet_need: "Диагностика падений локального MCP-сервера до рукопожатия транспорта"
+    user_context: "Разработчики плагинов и локальных MCP-серверов в IDE"
+    workaround_today: "Оборачивают команду запуска в shell-скрипт с перенаправлением stderr через tee"
+    why_existing_misses_it: "Штатный клиент показывает только общий EOF без сохранённого хвоста stderr"
+    evidence: [F1, F2]
+    counterpoints: []
+    market: both
+    severity: rare-critical
+    next_check: "Проверить частоту упоминаний проблемы в трекерах популярных IDE-клиентов"
+    status: draft

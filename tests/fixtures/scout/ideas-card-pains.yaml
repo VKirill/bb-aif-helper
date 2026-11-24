@@ -1,0 +1,36 @@
+scout: ideas-pains
+as_of: 2026-11-24
+tools: [gh, WebFetch]
+queries_run: 3
+findings:
+  - id: F1
+    claim: "Разработчики жалуются на тихие падения локальных MCP-серверов без сохранения stderr"
+    type: pain
+    origin: user
+    evidence:
+      - url: https://github.com/modelcontextprotocol/inspector/issues/88
+        capture: full
+        source_date: 2026-10-05
+        quote: "Server exits before handshake and the client shows only EOF."
+    market_lang: en
+    status: VERIFIED
+    confidence: med
+    changes_decision: yes
+  - id: F2
+    claim: "Команды в рунете оборачивают запуск MCP-сервера в shell-скрипт с tee в файл лога"
+    type: workaround
+    origin: user
+    evidence:
+      - url: https://habr.com/ru/articles/900001/
+        capture: excerpt
+        source_date: 2026-10-18
+        quote: "Пришлось обернуть команду запуска в tee, иначе причину падения не увидеть."
+    market_lang: ru
+    status: REPORTED
+    confidence: med
+    changes_decision: yes
+counter_evidence: []
+not_found:
+  - "Готовых плагинов диагностики pre-handshake ошибок для локального IDE не найдено"
+injection_suspected: []
+open_questions: []
