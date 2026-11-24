@@ -43,6 +43,16 @@ export const hostContract = defineRpcContract({
   bringBack: { input: z.object({ root: z.string().min(1).max(4096), copy: z.string().min(1).max(4096) }).strict(),
     output: z.object({ applied: z.boolean(), empty: z.boolean().optional(), partial: z.boolean().optional(), files: z.array(z.string()), error: z.string().optional() }), experimental_retryable: false },
   readBrief: { input: z.object({ path: z.string().min(1).max(4096) }).strict(), output: z.object({ text: z.string() }), experimental_retryable: true },
+  scoutCorpus: {
+    input: z.object({ root: z.string().min(1).max(4096), dir: z.string().min(1).max(1000) }).strict(),
+    output: z.object({
+      plan: z.string(),
+      cards: z.array(z.object({ name: z.string(), text: z.string() })),
+      report: z.string().nullable(),
+      opportunities: z.string().nullable(),
+    }),
+    experimental_retryable: true,
+  },
 });
 const dispatchResult = z.object({ sent: z.boolean(), message: z.string(), stale: z.literal(true).optional() });
 

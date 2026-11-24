@@ -4,7 +4,7 @@ import { parseReplyGate } from './gate.ts';
 import { briefCommands } from './session-brief.ts';
 import { gateEvidenceCommands } from './gate-evidence-command.ts';
 import { confirmationProse } from './confirmation.ts';
-import type { Action, Suggestions } from './model.ts';
+import { PLUGIN_SKILLS, type Action, type Suggestions } from './model.ts';
 
 function argumentsAfter(tail: string, code: boolean): string | null {
   const tokens: string[] = [];
@@ -118,7 +118,7 @@ export function analyzeReply(text: string) {
 // Chips write into the composer draft: bare commands that need the user's
 // topic wait for text; a command that already carries arguments submits an
 // empty draft right away and only edits a non-empty one.
-export const TOPIC_COMMANDS = new Set(['aif-explore', 'aif-plan', 'aif-fix']);
+export const TOPIC_COMMANDS = new Set(['aif-explore', 'aif-plan', 'aif-fix', 'aif-scout']);
 
 /** A bare topic command takes the gate's reason as its topic, so its chip can send at once. */
 export function withTopic(command: string, id: string, topic: string | null | undefined): string {
@@ -211,7 +211,7 @@ export function nextStepItems(actions: readonly Action[], o: { skills: readonly 
   return actions.filter(a => a.group === 'next' && a.available).flatMap(a => {
     const body = a.command.replace(/^[/$]/, '');
     const id = body.split(/\s/, 1)[0];
-    if (seen.has(id) || !(o.skills.includes(id) || id === 'aif-chat')) return [];
+    if (seen.has(id) || !(o.skills.includes(id) || (PLUGIN_SKILLS as readonly string[]).includes(id))) return [];
     seen.add(id);
     return [{ id, command: `${o.prefix}${body}`, available: true, reason: 'Следующий шаг', probability: null }];
   }).filter(item => !o.hidden.includes(item.id)).slice(0, 3);

@@ -5,7 +5,7 @@ import { hostContract, hostSignals, rpcContract, type ChipScoringView, type Dele
 import { DELEGATION_ROLES, delegationDefaultsSchema, modelSpec } from './delegation.ts';
 import { childModel, type ChildModel } from './child-model.ts';
 import type { DelegationChoice, DelegationDefaults, DelegationRole, DelegationState } from './delegation.ts';
-import { requestSchema, phaseSchema, snapshotSchema, chipScoringStateSchema, type CardRequest, type ChipScoringState, type Snapshot, type Phase, type Suggestions } from './model.ts';
+import { PLUGIN_SKILLS, requestSchema, phaseSchema, snapshotSchema, chipScoringStateSchema, type CardRequest, type ChipScoringState, type Snapshot, type Phase, type Suggestions } from './model.ts';
 import { actionPrompt, workflowActions, commitNavigationDeferred } from './workflow.ts';
 import { applyRan, applySkipped, RUN_CONFIRMED_STEPS } from './readiness.ts';
 import { analyzeReply, nextStepItems, withTopic, rulesSyncCommand } from './suggestions.ts';
@@ -25,6 +25,7 @@ import { readSessionBrief, sessionBriefBlocked, sessionBriefCommandAvailable, br
 import { GATE_EVIDENCE_COMMAND, gateEvidenceCommandAvailable } from './gate-evidence-command.ts';
 import { registerWorktreeProvider, WORKTREE_PROVIDER_ID } from './worktree-provider.ts';
 import { waitWorker } from './worker-wait.ts';
+import { checkScout, formatScoutCheck } from './scout.ts';
 export { rpcContract } from './contract.ts';
 type Selection = { environmentId: string; target: string; phase: Phase; newTask?: boolean };
 type Delivery = { requestId: string; fingerprint: string; actionId: string; state: 'attempting' | 'sent' | 'uncertain'; at: number };
@@ -423,8 +424,9 @@ export default async function plugin(bb: BbPluginApi) {
     const contextBlock = snapshot.rulesSync ? 'Сначала синхронизируйте правила выбранного change.'
       : sessionBriefBlocked(snapshot) ? 'Сначала восстановите SessionBrief выбранного change.' : null;
     const specialChip = (id: string) => id === IMPROVE_APPROVAL || id === GATE_EVIDENCE_COMMAND || id === SESSION_BRIEF_COMMAND;
+    const skillInstalled = (id: string) => snapshot.skills.includes(id) || (PLUGIN_SKILLS as readonly string[]).includes(id);
     const offered = ids.filter(id => !hidden.includes(id));
-    const items: Suggestions['items'] = offered.filter(id => specialChip(id) || snapshot.skills.includes(id) || id === 'aif-chat' || id === reply.next).map(id => id === IMPROVE_APPROVAL && proposal ? {
+    const items: Suggestions['items'] = offered.filter(id => specialChip(id) || skillInstalled(id) || id === reply.next).map(id => id === IMPROVE_APPROVAL && proposal ? {
       id, label: 'Применить всё', kind: 'improve-approval' as const, command: proposal.command,
       available: !reply.error && !reply.gate?.blocking && snapshot.skills.includes('aif-improve')
         && snapshot.pendingQuestions === 0 && snapshot.pendingConfirmation === true && !!approvalThread
@@ -444,8 +446,8 @@ export default async function plugin(bb: BbPluginApi) {
       reason: 'Пересобрать контекст только выбранного change; команда объявлена установленным расширением',
       probability: null,
     } : ({ id, command: withTopic(`${prefix}${reply.commands.get(id) ?? id}`, id, reply.next === id ? reply.gate?.suggested_next?.reason : null),
-      available: !reply.error && !blockedByGate(id, reply.gate, reply.warning) && !(id === 'aif-implement' && contextBlock) && !(id === 'aif-commit' && commitNavigationDeferred(snapshot)) && !unchangedCheck(snapshot, id, reply.commands.get(id)) && snapshot.profile !== 'invalid' && (snapshot.skills.includes(id) || id === 'aif-chat'),
-      reason: reply.error ?? (id === 'aif-implement' && contextBlock ? contextBlock : blockedByGate(id, reply.gate, reply.warning) ? blockedReason! : id === 'aif-commit' && commitNavigationDeferred(snapshot) ? 'Коммиты привязаны к плану; продолжите aif-implement до разрешённого commit-boundary.' : unchangedCheck(snapshot, id, reply.commands.get(id)) ? unchangedReason : snapshot.profile === 'invalid' ? 'Проверьте конфигурацию проекта.' : !(snapshot.skills.includes(id) || id === 'aif-chat') ? `Команда ${id} не установлена для ${snapshot.runtime}. Добавьте этот skill в установку AI Factory проекта.` : reply.next === id ? reply.gate?.suggested_next?.reason ?? 'Следующий шаг из gate' : 'Команда из последнего ответа агента'),
+      available: !reply.error && !blockedByGate(id, reply.gate, reply.warning) && !(id === 'aif-implement' && contextBlock) && !(id === 'aif-commit' && commitNavigationDeferred(snapshot)) && !unchangedCheck(snapshot, id, reply.commands.get(id)) && snapshot.profile !== 'invalid' && skillInstalled(id),
+      reason: reply.error ?? (id === 'aif-implement' && contextBlock ? contextBlock : blockedByGate(id, reply.gate, reply.warning) ? blockedReason! : id === 'aif-commit' && commitNavigationDeferred(snapshot) ? 'Коммиты привязаны к плану; продолжите aif-implement до разрешённого commit-boundary.' : unchangedCheck(snapshot, id, reply.commands.get(id)) ? unchangedReason : snapshot.profile === 'invalid' ? 'Проверьте конфигурацию проекта.' : !skillInstalled(id) ? `Команда ${id} не установлена для ${snapshot.runtime}. Добавьте этот skill в установку AI Factory проекта.` : reply.next === id ? reply.gate?.suggested_next?.reason ?? 'Следующий шаг из gate' : 'Команда из последнего ответа агента'),
       probability: null,
     }));
     if (offered.length > items.length) bb.log.debug(`aif-chat: suggestions threadId=${threadId} shown=${items.length} hiddenUnknown=${offered.length - items.length}`);
@@ -987,7 +989,7 @@ export default async function plugin(bb: BbPluginApi) {
     let modeOn = false;
     try { modeOn = getMode(ctx.project.id); } catch (error) { bb.log.warn(`aif-chat: aif-mode read failed projectId=${ctx.project.id}: ${error instanceof Error ? error.message : String(error)}`); }
     const mode = shouldContribute({ enabled, modeOn, parentThreadId: ctx.thread.parentThreadId }) ? '\n\n' + aifModeInstructions() : '';
-    return { tools: ["aif_chat_status"], skills: ["aif-chat"], instructions: 'For AI Factory/AIFHub work, use aif_chat_status at workflow boundaries or explicit status requests and emit its previewDirective exactly once on its own line. The directive renders real workflow buttons and read-only plan/check progress. Do not wrap it in code. Report the phase actually reached, preserve exact owner handoffs and gate blocks. Never add a directive after a required final aif-gate-result or proposed_plan, or inside an exact-handoff-only response. Native Plan responses must end with the plan block; the persistent panel discovers the proposal without extra markup. Do not call for unrelated tasks or repeat unchanged cards. When asking the user to confirm scope or answer a clarification, wait for their answer without adding a workflow card. If awaitingUser is true or previewDirective is empty, emit no directive. Existing authorization persists; do not invent approval questions. Buttons are optional navigation, not required questions. No workflow action runs until the user clicks or has already authorized it. Plugin phase is a declaration; file reports are not proof of current PASS.' + mode };
+    return { tools: ["aif_chat_status"], skills: [...PLUGIN_SKILLS], instructions: 'For AI Factory/AIFHub work, use aif_chat_status at workflow boundaries or explicit status requests and emit its previewDirective exactly once on its own line. The directive renders real workflow buttons and read-only plan/check progress. Do not wrap it in code. Report the phase actually reached, preserve exact owner handoffs and gate blocks. Never add a directive after a required final aif-gate-result or proposed_plan, or inside an exact-handoff-only response. Native Plan responses must end with the plan block; the persistent panel discovers the proposal without extra markup. Do not call for unrelated tasks or repeat unchanged cards. When asking the user to confirm scope or answer a clarification, wait for their answer without adding a workflow card. If awaitingUser is true or previewDirective is empty, emit no directive. Existing authorization persists; do not invent approval questions. Buttons are optional navigation, not required questions. No workflow action runs until the user clicks or has already authorized it. Plugin phase is a declaration; file reports are not proof of current PASS.' + mode };
   });
   bb.ui.registerMentionProvider({
     id: AIF_MENTION.provider,
@@ -1054,15 +1056,16 @@ export default async function plugin(bb: BbPluginApi) {
     commands: [...['status', 'show', 'save-plan', 'mark-verified', 'check-updates', 'reset', 'reset-dispatch'].map(name => ({ name, summary: name === 'show' ? 'Show a live chat card' : name, usage: `bb plugin run aif-chat ${name} [--thread <id>] [--target <path>] [--phase <phase>] [--json]` })),
       { name: 'spawn-worker', summary: 'Start a parallel worker on its own copy of the project', usage: 'bb plugin run aif-chat spawn-worker --target <plan> --task <id> --brief <file> [--json]' },
       { name: 'bring-back', summary: 'Apply a parallel worker\'s changes to this workspace', usage: 'bb plugin run aif-chat bring-back --worker <thread id> [--json]' },
-      { name: 'wait-worker', summary: 'Wait up to 90 s for a worker of this chat, with no gap between calls', usage: 'bb plugin run aif-chat wait-worker --worker <thread id> [--after <seq>] [--json]' }],
+      { name: 'wait-worker', summary: 'Wait up to 90 s for a worker of this chat, with no gap between calls', usage: 'bb plugin run aif-chat wait-worker --worker <thread id> [--after <seq>] [--json]' },
+      { name: 'scout-check', summary: 'Check /aif-scout finding cards and report', usage: 'bb plugin run aif-chat scout-check --dir <.ai-factory/research/<slug>/scout> [--json]' }],
     async run(argv, ctx) {
       try {
         const [command = 'help', ...args] = argv;
-        if (command === 'help' || command === '--help') return { exitCode: 0, stdout: 'bb plugin run aif-chat status|show|save-plan|mark-verified|check-updates|reset|reset-dispatch|spawn-worker|bring-back|wait-worker [--thread ID] [--target PATH] [--phase explore|plan|improve|implement|verify|fix|done] [--json]' };
+        if (command === 'help' || command === '--help') return { exitCode: 0, stdout: 'bb plugin run aif-chat status|show|save-plan|mark-verified|check-updates|reset|reset-dispatch|spawn-worker|bring-back|wait-worker|scout-check [--thread ID] [--target PATH] [--dir PATH] [--phase explore|plan|improve|implement|verify|fix|done] [--json]' };
         const options: Record<string, string> = {}; let json = false;
         for (let i = 0; i < args.length; i++) {
           if (args[i] === '--json') { json = true; continue; }
-          if (!['--thread', '--target', '--phase', '--max', '--group', '--token', '--task', '--brief', '--worker', '--after'].includes(args[i]) || !args[i + 1] || args[i + 1].startsWith('--')) throw new Error('Неизвестный аргумент или отсутствует значение.');
+          if (!['--thread', '--target', '--phase', '--max', '--group', '--token', '--task', '--brief', '--worker', '--after', '--dir'].includes(args[i]) || !args[i + 1] || args[i + 1].startsWith('--')) throw new Error('Неизвестный аргумент или отсутствует значение.');
           if (args[i] in options) throw new Error('Повторяющийся аргумент.');
           const name = args[i]; options[name] = args[++i];
         }
@@ -1122,6 +1125,14 @@ export default async function plugin(bb: BbPluginApi) {
         if (command === 'spawn-worker' || command === 'bring-back') {
           const result = await parallelCommand(command, input.threadId, input.target, options);
           return { exitCode: result.ok ? 0 : 1, stdout: json ? JSON.stringify(result.data) : result.text };
+        }
+        if (command === 'scout-check') {
+          const dir = options['--dir'];
+          if (!dir) throw new Error('Укажите папку разведки через --dir.');
+          const { environment } = await context(input.threadId);
+          const corpus = await host.call('scoutCorpus', { root: environment.path!, dir }, { hostId: environment.hostId });
+          const result = checkScout(corpus);
+          return { exitCode: result.verdict === 'NOT_READY' ? 1 : 0, stdout: json ? JSON.stringify(result) : formatScoutCheck(result) };
         }
         if (!['status', 'show', 'check-updates'].includes(command)) throw new Error('Неизвестная команда.');
         if (command === 'show') {

@@ -17,7 +17,7 @@ async function setup() {
     env_test: { id: 'env_test', projectId: 'proj_test', path: ROOT, hostId: 'host_win', status: 'ready', lifecycle: { phase: 'active' } },
     env_worker: { id: 'env_worker', projectId: 'proj_test', path: 'C:\\Users\\Dev User\\.bb-aif-helper\\worktrees\\r-1\\demo-2-x', hostId: 'host_win', environmentProviderId: 'aif-chat-worktree', status: 'ready', lifecycle: { phase: 'active' } },
   };
-  const h = createFakePluginHost({ pluginId: 'aif-chat', agentSkillIds: ['aif-chat'], experimental_hostEntry: true,
+  const h = createFakePluginHost({ pluginId: 'aif-chat', agentSkillIds: ['aif-chat', 'aif-scout'], experimental_hostEntry: true,
     sdk: {
       threads: { get: async ({ threadId }: any) => threads[threadId], list: async () => [], spawn: async (args: any) => { spawns.push(args); return { ...threads.thr_test, id: 'thr_new' }; },
         // thr_worker finished one turn: started at seq 1, completed at seq 2.

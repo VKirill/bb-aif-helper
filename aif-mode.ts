@@ -1,4 +1,11 @@
+import { TOPIC_COMMANDS } from './suggestions.ts';
+
 export const AIF_MENTION = { provider: 'aif-mode', id: 'aif-mode', label: 'AI Factory' } as const;
+
+function formatTopicCommands(): string {
+  const names = [...TOPIC_COMMANDS].map(id => `\`/${id}\``);
+  return names.length > 1 ? `${names.slice(0, -1).join(', ')} or ${names.at(-1)}` : names[0] ?? '';
+}
 
 export function aifModeInstructions(): string {
   return [
@@ -8,7 +15,7 @@ export function aifModeInstructions(): string {
     'Drive work with `/aif-plan` → `/aif-implement` → `/aif-verify` → `/aif-commit`; fix bugs with `/aif-fix`.',
     'Follow the rules in `.ai-factory/skill-context/`.',
     'Call `aif_chat_status` at workflow boundaries.',
-    'When the next step is `/aif-fix`, `/aif-plan` or `/aif-explore`, write it with its topic (`/aif-fix <what to fix>`), so the chip can send it at once.',
+    `When the next step is ${formatTopicCommands()}, write it with its topic (\`/aif-fix <what to fix>\`), so the chip can send it at once.`,
     'This is the default path; a direct owner request to do otherwise wins.',
   ].join('\n');
 }

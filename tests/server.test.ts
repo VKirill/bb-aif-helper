@@ -29,7 +29,7 @@ async function setup() {
   const hostInputs: any[] = [];
   const hostCalls: { method: string; input: unknown; hostId: string }[] = [];
   let thread = makeThreadResponse({ id: 'thr_test', projectId: 'proj_test', environmentId: 'env_test', status: 'idle', runtime: { displayStatus: 'idle' } });
-  const h = createFakePluginHost({ pluginId: 'aif-chat', agentSkillIds: ['aif-chat'], experimental_hostEntry: true,
+  const h = createFakePluginHost({ pluginId: 'aif-chat', agentSkillIds: ['aif-chat', 'aif-scout'], experimental_hostEntry: true,
     sdk: {
       providers: { list: async () => [{ id: thread.providerId, composerActions: planSupported
         ? [{ kind: 'plan', command: { trigger: '/', name: 'plan', trailingText: ' ' } }] : [] }] as any },
@@ -1323,6 +1323,21 @@ test('uninstalled reply commands are hidden while a gate next step stays visible
     assert.equal(gated.items[0].id, 'aif-rules');
     assert.equal(gated.items[0].available, false);
     await assert.rejects(h.harness.behavior.callRpc('runSuggestion', suggestionInput(gated, 'aif-rules')));
+    assert.equal(h.sends, 0);
+  } finally { await h.harness.lifecycle.dispose(); }
+});
+test('plugin-shipped /aif-scout <topic> yields an available chip without being in snapshot.skills', async () => {
+  const h = await setup(); try {
+    assert(!h.value.skills.includes('aif-scout'));
+    h.setOutput('Следующий шаг: /aif-scout ограничения stdio.');
+    const view = await h.harness.behavior.callRpc('suggestions', { threadId: 'thr_test' }) as any;
+    const item = view.items.find((i: any) => i.id === 'aif-scout');
+    assert(item, 'aif-scout chip offered');
+    assert.equal(item.available, true);
+    assert.equal(item.command, '$aif-scout ограничения stdio');
+    const result = await h.harness.behavior.callRpc('runSuggestion', suggestionInput(view, 'aif-scout')) as any;
+    assert.equal(result.sent, false);
+    assert.equal(result.command, '$aif-scout ограничения stdio');
     assert.equal(h.sends, 0);
   } finally { await h.harness.lifecycle.dispose(); }
 });

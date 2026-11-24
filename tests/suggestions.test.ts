@@ -121,7 +121,7 @@ test('gate JSON cannot supply prose arguments and an exact gate recommendation r
 });
 
 test('chipDraft keeps a topic command in an empty draft without submitting', () => {
-  for (const id of ['aif-explore', 'aif-plan', 'aif-fix']) {
+  for (const id of ['aif-explore', 'aif-plan', 'aif-fix', 'aif-scout']) {
     assert.deepEqual(chipDraft({ text: '', mentions: [] }, `/${id}`, id), { text: `/${id} `, mentions: [], submit: false });
   }
 });
@@ -214,6 +214,8 @@ test('next-step chips: available next actions of installed skills, one per skill
   const skills = ['aif-commit', 'aif-verify', 'aif-plan', 'aif-implement', 'aif-qa', 'aif-fix'];
   assert.deepEqual(nextStepItems(actions as any, { skills, invalid: false, prefix: '$', hidden: ['aif-qa'] }).map(i => i.command),
     ['$aif-commit', '$aif-implement @.ai-factory/plans/x.md', '$aif-fix']);
+  assert.deepEqual(nextStepItems([a('scout', '/aif-scout')] as any, { skills: [], invalid: false, prefix: '/', hidden: [] }).map(i => i.command),
+    ['/aif-scout']);
   assert.deepEqual(nextStepItems(actions as any, { skills, invalid: true, prefix: '/', hidden: [] }), []);
 });
 
