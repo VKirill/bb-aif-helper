@@ -1341,6 +1341,16 @@ test('plugin-shipped /aif-scout <topic> yields an available chip without being i
     assert.equal(h.sends, 0);
   } finally { await h.harness.lifecycle.dispose(); }
 });
+test('a broken project AI Factory config keeps the plugin-shipped scout chip available', async () => {
+  const h = await setup(); try {
+    h.value = { ...h.value, profile: 'invalid', skills: [] };
+    h.setOutput('Следующий шаг: /aif-scout "Node.js compatibility on Windows"');
+    const view = await h.harness.behavior.callRpc('suggestions', { threadId: 'thr_test' }) as any;
+    const item = view.items.find((i: any) => i.id === 'aif-scout');
+    assert(item, 'aif-scout chip offered');
+    assert.equal(item.available, true, item.reason);
+  } finally { await h.harness.lifecycle.dispose(); }
+});
 test('a blocking last-answer gate also stops advancing from a workflow card without blocking re-verification', async () => {
   const h = await setup(); try {
     h.value = { ...h.value, target: { ...h.value.target!, tasks: h.value.target!.tasks.map(t => ({ ...t, done: true })) } };

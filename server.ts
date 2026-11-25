@@ -423,7 +423,9 @@ export default async function plugin(bb: BbPluginApi) {
     const contextBlock = snapshot.rulesSync ? 'Сначала синхронизируйте правила выбранного change.'
       : sessionBriefBlocked(snapshot) ? 'Сначала восстановите SessionBrief выбранного change.' : null;
     const specialChip = (id: string) => id === IMPROVE_APPROVAL || id === GATE_EVIDENCE_COMMAND || id === SESSION_BRIEF_COMMAND;
-    const skillInstalled = (id: string) => snapshot.skills.includes(id) || (PLUGIN_SKILLS as readonly string[]).includes(id);
+    // Plugin skills ship with the plugin, so a broken project AI Factory config does not turn them off.
+    const pluginSkill = (id: string) => (PLUGIN_SKILLS as readonly string[]).includes(id);
+    const skillInstalled = (id: string) => snapshot.skills.includes(id) || pluginSkill(id);
     const offered = ids.filter(id => !hidden.includes(id));
     const items: Suggestions['items'] = offered.filter(id => specialChip(id) || skillInstalled(id) || id === reply.next).map(id => id === IMPROVE_APPROVAL && proposal ? {
       id, label: 'Применить всё', kind: 'improve-approval' as const, command: proposal.command,
@@ -445,8 +447,8 @@ export default async function plugin(bb: BbPluginApi) {
       reason: 'Пересобрать контекст только выбранного change; команда объявлена установленным расширением',
       probability: null,
     } : ({ id, command: withTopic(`${prefix}${reply.commands.get(id) ?? id}`, id, reply.next === id ? reply.gate?.suggested_next?.reason : null),
-      available: !reply.error && !blockedByGate(id, reply.gate, reply.warning) && !(id === 'aif-implement' && contextBlock) && !(id === 'aif-commit' && commitNavigationDeferred(snapshot)) && !unchangedCheck(snapshot, id, reply.commands.get(id)) && snapshot.profile !== 'invalid' && skillInstalled(id),
-      reason: reply.error ?? (id === 'aif-implement' && contextBlock ? contextBlock : blockedByGate(id, reply.gate, reply.warning) ? blockedReason! : id === 'aif-commit' && commitNavigationDeferred(snapshot) ? 'Коммиты привязаны к плану; продолжите aif-implement до разрешённого commit-boundary.' : unchangedCheck(snapshot, id, reply.commands.get(id)) ? unchangedReason : snapshot.profile === 'invalid' ? 'Проверьте конфигурацию проекта.' : !skillInstalled(id) ? `Команда ${id} не установлена для ${snapshot.runtime}. Добавьте этот skill в установку AI Factory проекта.` : reply.next === id ? reply.gate?.suggested_next?.reason ?? 'Следующий шаг из gate' : 'Команда из последнего ответа агента'),
+      available: !reply.error && !blockedByGate(id, reply.gate, reply.warning) && !(id === 'aif-implement' && contextBlock) && !(id === 'aif-commit' && commitNavigationDeferred(snapshot)) && !unchangedCheck(snapshot, id, reply.commands.get(id)) && (snapshot.profile !== 'invalid' || pluginSkill(id)) && skillInstalled(id),
+      reason: reply.error ?? (id === 'aif-implement' && contextBlock ? contextBlock : blockedByGate(id, reply.gate, reply.warning) ? blockedReason! : id === 'aif-commit' && commitNavigationDeferred(snapshot) ? 'Коммиты привязаны к плану; продолжите aif-implement до разрешённого commit-boundary.' : unchangedCheck(snapshot, id, reply.commands.get(id)) ? unchangedReason : snapshot.profile === 'invalid' && !pluginSkill(id) ? 'Проверьте конфигурацию проекта.' : !skillInstalled(id) ? `Команда ${id} не установлена для ${snapshot.runtime}. Добавьте этот skill в установку AI Factory проекта.` : reply.next === id ? reply.gate?.suggested_next?.reason ?? 'Следующий шаг из gate' : 'Команда из последнего ответа агента'),
       probability: null,
     }));
     if (offered.length > items.length) bb.log.debug(`aif-chat: suggestions threadId=${threadId} shown=${items.length} hiddenUnknown=${offered.length - items.length}`);
