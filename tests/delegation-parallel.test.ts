@@ -213,3 +213,19 @@ test('the refresh keeps CRLF files CRLF, updates the research block, and never f
     } finally { await chmod(join(root, '.ai-factory/skill-context'), 0o755); }
   }
 });
+
+test('plan tasks go only to BB workers, survive a compaction, and the full suite runs once per layer', () => {
+  // thr_ds3i5seh7r: after a compaction the coordinator thought copies miss uncommitted work, built a branch with
+  // commit-tree and ran native Claude subagents in its own worktrees; every worker also ran the full suite.
+  const bb = { mode: 'bb' as const, providerId: 'codex', model: 'gpt-6.2-sol', reasoning: 'high' };
+  for (const [name, text] of [['one worker', contextBlock(bb)], ['parallel', contextBlock({ ...bb, parallel: 3 })]] as const) {
+    const rules = text.slice(0, text.indexOf('1. Write the task brief'));
+    for (const part of ['never your own subagents', '`implement-worker`', 'your own git worktrees', '`commit-tree`', 'Re-read this block before each task']) assert.ok(rules.includes(part), `${name}: ${part}`);
+    assert.ok(text.includes('Do not run the full test suite'), `${name}: worker runs narrow checks`);
+  }
+  const parallel = contextBlock({ ...bb, parallel: 3 });
+  const head = parallel.slice(parallel.indexOf('## Parallel mode'), parallel.indexOf('### Layers'));
+  assert.ok(head.includes('already holds all your uncommitted work'), 'the copy fact leads the parallel section');
+  assert.ok(head.includes('Re-read this section before each layer'));
+  assert.ok(parallel.includes('the full test suite once for the whole layer'));
+});

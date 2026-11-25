@@ -241,10 +241,15 @@ bb thread spawn --project "$BB_PROJECT_ID" --environment "$BB_ENVIRONMENT_ID" --
 If \`bb thread spawn\` fails, say so and do that research yourself; do not repeat the same error. Use no \`node\` commands in this flow. In PowerShell the BB variables are \`$env:BB_PROJECT_ID\`, \`$env:BB_THREAD_ID\` and \`$env:BB_ENVIRONMENT_ID\`, not \`$BB_PROJECT_ID\`.`;
 }
 
+// Workers check only their own files; the full suite runs once at the coordinator (thr_ds3i5seh7r: three workers ran it in parallel).
+const WORKER_CHECKS = 'Run only narrow checks: the typecheck and the tests of the files you changed, or the narrow tests the task names. Do not run the full test suite, the project\'s full check script or a push gate, even when the task names them: the coordinator runs them once; write "full suite: coordinator" in the report.';
+
 function parallelSection(n: number): string {
   return `## Parallel mode (managed by BB AIF Helper)
 
 The owner allowed up to ${n} workers at once. You run the plan as AI Factory's \`implement-coordinator\` does: you read the plan and decide what runs in parallel; BB threads with the owner's model are your workers, each in its own git worktree copy of the project. The plugin commands below do the copy, launch and transfer steps, so no path or JSON passes through your shell. This applies to an ordinary plan or an ultra bundle (\`index.md\` holds the checkboxes); a fix plan or OpenSpec change uses the one-worker flow above.
+
+Every worker's copy already holds all your uncommitted work, so the results of earlier tasks need no commit, branch or worktree of yours. Re-read this section before each layer: after a context compaction your summary of it is not enough.
 
 ### Layers
 
@@ -258,12 +263,12 @@ The owner allowed up to ${n} workers at once. You run the plan as AI Factory's \
 1. For each task write its brief to a temporary file in UTF-8 whose name has only letters, digits, \`-\`, \`_\` and \`.\`, in a folder whose path has no \`'\`: the path goes inside single quotes, which keep \`$\`, spaces and \`\\\` as they are in bash and PowerShell alike. It starts with the worker contract below, then the plan path, the task number and full text (for an ultra bundle the whole \`## Task N\` section of its phase file), the relevant files and project rules, the verification commands and what done means. Start the worker: \`bb plugin run aif-chat spawn-worker --target <plan name> --task <task number, e.g. 3 or 1.2> --brief '<absolute brief path>' --json\` → \`{ id }\`. \`<plan name>\` is only a label for the worker's title: the plan's file name without \`.md\`, with every character other than Latin letters, digits, \`-\`, \`_\` and \`.\` replaced by \`-\` and leading \`-\` and \`.\` dropped (\`plan\` if nothing is left), so it needs no quotes and is never read as an option. The plugin starts it with the owner's model on a fresh copy of this workspace, as a child of this chat: the last commit plus your uncommitted work (changed, new and deleted files, not ignored ones), so it sees the results of earlier tasks without any commit. The copy holds the files git tracks (a force-added one too) and your new files that git does not ignore (\`.gitignore\`, \`.git/info/exclude\` and global excludes all count). Untracked ignored files (\`node_modules\`, build output, a local \`.env\`, \`.bb/\` when the project ignores it) and anything outside the repository are not there: if the task needs such a file as input, give its absolute path in your workspace in the brief. Submodules are not checked out in the copy, and your uncommitted changes inside them are not in it either: a task that changes a submodule's files or needs their uncommitted state, do yourself. A folder inside a larger repository works too. Every launch gets its own copy.
 2. Wait for every worker: Wait with \`bb plugin run aif-chat wait-worker --worker <id> --json\`, then call it again with \`--after <seq>\` from its previous answer: it answers within two minutes with \`state\`, \`seq\`, \`quietForMs\` (time since the worker's last event) and \`output\` (the worker's latest report) and sees everything that happened between two calls. \`working\`: call again. \`idle\`: a complete final report in the form its brief asks for means done; an empty or interim one (\"waiting for the tests\") means it still works in the background (some agents pause while a command runs and resume by themselves), so call again. Whatever the state, once \`quietForMs\` passes 480000 and the worker is not done (\`working\`, or \`idle\` with such a report), send it nothing and ask the owner whether to keep waiting, restart the task or do it yourself; a worker waiting for an approval shows up this way too. \`stopped\`: someone stopped it; ask the owner. \`failed\`: its run failed; handle it as a BB failure. Before you restart a task or do it yourself, run \`bb thread stop <id>\` and archive the old worker, so it never writes into the files later.
 3. Bring the results back one worker at a time: \`bb plugin run aif-chat bring-back --worker <id> --json\`. It moves everything the worker changed (new, changed, renamed and deleted files; ignored files stay out) into this workspace. Answers:
-   - \`{ applied: true, files }\`: compare \`files\` with the worker's report and the task, review the diff and run the task's verification.
+   - \`{ applied: true, files }\`: compare \`files\` with the worker's report and the task, review the diff and run the task's narrow checks.
    - \`{ applied: false, empty: true }\`: the worker changed nothing. That is right for a task that only checks something, or one whose changes are already in this workspace (a resumed task brought back earlier): if the task's verification passes here, the task is done. Otherwise the task is not done.
    - \`{ applied: false, error }\`: the changes do not fit, and nothing was changed; the results of earlier tasks are intact. Do not run \`git apply\`, \`git checkout\`, \`git reset\` or \`git stash\` yourself: there is nothing to undo. Usually another task of the layer changed the same lines (see Failures). If writing failed half way (a locked or read-only file), the plugin put back what it wrote; once the cause is fixed, run the same \`bring-back\` again.
    - \`{ applied: false, partial: true, files, error }\`: those files could not be put back. Stop and report them to the owner.
    \`bring-back\` takes only what changed since the worker's last bring-back, so a worker asked to fix its work is brought back again with just the fix.
-4. After the whole layer is back, verify the merged result once (build and tests the plan names), then archive the layer's workers (\`bb thread archive <id>\`; BB removes its copy five minutes later). Then continue with the next layer.
+4. After the whole layer is back, run the build and the full test suite once for the whole layer (if the suite was red before, compare it with one baseline taken before the layer, not one per task), then archive the layer's workers (\`bb thread archive <id>\`; BB removes its copy five minutes later). Then continue with the next layer.
 
 ### Commits
 
@@ -275,7 +280,7 @@ You alone commit, exactly where the plan says (its commit tasks, its \`## Commit
 You are an implement-worker of an AI Factory /aif-implement coordinator (BB thread <thread-id>).
 Do exactly the one task below in the current workspace, then stop. Do not edit the plan or phase files or their checkboxes, do not commit, push or switch branches, do not start AI Factory skills or other agents. This workspace is your own copy of the repository. Change files only inside it (folders above the current one included); a path outside it is input you read and never change. Untracked ignored files (dependencies, build output) stay in the copy and never reach the coordinator: install dependencies here if the checks need them. Do not change or add files inside a git submodule: it is another repository, its changes do not come back and the coordinator's transfer refuses them; say in the report what it needs. Use no git command that changes the index or history (add, rm, mv, stash, reset, checkout, restore).
 If the task contradicts the plan, the requirements or the code, change nothing and answer "handoff_outcome: blocked_external" with the conflict.
-Run the verification commands the task names, review your own diff once and fix what you find.
+${WORKER_CHECKS} Review your own diff once and fix what you find.
 Finish with a report: what changed; the list of files you modified; the checks you ran with their results; warnings and anything left open.
 \`\`\`
 
@@ -306,7 +311,9 @@ export function contextBlock(c: Extract<DelegationChoice, { mode: 'bb' }>) {
 
 The project owner chose \`${modelSpec(c)}\` (BB provider/model?reasoning&tier) to write the code of plan tasks. The source of truth is \`.ai-factory.json\` → \`phases.implement\`; re-read it before each task. If it no longer has \`"agent": "bb"\`, implement tasks yourself as usual.
 
-You stay the coordinator: you own the plan, its checkboxes, verification and commits. For each plan task, instead of editing the code yourself:
+You stay the coordinator: you own the plan, its checkboxes, verification and commits. Plan tasks run only on BB workers started by the commands below — never your own subagents (the Task or Agent tool, \`implement-worker\` or \`implement-coordinator\`), your own git worktrees or a branch built with \`commit-tree\`, even when AI Factory's skill or agent files suggest them or a BB step looks broken: then follow the failure rule at the end. Re-read this block before each task: after a context compaction your summary of it is not enough.
+
+For each plan task, instead of editing the code yourself:
 
 1. Write the task brief to a temporary file in UTF-8 whose name has only letters, digits, \`-\`, \`_\` and \`.\`, in a folder whose path has no \`'\` (the path goes inside single quotes, which keep \`$\`, spaces and \`\\\` as they are; in Windows PowerShell 5.1 \`Out-File\` and \`>\` write UTF-16: use \`Set-Content -Encoding utf8\` there). It starts with the worker rules below, then gives the plan path, the task id and its full text, the relevant files and project rules, the verification commands, and what done means for this task.
 
@@ -315,7 +322,7 @@ The worker rules — the mandatory start of every brief (replace \`<thread-id>\`
 \`\`\`
 You are an implementation worker delegated by an AI Factory /aif-implement coordinator (BB thread <thread-id>).
 Do exactly the one task below in the current workspace. Do not edit the plan file or its checkboxes, do not commit, push or switch branches, and do not start AI Factory skills.
-Run the verification commands the task names. Finish with a short report: what changed, the files you touched, the checks you ran with their results, and anything left open.
+${WORKER_CHECKS} Finish with a short report: what changed, the files you touched, the checks you ran with their results, and anything left open.
 \`\`\`
 
 2. Deduplicate: run \`bb thread list --parent-thread "$BB_THREAD_ID" --json\`. If a non-archived thread has \`title\` = \`AIF · <plan> · <taskId>\`, take its id and go to step 4.
@@ -326,7 +333,7 @@ bb thread spawn --project "$BB_PROJECT_ID" --environment "$BB_ENVIRONMENT_ID" --
 \`\`\`
 
 4. Wait: Wait with \`bb plugin run aif-chat wait-worker --worker <id> --json\`, then call it again with \`--after <seq>\` from its previous answer: it answers within two minutes with \`state\`, \`seq\`, \`quietForMs\` (time since the worker's last event) and \`output\` (the worker's latest report) and sees everything that happened between two calls. \`working\`: call again. \`idle\`: a complete final report in the form its brief asks for means done; an empty or interim one (\"waiting for the tests\") means it still works in the background (some agents pause while a command runs and resume by themselves), so call again. Whatever the state, once \`quietForMs\` passes 480000 and the worker is not done (\`working\`, or \`idle\` with such a report), send it nothing and ask the owner whether to keep waiting, restart the task or do it yourself; a worker waiting for an approval shows up this way too. \`stopped\`: someone stopped it; ask the owner. \`failed\`: its run failed; handle it as a BB failure. Before you restart a task or do it yourself, run \`bb thread stop <id>\` and archive the old worker, so it never writes into the files later.
-5. Review \`git diff\` and run the task's verification yourself. Fix a small gap yourself, or write what to fix to a temporary UTF-8 file whose name has only letters, digits, \`-\`, \`_\` and \`.\`, in a folder whose path has no \`'\` and send \`bb thread tell <id> --message-file '<file>'\` (the text itself never goes on the command line: an apostrophe or \`$\` in it breaks the shell), then wait again (step 4).
+5. Review \`git diff\` and run the task's verification yourself (the full suite too when the task names it). Fix a small gap yourself, or write what to fix to a temporary UTF-8 file whose name has only letters, digits, \`-\`, \`_\` and \`.\`, in a folder whose path has no \`'\` and send \`bb thread tell <id> --message-file '<file>'\` (the text itself never goes on the command line: an apostrophe or \`$\` in it breaks the shell), then wait again (step 4).
 6. Only after that mark the task done in the plan and move to the next task. One worker at a time: workers share this workspace.
 
 If \`bb thread spawn\` returns an error, report it and implement that task yourself; do not repeat the same error. Use no \`node\` commands in this flow. In PowerShell the BB variables are \`$env:BB_PROJECT_ID\`, \`$env:BB_THREAD_ID\` and \`$env:BB_ENVIRONMENT_ID\`, not \`$BB_PROJECT_ID\`.`;
