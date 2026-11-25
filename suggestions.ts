@@ -6,7 +6,8 @@ import { gateEvidenceCommands } from './gate-evidence-command.ts';
 import { confirmationProse } from './confirmation.ts';
 import { PLUGIN_SKILLS, type Action, type Suggestions } from './model.ts';
 
-function argumentsAfter(tail: string, code: boolean): string | null {
+// `consumed.end` is how far into `tail` the arguments reach, quoted parts included.
+function argumentsAfter(tail: string, code: boolean, consumed?: { end: number }): string | null {
   const tokens: string[] = [];
   let offset = 0;
   while (/^[ \t]/.test(tail.slice(offset, offset + 1))) {
@@ -19,7 +20,8 @@ function argumentsAfter(tail: string, code: boolean): string | null {
       if (/[\r\n]/.test(char)) { if (quote) return null; break; }
       if (/[\x00-\x08\x0b-\x1f]/.test(char) || offset > 4000) return null;
       if (quote) {
-        if (char === '\\' && tail[offset + 1] === quote) { offset += 2; continue; }
+        // \" escapes a quote, except a path ending in \ right before the span ends ("C:\\demo\\").
+        if (char === '\\' && tail[offset + 1] === quote && !/^$|^[`\r\n]/.test(tail.slice(offset + 2, offset + 3))) { offset += 2; continue; }
         if (char === quote) quote = '';
       } else {
         if (char === '"' || char === "'") quote = char;
@@ -34,6 +36,7 @@ function argumentsAfter(tail: string, code: boolean): string | null {
     tokens.push(token);
     if (offset === start || tail.slice(start, offset) !== token) break;
   }
+  if (consumed) consumed.end = offset;
   return tokens.length ? ' ' + tokens.join(' ') : '';
 }
 
@@ -83,15 +86,20 @@ export function extractAifInvocations(text: string): { id: string; command: stri
   const result: { id: string; command: string }[] = [];
   const bounded = text.slice(0, 1024 * 1024);
   const matches = [...bounded.matchAll(/(?<![\w$\\/.-])[/$](aif(?:-[a-z0-9]+)*)(?![\w/-])/g)].map(match => ({
-    name: match[1], tail: bounded.slice(match.index! + match[0].length), index: match.index!, code: bounded[match.index! - 1] === '`',
+    name: match[1], tail: bounded.slice(match.index! + match[0].length), start: match.index! + match[0].length as number | null, index: match.index!, code: bounded[match.index! - 1] === '`',
   }));
   const bare = readCodeItems(bounded, (body, index) => {
     const match = body.match(/^[ \t]*(aif(?:-[a-z0-9]+)*)(?=$|[ \t])/);
-    return match ? { name: match[1], tail: body.slice(match[0].length), index, code: true } : null;
+    return match ? { name: match[1], tail: body.slice(match[0].length), start: null, index, code: true } : null;
   });
-  for (const { name, tail, code } of matches.concat(bare).sort((a, b) => a.index - b.index)) {
-    const args = argumentsAfter(tail, code);
+  // A /aif-… inside an earlier command's quoted argument is part of that argument, not a command.
+  let coveredUntil = -1;
+  for (const { name, tail, start, index, code } of matches.concat(bare).sort((a, b) => a.index - b.index)) {
+    if (index < coveredUntil) continue;
+    const consumed = { end: 0 };
+    const args = argumentsAfter(tail, code, consumed);
     if (args === null) continue;
+    if (start !== null) coveredUntil = start + consumed.end;
     const command = name + args;
     const existing = result.find(item => item.id === name);
     if (existing && existing.command === name && args) existing.command = command;
