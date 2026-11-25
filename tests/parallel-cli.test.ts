@@ -56,6 +56,8 @@ test('spawn-worker starts the owner model on a fresh copy seeded with the coordi
     assert.match(args.environment.inputs.name, /^demo-2-[0-9a-f]{8}$/);
     assert.deepEqual(args.environment.machine, { type: 'existing', hostId: 'host_win' });
     assert.deepEqual([args.providerId, args.model, args.reasoningLevel, args.serviceTier], ['codex', 'gpt-6.2-sol', 'high', 'fast']);
+    // BB drops a provider or model without a provenance source and falls back to the provider default (Lane Pilot workers ran on Flash).
+    assert.deepEqual(args.executionInputSources, { providerId: 'explicit', model: 'explicit', reasoningLevel: 'explicit', serviceTier: 'explicit' });
     assert.deepEqual([args.parentThreadId, args.lifecycleOwnerThreadId, args.parentNotifications], ['thr_test', 'thr_test', 'off']);
     assert.match(args.prompt, /^Do task 2\.[\s\S]*Do not commit\.$/);
     // A retry gets its own copy name.
