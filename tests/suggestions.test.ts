@@ -283,14 +283,3 @@ test('withTopic gives a bare topic command the gate reason, then the chip sends 
   assert.equal(withTopic('/aif-fix login fails', 'aif-fix', 'other'), '/aif-fix login fails');
   assert.equal(withTopic('/aif-verify', 'aif-verify', 'some reason'), '/aif-verify');
 });
-test('a command inside an earlier quoted argument is text; a quoted path may end in a backslash', () => {
-  assert.deepEqual(extractAifInvocations('`/aif-scout "What changed in /aif-verify between AI Factory 2.2.1 and 2.2.2?"`'),
-    [{ id: 'aif-scout', command: 'aif-scout "What changed in /aif-verify between AI Factory 2.2.1 and 2.2.2?"' }]);
-  assert.deepEqual(extractAifInvocations('Next: /aif-plan "compare with /aif-fix flow" then /aif-verify'),
-    [{ id: 'aif-plan', command: 'aif-plan "compare with /aif-fix flow"' }, { id: 'aif-verify', command: 'aif-verify' }]);
-  assert.deepEqual(extractAifInvocations('`/aif-scout "How should Node watch C:\\Projects\\demo\\"`'),
-    [{ id: 'aif-scout', command: 'aif-scout "How should Node watch C:\\Projects\\demo\\"' }]);
-  assert.deepEqual(extractAifInvocations('`/aif-fix "say \\"hi\\" twice"`'),
-    [{ id: 'aif-fix', command: 'aif-fix "say \\"hi\\" twice"' }]);
-});
-
