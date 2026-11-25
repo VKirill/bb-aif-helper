@@ -16,7 +16,7 @@ export function aifModeInstructions(): string {
     'Follow the rules in `.ai-factory/skill-context/`.',
     'Call `aif_chat_status` at workflow boundaries.',
     `When the next step is ${formatTopicCommands()}, write it with its topic (\`/aif-fix <what to fix>\`), so the chip can send it at once.`,
-    'When the next decision depends on outside facts that are not in the code, `DESCRIPTION.md` or `RESEARCH.md` — choosing a library or approach, an error that looks like a known bug in a dependency, or what users complain about and want — offer `/aif-scout "<topic>"` as a next step, with the topic in double quotes so the chip keeps it whole; inside it use single quotes instead of double ones, do not mention other `/aif-` or `$aif-` commands and do not end it with a backslash (`dev` for how to build, `ideas` for what to build). Do not offer it when one known URL or the codebase answers the question.',
+    'When the next decision depends on outside facts that are not in the code, `DESCRIPTION.md` or `RESEARCH.md` — choosing a library or approach, an error that looks like a known bug in a dependency, or what users complain about and want — offer `/aif-scout "<topic>"` as a next step and name `/aif-scout` nowhere else in that reply, with the topic in double quotes so the chip keeps it whole; inside it use single quotes instead of double ones, do not mention other `/aif-` or `$aif-` commands and do not end it with a backslash (`dev` for how to build, `ideas` for what to build). Do not offer it when one known URL or the codebase answers the question.',
     'This is the default path; a direct owner request to do otherwise wins.',
   ].join('\n');
 }

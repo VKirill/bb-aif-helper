@@ -44,7 +44,7 @@
 
 | Разведчик | Что ищет | Инструмент у нас | Риски |
 |---|---|---|---|
-| Официальный | Доки, changelog, release notes, RFC, миграции | `WebFetch`, `gh release list`, `gh release view`, `npm` registry | Документация отстаёт от кода; SPA-доки без JS |
+| Официальный | Доки, changelog, release notes, RFC, миграции | `WebFetch`, `gh release list -R <owner>/<repo>`, `gh release view <tag> -R <owner>/<repo>` (репозиторий изучаемой зависимости, не текущего проекта), `npm` registry | Документация отстаёт от кода; SPA-доки без JS |
 | Трекер | Issues, PR, discussions: баги, регрессии, обходы | `gh search issues`, `gh api` | Лимит GitHub issues ~30 запр/мин на всех |
 | Сообщество | Stack Overflow, HN, Reddit | Stack Exchange API, HN Algolia API; Reddit — только сниппеты | Reddit напрямую 403 → `SNIPPET_ONLY`, макс. `low` |
 | Готовые решения | Как сделали другие, альтернативные пакеты | `gh search code` (~10/мин), `npm` search | Пример в репо ≠ рабочий прод-паттерн |
