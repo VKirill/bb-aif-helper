@@ -38,7 +38,7 @@ description: Run parallel external web scouts that research a topic from indepen
 
 ## Процесс
 
-0. **Intake.** Зафиксируй 8 полей: `question`, `mode` (`dev` | `ideas`), `depth` (`quick` | `normal` | `deep`), `market/lang`, `as_of` (`YYYY-MM-DD`), `versions/stack` (из `.ai-factory/DESCRIPTION.md`), `known_context`, `constraints`. Если не хватает ключевого для старта — задай **один** уточняющий вопрос.
+0. **Intake.** Зафиксируй 8 полей: `question`, `mode` (`dev` | `ideas`), `depth` (`quick` | `normal` | `deep`), `market/lang`, `as_of` (`YYYY-MM-DD`), `versions/stack` (из файла `paths.description` в `.ai-factory/config.yaml`, по умолчанию `.ai-factory/DESCRIPTION.md`), `known_context`, `constraints`. Если не хватает ключевого для старта — задай **один** уточняющий вопрос.
 1. **Нужен ли поиск.** Проверь условия из раздела «Когда не нужен». Если поиск не нужен — ответь из локального контекста.
 2. **Preflight.** Проверь, какие источники доступны с этого хоста: `gh auth status`, наличие ключа Tavily через Env Catalog (не выводя сам ключ), HN Algolia, Stack Exchange, `alphaxiv`; `telegram-user` доступен только на Mac mini. Недоступное запиши в план/отчёт как ограничение покрытия.
 3. **План без поиска.** Разбери скрытые намерения (≤ 6 гипотез 4 типов, см. [references/angles.md](references/angles.md)) → выведи углы с `role` (`discovery` | `validation` | `constraint` | `measurement`) и зеркальными углами (`mirror_of`) → составь `plan.yaml` по схеме из [references/evidence.md](references/evidence.md), пока только в ответе. Контракт и углы не меняются после старта волны.

@@ -85,12 +85,12 @@
 
 ## 6. Шаблоны запросов (`ru` / `en`)
 
-При поиске через `Tavily` используй `include_domains`, через `WebSearch` — `allowed_domains` вместо оператора `site:` там, где инструмент режет синтаксис.
+При поиске через `Tavily` используй `include_domains`, через `WebSearch` — `allowed_domains` вместо оператора `site:` там, где инструмент режет синтаксис. В командах оболочки запрос — в одинарных кавычках: так `$` в именах API (`$fetch`) не раскрывается оболочкой.
 
 - **Официальный (`dev`):** `"<lib> changelog <version>"` · `"<lib> migration guide breaking changes"` · `"<lib> deprecated OR EOL"` · `"<lib> документация ограничения"`
-- **Трекер (`dev`):** `gh search issues "<lib> <symptom>"` · `"<lib> regression <version>"` · `"<lib> workaround"` · `"<lib> ошибка <симптом>"`
+- **Трекер (`dev`):** `gh search issues '<lib> <symptom>'` · `"<lib> regression <version>"` · `"<lib> workaround"` · `"<lib> ошибка <симптом>"`
 - **Сообщество (`dev`):** `"<lib> gotchas"` · `"<lib> vs <alt>"` · `include_domains: [stackoverflow.com, news.ycombinator.com]` · `"<lib> проблемы продакшен"`
-- **Готовые решения (`dev`):** `gh search code "<api_symbol> language:ts"` · `"<task> reference implementation"` · `"<lib> production example"` · `"<задача> пример реализации"`
+- **Готовые решения (`dev`):** `gh search code '<api_symbol> language:ts'` · `"<task> reference implementation"` · `"<lib> production example"` · `"<задача> пример реализации"`
 - **Боли и самоделки (`ideas`):** `"X sucks"` · `"wish X could"` · `"I wrote a script to <task>"` · `"<задача> надоело руками"` · `"костыль для <задача>"`
 - **Конкуренты (`ideas`):** `"<competitor> pricing limitations"` · `"<competitor> feature request"` · `"alternative to <competitor>"` · `"<конкурент> отзывы минусы"`
 - **Рунет (`ideas`):** `xmlstock: "<тема> (site:habr.com OR site:vc.ru)"` · `"почему отказались от <X>"` · `"чем заменить <X>"` · `t.me/s/<канал>`
