@@ -44,7 +44,7 @@
 
 | Разведчик | Что ищет | Инструмент у нас | Риски |
 |---|---|---|---|
-| Официальный | Доки, changelog, release notes, RFC, миграции | `WebFetch`, `gh release list/view`, `npm` registry | Документация отстаёт от кода; SPA-доки без JS |
+| Официальный | Доки, changelog, release notes, RFC, миграции | `WebFetch`, `gh release list`, `gh release view`, `npm` registry | Документация отстаёт от кода; SPA-доки без JS |
 | Трекер | Issues, PR, discussions: баги, регрессии, обходы | `gh search issues`, `gh api` | Лимит GitHub issues ~30 запр/мин на всех |
 | Сообщество | Stack Overflow, HN, Reddit | Stack Exchange API, HN Algolia API; Reddit — только сниппеты | Reddit напрямую 403 → `SNIPPET_ONLY`, макс. `low` |
 | Готовые решения | Как сделали другие, альтернативные пакеты | `gh search code` (~10/мин), `npm` search | Пример в репо ≠ рабочий прод-паттерн |
@@ -56,7 +56,7 @@
 | Разведчик | Что ищет | Инструмент у нас | Риски |
 |---|---|---|---|
 | Боли | Жалобы на инструменты, «wish X could» | HN Algolia, `Tavily` (`include_domains`), `WebSearch` | Яркая эмоция ≠ влияние на выбор |
-| Самоделки | Скрипты и костыли, которые пишут руками | `gh search code/repos`, HN «Show HN», `Tavily` | Единичные энтузиасты |
+| Самоделки | Скрипты и костыли, которые пишут руками | `gh search code`, `gh search repos`, HN «Show HN», `Tavily` | Единичные энтузиасты |
 | Конкуренты | За что хвалят и ругают, feature requests, цены | `gh search issues`, Product Hunt Atom `/feed`, `WebFetch` | Обещания продавца ≠ опыт пользователя |
 | Рунет | Хабр, vc.ru, публичные Telegram-каналы | `xmlstock` (Яндекс SERP), `t.me/s/<канал>`, `telegram-user` | `tg` только Mac mini и **последовательно**; глобального поиска в TG нет |
 | Скептик (зеркало) | «why we shut down», postmortem, «stopped using» | `Tavily`, HN Algolia | Ошибка выжившего в обратную сторону |
