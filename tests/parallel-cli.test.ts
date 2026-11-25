@@ -6,6 +6,7 @@ import plugin from '../server.ts';
 // The coordinator works on Windows here: every value reaches BB and the folder's machine as data, never through a shell.
 const ROOT = 'C:\\Users\\Dev User\\репо';
 async function setup() {
+  let choice: any = { mode: 'bb', providerId: 'codex', model: 'gpt-6.2-sol', reasoning: 'high', tier: 'fast', parallel: 2 };  // guardian: allow — loose mock of the BB SDK and host RPC in this test
   const calls: { method: string; input: any; hostId: string }[] = [];  // guardian: allow — loose mock of the BB SDK and host RPC in this test
   const spawns: any[] = [];  // guardian: allow — loose mock of the BB SDK and host RPC in this test
   const threads: Record<string, any> = {
@@ -29,7 +30,7 @@ async function setup() {
     experimental_callHostRpc: async call => {
       calls.push({ method: call.method, input: call.input, hostId: call.hostId });
       if (call.method === 'collect') throw new Error('not needed');
-      if (call.method === 'delegation') return { choice: { mode: 'bb', providerId: 'codex', model: 'gpt-6.2-sol', reasoning: 'high', tier: 'fast', parallel: 2 }, research: { mode: 'self' }, research2: { mode: 'self' }, research3: { mode: 'self' }, configured: true, foreign: null, error: null } as any;  // guardian: allow — loose mock of the BB SDK and host RPC in this test
+      if (call.method === 'delegation') return { choice, research: { mode: 'self' }, research2: { mode: 'self' }, research3: { mode: 'self' }, configured: true, foreign: null, error: null } as any;  // guardian: allow — loose mock of the BB SDK and host RPC in this test
       if (call.method === 'readBrief') return { text: 'Do task 2.' };
       if (call.method === 'headCommit') return { sha: 'c'.repeat(40) };
       if (call.method === 'bringBack') return { applied: true, files: ['src/b.ts'] };
@@ -37,7 +38,7 @@ async function setup() {
     },
   });
   await plugin(h.bb);
-  return { h, calls, spawns };
+  return { h, calls, spawns, setChoice: (c: any) => { choice = c; } };
 }
 
 test('spawn-worker starts the owner model on a fresh copy seeded with the coordinator\'s work, as a child of the chat', async () => {
@@ -119,5 +120,16 @@ test('wait-worker answers for a child of this chat only, with the cursor for the
       const refused = await h.harness.behavior.runCli(['wait-worker', '--thread', 'thr_test', '--worker', 'thr_worker', '--after', bad, '--json']);
       assert.match(`${refused.stdout ?? ''}${refused.stderr ?? ''}`, /--after/, bad);
     }
+  } finally { await h.harness.lifecycle.dispose(); }
+});
+
+test('a worker never inherits the coordinator\'s service tier: no tier in the Code role means default', async () => {
+  const { h, spawns, setChoice } = await setup();
+  try {
+    setChoice({ mode: 'bb', providerId: 'acp-antigravity', model: 'gemini-4-hydrogen', reasoning: 'high', parallel: 4 });
+    const result = await h.harness.behavior.runCli(['spawn-worker', '--thread', 'thr_test', '--target', 'demo', '--task', '1', '--brief', 'C:\\Temp\\brief.md', '--json']);
+    assert.equal(result.exitCode, 0, result.stderr);
+    assert.equal(spawns[0].serviceTier, 'default');
+    assert.equal(spawns[0].executionInputSources.serviceTier, 'explicit');
   } finally { await h.harness.lifecycle.dispose(); }
 });

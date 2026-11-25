@@ -1031,11 +1031,11 @@ export default async function plugin(bb: BbPluginApi) {
         parentThreadId: threadId, lifecycleOwnerThreadId: threadId, parentNotifications: 'off',
         providerId: choice.providerId, model: choice.model,
         ...(choice.reasoning ? { reasoningLevel: choice.reasoning } : {}),
-        ...(choice.tier && choice.tier !== 'default' ? { serviceTier: choice.tier } : {}),
+        // The worker never inherits the coordinator's tier: the Code role's tier, or default.
+        serviceTier: choice.tier || 'default',
         // Without a source BB drops the provider and model and starts the provider's default one.
         executionInputSources: { providerId: 'explicit', model: 'explicit',
-          ...(choice.reasoning ? { reasoningLevel: 'explicit' as const } : {}),
-          ...(choice.tier && choice.tier !== 'default' ? { serviceTier: 'explicit' as const } : {}) },
+          ...(choice.reasoning ? { reasoningLevel: 'explicit' as const } : {}), serviceTier: 'explicit' },
       });
       bb.log.info(`aif-chat: worker spawned threadId=${threadId} worker=${spawned.id} task=${task} sha=${sha.slice(0, 12)}`);
       const data = { id: spawned.id, task, name, sha };
