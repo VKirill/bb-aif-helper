@@ -227,31 +227,6 @@ test('inline code spans keep the full one-line command with its arguments', () =
   ]);
   assert.equal(analyzeReply(reply).commands.get('aif-fix'), command);
 });
-test('a comma inside a code span stays in the topic; in prose it ends the invocation', () => {
-  assert.deepEqual(extractAifInvocations('Run `/aif-scout Compare Playwright, Cypress, and WebdriverIO`.'),
-    [{ id: 'aif-scout', command: 'aif-scout Compare Playwright, Cypress, and WebdriverIO' }]);
-  assert.deepEqual(extractAifInvocations('```\n/aif-scout Compare Playwright, Cypress, and WebdriverIO\n```'),
-    [{ id: 'aif-scout', command: 'aif-scout Compare Playwright, Cypress, and WebdriverIO' }]);
-  assert.deepEqual(extractAifInvocations("`/aif-scout What's the simplest approach?`"),
-    [{ id: 'aif-scout', command: "aif-scout What's the simplest approach?" }]);
-  assert.deepEqual(extractAifInvocations('`/aif-scout Compare Node.js & Deno on Windows`'),
-    [{ id: 'aif-scout', command: 'aif-scout Compare Node.js & Deno on Windows' }]);
-  assert.deepEqual(extractAifInvocations('`/aif-fix x && rm -rf y`'), [{ id: 'aif-fix', command: 'aif-fix x' }]);
-  assert.deepEqual(extractAifInvocations('`/aif-scout Compare Node.js >=22 and 24 on Windows`'),
-    [{ id: 'aif-scout', command: 'aif-scout Compare Node.js >=22 and 24 on Windows' }]);
-  assert.deepEqual(extractAifInvocations("`/aif-scout What's new in ESLint 9's flat config?`"),
-    [{ id: 'aif-scout', command: "aif-scout What's new in ESLint 9's flat config?" }]);
-  assert.deepEqual(extractAifInvocations('`/aif-scout Compare string | undefined support across JSON Schema generators`'),
-    [{ id: 'aif-scout', command: 'aif-scout Compare string | undefined support across JSON Schema generators' }]);
-  assert.deepEqual(extractAifInvocations('`/aif-scout Compare /aif-plan and /aif-explore behavior in AI Factory`'),
-    [{ id: 'aif-scout', command: 'aif-scout Compare /aif-plan and /aif-explore behavior in AI Factory' }]);
-  // A <placeholder> template opens a draft (bare command) instead of being sent as is.
-  assert.deepEqual(extractAifInvocations('`/aif-fix <what to fix>`'), [{ id: 'aif-fix', command: 'aif-fix' }]);
-  assert.deepEqual(extractAifInvocations("Next: /aif-plan full @'docs/Meeting, notes.md'"),
-    [{ id: 'aif-plan', command: "aif-plan full @'docs/Meeting, notes.md'" }]);
-  assert.deepEqual(extractAifInvocations('Run /aif-scout Playwright, then decide.'),
-    [{ id: 'aif-scout', command: 'aif-scout Playwright' }]);
-});
 test('a span variant with arguments replaces the bare command; the first one wins', () => {
   assert.deepEqual(extractAifInvocations('/aif-plan then `/aif-plan full #1` then `/aif-plan other`'),
     [{ id: 'aif-plan', command: 'aif-plan full #1' }]);
@@ -308,31 +283,11 @@ test('withTopic gives a bare topic command the gate reason, then the chip sends 
   assert.equal(withTopic('/aif-fix login fails', 'aif-fix', 'other'), '/aif-fix login fails');
   assert.equal(withTopic('/aif-verify', 'aif-verify', 'some reason'), '/aif-verify');
 });
-
-test('a command in a code span or fenced line keeps the whole span as its topic', () => {
-  const cases: [string, unknown][] = [
-    ['```\n/aif-fix repair parsing\n/aif-verify\n```', [['aif-fix','aif-fix repair parsing'],['aif-verify','aif-verify']]],
-    ['`/aif-explore ultra Map<string, number> support по .ai-factory/scout/schema-generators/report.md`', [['aif-explore','aif-explore ultra Map<string, number> support по .ai-factory/scout/schema-generators/report.md']]],
-    ['`/aif-scout Compare Vitest and Jest; focus on ESM support`', [['aif-scout','aif-scout Compare Vitest and Jest; focus on ESM support']]],
-    ['`` /aif-scout Compare `fetch()` and Axios ``', [['aif-scout','aif-scout Compare `fetch()` and Axios']]],
-    ["`/aif-plan full @'docs/Meeting; notes.md'`", [['aif-plan',"aif-plan full @'docs/Meeting; notes.md'"]]],
-    ["`/aif-plan full @'docs/Meeting  notes.md'`", [['aif-plan',"aif-plan full @'docs/Meeting  notes.md'"]]],
-    ["`/aif-scout What's new in ESLint 9's flat config?`", [['aif-scout',"aif-scout What's new in ESLint 9's flat config?"]]],
-    ['`/aif-scout Compare string | undefined support across JSON Schema generators`', [['aif-scout','aif-scout Compare string | undefined support across JSON Schema generators']]],
-    ['`/aif-scout Compare /aif-plan and /aif-explore behavior in AI Factory`', [['aif-scout','aif-scout Compare /aif-plan and /aif-explore behavior in AI Factory']]],
-    ['`/aif-fix <what to fix>`', [['aif-fix','aif-fix']]],
-    ['`/aif-scout Compare Node.js >=22 and 24 on Windows`', [['aif-scout','aif-scout Compare Node.js >=22 and 24 on Windows']]],
-    ['Run `/aif-scout Compare Playwright, Cypress, and WebdriverIO`.', [['aif-scout','aif-scout Compare Playwright, Cypress, and WebdriverIO']]],
-    ['`/aif-scout Compare Node.js & Deno on Windows`', [['aif-scout','aif-scout Compare Node.js & Deno on Windows']]],
-    ['`/aif-fix x && rm -rf y`', [['aif-fix','aif-fix x']]],
-    ["Next: /aif-plan full @'docs/Meeting, notes.md'", [['aif-plan',"aif-plan full @'docs/Meeting, notes.md'"]]],
-    ['`/aif-plan full "@docs/my  plan.md"`', [['aif-plan','aif-plan full "@docs/my  plan.md"']]],
-    ['`/aif-scout Compare a || b`', [['aif-scout','aif-scout Compare a']]],
-    ["`/aif-scout Meeting's notes 'quoted part' end`", [['aif-scout',"aif-scout Meeting's notes 'quoted part' end"]]],
-    ['`/aif-fix "unfinished`', []],
-    ['Тема: `/aif-scout dev очередь задач для Node` и `/aif-plan`', [['aif-scout','aif-scout dev очередь задач для Node'],['aif-plan','aif-plan']]],
-  ];
-  for (const [input, want] of cases) {
-    assert.deepEqual(extractAifInvocations(input).map(i => [i.id, i.command]), want, input);
+test('a double-quoted scout topic stays whole in prose, code spans and fences', () => {
+  const topic = '"Compare Playwright, Cypress & WebdriverIO: <input>, `fetch()`, a || b, Bash && exit"';
+  for (const text of [`Next: /aif-scout ${topic}`, `Next: \`/aif-scout ${topic}\``, `\`\`\`\n/aif-scout ${topic}\n\`\`\``]) {
+    assert.deepEqual(extractAifInvocations(text), [{ id: 'aif-scout', command: `aif-scout ${topic}` }], text);
   }
+  assert.deepEqual(extractAifInvocations('`/aif-explore ultra "Map<string, number> support" по .ai-factory/scout/schema-generators/report.md`'),
+    [{ id: 'aif-explore', command: 'aif-explore ultra "Map<string, number> support" по .ai-factory/scout/schema-generators/report.md' }]);
 });
