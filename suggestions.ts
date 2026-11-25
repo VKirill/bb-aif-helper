@@ -7,16 +7,31 @@ import { confirmationProse } from './confirmation.ts';
 import { PLUGIN_SKILLS, type Action, type Suggestions } from './model.ts';
 
 // In a code span or fenced line the agent wrote one whole command, so the rest of
-// the span is its topic: commas, apostrophes, & | < > and /aif-… stay in it. Only a
-// following command (&&, ||, ;) ends it, and a <placeholder> template opens a draft instead.
+// the span is its topic: commas, semicolons, & | < >, backticks of a double-backtick
+// span and /aif-… stay in it. Only && or || outside quotes ends it. Quoted parts
+// ("…", '…') keep their exact spacing; other whitespace collapses to one space.
+// A lone <placeholder> template opens a draft instead of being sent as is.
 function codeArguments(tail: string): string | null {
   if (!/^[ \t]/.test(tail)) return '';
-  const stop = tail.search(/[`\r\n;]|&&|\|\|/);
-  const raw = stop < 0 ? tail : tail.slice(0, stop);
-  // An unclosed double quote means the agent's argument is cut off: never send half of it.
-  if (raw.length > 4000 || /[\x00-\x08\x0b-\x1f]/.test(raw) || (raw.match(/"/g)?.length ?? 0) % 2) return null;
-  const text = raw.trim().replace(/\s+/g, ' ');
-  if (/<[^<>]*>/.test(text)) return '';
+  let out = '';
+  let quote = '';
+  for (let i = 0; i < tail.length; i++) {
+    const char = tail[i];
+    if (/[\r\n]/.test(char)) break;
+    if (/[\x00-\x08\x0b-\x1f]/.test(char) || out.length > 4000) return null;
+    if (quote) {
+      // An apostrophe followed by a letter (Meeting's) does not close a '…' part.
+      if (char === quote && !(quote === "'" && /\p{L}/u.test(tail[i + 1] ?? ''))) quote = '';
+      out += char;
+      continue;
+    }
+    if (tail.startsWith('&&', i) || tail.startsWith('||', i)) break;
+    if (char === '"' || (char === "'" && !/[\p{L}\p{N}]/u.test(tail[i - 1] ?? ''))) quote = char;
+    out += /[ \t]/.test(char) ? (out.endsWith(' ') ? '' : ' ') : char;
+  }
+  if (quote) return null; // An unclosed quote means the argument is cut off: never send half of it.
+  const text = out.trim();
+  if (/(?:^|\s)<[\p{L}][\p{L} _-]*>(?:\s|$)/u.test(text)) return '';
   return text ? ` ${text}` : '';
 }
 
@@ -99,11 +114,16 @@ export function extractAifInvocations(text: string): { id: string; command: stri
   const bounded = text.slice(0, 1024 * 1024);
   // Code spans and fenced lines. A command at the start of one keeps its whole topic;
   // a /aif-… later in the same span is part of that topic, not a command of its own.
-  const codeRanges = readCodeItems(bounded, (body, index) => [index, index + body.length + 2] as const);
+  // [body start, body end) of every complete span or fenced line; an inline span starts with its backticks.
+  const codeRanges = readCodeItems(bounded, (body, index) => {
+    const ticks = bounded.slice(index).match(/^`*/)![0].length;
+    return [index + ticks, index + ticks + body.length] as const;
+  });
   const matches = [...bounded.matchAll(/(?<![\w$\\/.-])[/$](aif(?:-[a-z0-9]+)*)(?![\w/-])/g)].flatMap(match => {
     const range = codeRanges.find(([from, to]) => match.index! >= from && match.index! < to);
-    if (range && bounded.slice(range[0], match.index).replace(/[`\s]/g, '')) return [];
-    return [{ name: match[1], tail: bounded.slice(match.index! + match[0].length), index: match.index!,
+    if (range && bounded.slice(range[0], match.index).trim()) return [];
+    const end = match.index! + match[0].length;
+    return [{ name: match[1], index: match.index!, tail: range ? bounded.slice(end, range[1]) : bounded.slice(end).split("`")[0],
       code: !!range || bounded[match.index! - 1] === '`' }];
   });
   const bare = readCodeItems(bounded, (body, index) => {
