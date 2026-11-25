@@ -13,7 +13,7 @@ function argumentsAfter(tail: string, code: boolean): string | null {
     while (/[ \t]/.test(tail[offset] ?? '') && offset < tail.length) offset++;
     const start = offset;
     // In a code span a comma belongs to the topic ("Compare A, B"); in prose it ends the invocation.
-    if (!tail[offset] || (code ? /[\r\n`;|<>\x00-\x1f]/ : /[\r\n`;,|&<>\x00-\x1f]/).test(tail[offset]) || (code && tail.startsWith('&&', offset)) || /^[/$]aif\b/.test(tail.slice(offset))) break;
+    if (!tail[offset] || (code ? /[\r\n`;|\x00-\x1f]/ : /[\r\n`;,|&<>\x00-\x1f]/).test(tail[offset]) || (code && tail.startsWith('&&', offset)) || /^[/$]aif\b/.test(tail.slice(offset))) break;
     let quote = '';
     while (offset < tail.length) {
       const char = tail[offset];
@@ -23,9 +23,9 @@ function argumentsAfter(tail: string, code: boolean): string | null {
         if (char === '\\' && tail[offset + 1] === quote) { offset += 2; continue; }
         if (char === quote) quote = '';
       } else {
-        // An apostrophe inside a word (What's) is text; only a leading one opens a quoted argument.
-        if (char === '"' || (char === "'" && offset === start)) quote = char;
-        else if ((code ? /[ \t`;|<>]/ : /[ \t`;,|&<>]/).test(char) || (code && tail.startsWith('&&', offset)) || (char === '$' && tail[offset + 1] === '(')) break;
+        // An apostrophe between letters (What's) is text; elsewhere it opens a quoted argument (@'a, b.md').
+        if (char === '"' || (char === "'" && !(/\p{L}/u.test(tail[offset - 1] ?? '') && /\p{L}/u.test(tail[offset + 1] ?? '')))) quote = char;
+        else if ((code ? /[ \t`;|]/ : /[ \t`;,|&<>]/).test(char) || (code && tail.startsWith('&&', offset)) || (char === '$' && tail[offset + 1] === '(')) break;
       }
       offset++;
     }

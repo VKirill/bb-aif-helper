@@ -237,6 +237,10 @@ test('a comma inside a code span stays in the topic; in prose it ends the invoca
   assert.deepEqual(extractAifInvocations('`/aif-scout Compare Node.js & Deno on Windows`'),
     [{ id: 'aif-scout', command: 'aif-scout Compare Node.js & Deno on Windows' }]);
   assert.deepEqual(extractAifInvocations('`/aif-fix x && rm -rf y`'), [{ id: 'aif-fix', command: 'aif-fix x' }]);
+  assert.deepEqual(extractAifInvocations('`/aif-scout Compare Node.js >=22 and 24 on Windows`'),
+    [{ id: 'aif-scout', command: 'aif-scout Compare Node.js >=22 and 24 on Windows' }]);
+  assert.deepEqual(extractAifInvocations("Next: /aif-plan full @'docs/Meeting, notes.md'"),
+    [{ id: 'aif-plan', command: "aif-plan full @'docs/Meeting, notes.md'" }]);
   assert.deepEqual(extractAifInvocations('Run /aif-scout Playwright, then decide.'),
     [{ id: 'aif-scout', command: 'aif-scout Playwright' }]);
 });
