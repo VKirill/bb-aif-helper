@@ -227,5 +227,6 @@ test('plan tasks go only to BB workers, survive a compaction, and the full suite
   const head = parallel.slice(parallel.indexOf('## Parallel mode'), parallel.indexOf('### Layers'));
   assert.ok(head.includes('already holds all your uncommitted work'), 'the copy fact leads the parallel section');
   assert.ok(head.includes('Re-read this section before each layer'));
-  assert.ok(parallel.includes('the full test suite once for the whole layer'));
+  assert.ok(parallel.includes("every check its tasks name that the workers skipped: the build, the full test suite, the project's full check script"));
+  assert.ok(parallel.includes('a task is verified only when its named checks pass'));
 });

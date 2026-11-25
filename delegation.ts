@@ -268,7 +268,7 @@ Every worker's copy already holds all your uncommitted work, so the results of e
    - \`{ applied: false, error }\`: the changes do not fit, and nothing was changed; the results of earlier tasks are intact. Do not run \`git apply\`, \`git checkout\`, \`git reset\` or \`git stash\` yourself: there is nothing to undo. Usually another task of the layer changed the same lines (see Failures). If writing failed half way (a locked or read-only file), the plugin put back what it wrote; once the cause is fixed, run the same \`bring-back\` again.
    - \`{ applied: false, partial: true, files, error }\`: those files could not be put back. Stop and report them to the owner.
    \`bring-back\` takes only what changed since the worker's last bring-back, so a worker asked to fix its work is brought back again with just the fix.
-4. After the whole layer is back, run the build and the full test suite once for the whole layer (if the suite was red before, compare it with one baseline taken before the layer, not one per task), then archive the layer's workers (\`bb thread archive <id>\`; BB removes its copy five minutes later). Then continue with the next layer.
+4. After the whole layer is back, run once for the whole layer every check its tasks name that the workers skipped: the build, the full test suite, the project's full check script (if one was red before, compare it with one baseline taken before the layer, not one per task); a task is verified only when its named checks pass. Then archive the layer's workers (\`bb thread archive <id>\`; BB removes its copy five minutes later). Then continue with the next layer.
 
 ### Commits
 
