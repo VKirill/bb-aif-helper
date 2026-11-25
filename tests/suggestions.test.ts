@@ -239,6 +239,14 @@ test('a comma inside a code span stays in the topic; in prose it ends the invoca
   assert.deepEqual(extractAifInvocations('`/aif-fix x && rm -rf y`'), [{ id: 'aif-fix', command: 'aif-fix x' }]);
   assert.deepEqual(extractAifInvocations('`/aif-scout Compare Node.js >=22 and 24 on Windows`'),
     [{ id: 'aif-scout', command: 'aif-scout Compare Node.js >=22 and 24 on Windows' }]);
+  assert.deepEqual(extractAifInvocations("`/aif-scout What's new in ESLint 9's flat config?`"),
+    [{ id: 'aif-scout', command: "aif-scout What's new in ESLint 9's flat config?" }]);
+  assert.deepEqual(extractAifInvocations('`/aif-scout Compare string | undefined support across JSON Schema generators`'),
+    [{ id: 'aif-scout', command: 'aif-scout Compare string | undefined support across JSON Schema generators' }]);
+  assert.deepEqual(extractAifInvocations('`/aif-scout Compare /aif-plan and /aif-explore behavior in AI Factory`'),
+    [{ id: 'aif-scout', command: 'aif-scout Compare /aif-plan and /aif-explore behavior in AI Factory' }]);
+  // A <placeholder> template opens a draft (bare command) instead of being sent as is.
+  assert.deepEqual(extractAifInvocations('`/aif-fix <what to fix>`'), [{ id: 'aif-fix', command: 'aif-fix' }]);
   assert.deepEqual(extractAifInvocations("Next: /aif-plan full @'docs/Meeting, notes.md'"),
     [{ id: 'aif-plan', command: "aif-plan full @'docs/Meeting, notes.md'" }]);
   assert.deepEqual(extractAifInvocations('Run /aif-scout Playwright, then decide.'),

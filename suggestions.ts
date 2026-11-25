@@ -6,14 +6,28 @@ import { gateEvidenceCommands } from './gate-evidence-command.ts';
 import { confirmationProse } from './confirmation.ts';
 import { PLUGIN_SKILLS, type Action, type Suggestions } from './model.ts';
 
+// In a code span or fenced line the agent wrote one whole command, so the rest of
+// the span is its topic: commas, apostrophes, & | < > and /aif-… stay in it. Only a
+// following command (&&, ||, ;) ends it, and a <placeholder> template opens a draft instead.
+function codeArguments(tail: string): string | null {
+  if (!/^[ \t]/.test(tail)) return '';
+  const stop = tail.search(/[`\r\n;]|&&|\|\|/);
+  const raw = stop < 0 ? tail : tail.slice(0, stop);
+  // An unclosed double quote means the agent's argument is cut off: never send half of it.
+  if (raw.length > 4000 || /[\x00-\x08\x0b-\x1f]/.test(raw) || (raw.match(/"/g)?.length ?? 0) % 2) return null;
+  const text = raw.trim().replace(/\s+/g, ' ');
+  if (/<[^<>]*>/.test(text)) return '';
+  return text ? ` ${text}` : '';
+}
+
 function argumentsAfter(tail: string, code: boolean): string | null {
+  if (code) return codeArguments(tail);
   const tokens: string[] = [];
   let offset = 0;
   while (/^[ \t]/.test(tail.slice(offset, offset + 1))) {
     while (/[ \t]/.test(tail[offset] ?? '') && offset < tail.length) offset++;
     const start = offset;
-    // In a code span a comma belongs to the topic ("Compare A, B"); in prose it ends the invocation.
-    if (!tail[offset] || (code ? /[\r\n`;|\x00-\x1f]/ : /[\r\n`;,|&<>\x00-\x1f]/).test(tail[offset]) || (code && tail.startsWith('&&', offset)) || /^[/$]aif\b/.test(tail.slice(offset))) break;
+    if (!tail[offset] || /[\r\n`;,|&<>\x00-\x1f]/.test(tail[offset]) || /^[/$]aif\b/.test(tail.slice(offset))) break;
     let quote = '';
     while (offset < tail.length) {
       const char = tail[offset];
@@ -23,9 +37,8 @@ function argumentsAfter(tail: string, code: boolean): string | null {
         if (char === '\\' && tail[offset + 1] === quote) { offset += 2; continue; }
         if (char === quote) quote = '';
       } else {
-        // An apostrophe between letters (What's) is text; elsewhere it opens a quoted argument (@'a, b.md').
-        if (char === '"' || (char === "'" && !(/\p{L}/u.test(tail[offset - 1] ?? '') && /\p{L}/u.test(tail[offset + 1] ?? '')))) quote = char;
-        else if ((code ? /[ \t`;|]/ : /[ \t`;,|&<>]/).test(char) || (code && tail.startsWith('&&', offset)) || (char === '$' && tail[offset + 1] === '(')) break;
+        if (char === '"' || char === "'") quote = char;
+        else if (/[ \t`;,|&<>]/.test(char) || (char === '$' && tail[offset + 1] === '(')) break;
       }
       offset++;
     }
@@ -84,12 +97,15 @@ export function rulesSyncCommand(text: string, change: string): string | undefin
 export function extractAifInvocations(text: string): { id: string; command: string }[] {
   const result: { id: string; command: string }[] = [];
   const bounded = text.slice(0, 1024 * 1024);
-  // Code spans and fenced lines: a command there keeps its whole topic (commas, a lone &).
+  // Code spans and fenced lines. A command at the start of one keeps its whole topic;
+  // a /aif-… later in the same span is part of that topic, not a command of its own.
   const codeRanges = readCodeItems(bounded, (body, index) => [index, index + body.length + 2] as const);
-  const matches = [...bounded.matchAll(/(?<![\w$\\/.-])[/$](aif(?:-[a-z0-9]+)*)(?![\w/-])/g)].map(match => ({
-    name: match[1], tail: bounded.slice(match.index! + match[0].length), index: match.index!,
-    code: bounded[match.index! - 1] === '`' || codeRanges.some(([from, to]) => match.index! >= from && match.index! < to),
-  }));
+  const matches = [...bounded.matchAll(/(?<![\w$\\/.-])[/$](aif(?:-[a-z0-9]+)*)(?![\w/-])/g)].flatMap(match => {
+    const range = codeRanges.find(([from, to]) => match.index! >= from && match.index! < to);
+    if (range && bounded.slice(range[0], match.index).replace(/[`\s]/g, '')) return [];
+    return [{ name: match[1], tail: bounded.slice(match.index! + match[0].length), index: match.index!,
+      code: !!range || bounded[match.index! - 1] === '`' }];
+  });
   const bare = readCodeItems(bounded, (body, index) => {
     const match = body.match(/^[ \t]*(aif(?:-[a-z0-9]+)*)(?=$|[ \t])/);
     return match ? { name: match[1], tail: body.slice(match[0].length), index, code: true } : null;
