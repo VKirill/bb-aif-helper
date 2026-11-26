@@ -295,7 +295,7 @@ test('a linked SKILL.md stays linked while it carries this project\'s settings; 
     assert.ok(!(await lstatFile(fileB)).isSymbolicLink(), `another ${c.name}: B gets its own file`);
     const own = await readFile(fileB, 'utf8');
     assert.ok(own.includes(c.check), `B's block carries B's ${c.name}`);
-    assert.ok(!own.includes('spawn-worker') && !own.includes('--service-tier'), 'neither parallel workers nor a fast tier B did not choose');
+    assert.ok(!own.includes('spawn-worker') && !own.includes("--service-tier 'fast'"), 'neither parallel workers nor a fast tier B did not choose');
     assert.equal(await readFile(fileA, 'utf8'), sharedText, 'the shared file is untouched');
   }
 });

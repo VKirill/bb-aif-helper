@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createFakePluginHost, makeThreadResponse } from '@get-bb/plugin-sdk/testing';
 import plugin from '../server.ts';
+import { contextBlock, researchBlock } from '../delegation.ts';
 
 // The coordinator works on Windows here: every value reaches BB and the folder's machine as data, never through a shell.
 const ROOT = 'C:\\Users\\Dev User\\репо';
@@ -171,4 +172,29 @@ test('spawn-worker reads the setting at each launch: parallel off or the limit r
     assert.equal((await spawn('5')).exitCode, 0);
     assert.equal((await spawn('6')).exitCode, 1, 'the old worker and the new one fill the two slots');
   } finally { await h.harness.lifecycle.dispose(); }
+});
+
+// Every way a worker starts — spawn-worker on the server, the one-worker command and the research lines of the blocks —
+// launches the same provider, model, reasoning and tier: a fix in one path alone (188c9e6) shows up here.
+test('spawn-worker and the commands in the blocks start a worker with the same provider, model, reasoning and tier', async () => {
+  const flags = (text: string) => [...text.matchAll(/--provider '([^']*)' --model '([^']*)'(?: --reasoning-level '([^']*)')? --service-tier '([^']*)'/g)]
+    .map(m => ({ providerId: m[1], model: m[2], reasoningLevel: m[3] ?? null, serviceTier: m[4] }));
+  const choices = [
+    { mode: 'bb' as const, providerId: 'codex', model: 'gpt-6.2-sol', reasoning: 'high', tier: 'fast' },
+    { mode: 'bb' as const, providerId: 'codex', model: 'gpt-6.2-sol', tier: 'default' },
+    { mode: 'bb' as const, providerId: 'acp-antigravity', model: 'gemini-4-carbon' },
+  ];
+  for (const choice of choices) {
+    const { h, spawns, setChoice } = await setup();
+    try {
+      setChoice({ ...choice, parallel: 2 });
+      const r = await h.harness.behavior.runCli(['spawn-worker', '--thread', 'thr_test', '--target', 'demo', '--task', '1', '--brief', 'C:\\Temp\\brief.md', '--json']);
+      assert.equal(r.exitCode, 0, r.stderr);
+      const server = { providerId: spawns[0].providerId, model: spawns[0].model, reasoningLevel: spawns[0].reasoningLevel ?? null, serviceTier: spawns[0].serviceTier };
+      const oneWorker = flags(contextBlock({ ...choice, parallel: 2 }));
+      const research = flags(researchBlock({ research: choice, research2: { mode: 'self' }, research3: { mode: 'self' } })!);
+      assert.ok(oneWorker.length > 0 && research.length > 0, 'both blocks carry a spawn command');
+      for (const f of [...oneWorker, ...research]) assert.deepEqual(f, server, `${choice.providerId}/${choice.model} tier=${choice.tier ?? '—'}`);
+    } finally { await h.harness.lifecycle.dispose(); }
+  }
 });

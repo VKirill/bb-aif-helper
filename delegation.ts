@@ -207,7 +207,8 @@ const spawnFlags = (c: Extract<DelegationChoice, { mode: 'bb' }>) => [
   `--provider ${shellQuote(c.providerId)}`,
   `--model ${shellQuote(c.model)}`,
   ...(c.reasoning ? [`--reasoning-level ${shellQuote(c.reasoning)}`] : []),
-  ...(c.tier && c.tier !== 'default' ? [`--service-tier ${shellQuote(c.tier)}`] : []),
+  // Always explicit, default too: without it BB starts the worker on the coordinator's tier (Fast included).
+  `--service-tier ${shellQuote(c.tier || 'default')}`,
 ].join(' ');
 
 type BbChoice = Extract<DelegationChoice, { mode: 'bb' }>;
