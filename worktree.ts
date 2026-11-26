@@ -95,11 +95,14 @@ async function seed(top: string, root: string, sha: string) {
 async function dirtySubmodules(repo: string, prefix = ''): Promise<string[]> {
   // The whole index is listed: no buffer cap, so a repository with hundreds of thousands of files launches as before.
   const entries = (await run('git', ['-C', repo, 'ls-files', '-s', '-z'], { timeout: 120_000, maxBuffer: Infinity })).stdout.split('\0');
+  const subs = entries.flatMap(entry => { const tab = entry.indexOf('\t'); return entry.startsWith('160000 ') && tab >= 0 ? [entry.slice(tab + 1)] : []; });
+  // A repository inside the folder that the index does not list (a `submodule add` taken back out of the index, a plain
+  // nested clone) reaches the copy only as a commit too: git lists it as one untracked entry ending in `/`.
+  const untracked = (await run('git', ['-C', repo, 'ls-files', '-o', '--exclude-standard', '-z'], { timeout: 120_000, maxBuffer: Infinity })).stdout.split('\0');
+  subs.push(...untracked.filter(rel => rel.endsWith('/')).map(rel => rel.slice(0, -1)));
   const found: string[] = [];
-  for (const entry of entries) {
-    const tab = entry.indexOf('\t');
-    if (!entry.startsWith('160000 ') || tab < 0) continue;
-    const rel = entry.slice(tab + 1), sub = path.join(repo, rel);
+  for (const rel of subs) {
+    const sub = path.join(repo, rel);
     // A submodule never checked out is an empty folder: git there would answer for the parent repository.
     if (!(await present(path.join(sub, '.git')))) continue;
     // `dirty`: a nested submodule moved to another commit, staged or not, is this submodule's uncommitted change; edits

@@ -261,21 +261,41 @@ test('a linked SKILL.md: a read keeps the link and the shared text, a save gives
   assert.equal(await readFile(shared, 'utf8'), stale);
 });
 
-test('a SKILL.md linked to another project\'s block: a read gives this project its own file with its own model', async t => {
+test('a linked SKILL.md stays linked while it carries this project\'s settings; any other model, tier or parallel mode gives the project its own file', async t => {
   const { symlink, lstat: lstatFile, rm: remove } = await import('node:fs/promises');
-  const a = await project(), b = await project();
-  await writeDelegation(a, { mode: 'bb', providerId: 'codex', model: 'gpt-6.2-sol' });
-  await writeDelegation(b, { mode: 'bb', providerId: 'codex', model: 'gpt-6.2-terra' });
-  const fileB = join(b, CONTEXT_PATH);
-  const sharedText = await readFile(join(a, CONTEXT_PATH), 'utf8');
-  await remove(fileB);
-  try { await symlink(join(a, CONTEXT_PATH), fileB, 'file'); } catch (e: any) {
-    if (process.platform === 'win32' && e.code === 'EPERM') return t.skip('symbolic links need Developer Mode on this Windows runner');
-    throw e;
+  const base = { mode: 'bb' as const, providerId: 'codex', model: 'gpt-6.2-sol' };
+  const cases = [
+    { name: 'model', a: { ...base, model: 'gpt-6.2-terra' }, check: "--model 'gpt-6.2-sol'" },
+    { name: 'tier', a: { ...base, tier: 'fast' }, check: 'codex/gpt-6.2-sol`' },
+    { name: 'parallel', a: { ...base, parallel: 2 }, check: 'codex/gpt-6.2-sol`' },
+  ];
+  for (const c of cases) {
+    const a = await project(), b = await project();
+    await writeDelegation(a, c.a); await writeDelegation(b, base);
+    const fileA = join(a, CONTEXT_PATH), fileB = join(b, CONTEXT_PATH);
+    const sharedText = await readFile(fileA, 'utf8');
+    await remove(fileB);
+    try { await symlink(fileA, fileB, 'file'); } catch (e: any) {
+      if (process.platform === 'win32' && e.code === 'EPERM') return t.skip('symbolic links need Developer Mode on this Windows runner');
+      throw e;
+    }
+    // B's own settings in the shared file, worded by an older version: the link stays.
+    if (c.name === 'model') {
+      const sameRoot = await project(), same = join(sameRoot, CONTEXT_PATH);
+      await writeDelegation(sameRoot, base);
+      const stale = (await readFile(same, 'utf8')).replace('You stay the coordinator', 'OLD: you stay the coordinator');
+      assert.notEqual(stale, await readFile(same, 'utf8'));
+      await writeFile(same, stale); await remove(fileB); await symlink(same, fileB, 'file');
+      await readDelegation(b);
+      assert.ok((await lstatFile(fileB)).isSymbolicLink(), 'same settings, older wording: the link stays');
+      assert.equal(await readFile(same, 'utf8'), stale);
+      await remove(fileB); await symlink(fileA, fileB, 'file');
+    }
+    await readDelegation(b);
+    assert.ok(!(await lstatFile(fileB)).isSymbolicLink(), `another ${c.name}: B gets its own file`);
+    const own = await readFile(fileB, 'utf8');
+    assert.ok(own.includes(c.check), `B's block carries B's ${c.name}`);
+    assert.ok(!own.includes('spawn-worker') && !own.includes('--service-tier'), 'neither parallel workers nor a fast tier B did not choose');
+    assert.equal(await readFile(fileA, 'utf8'), sharedText, 'the shared file is untouched');
   }
-  await readDelegation(b);
-  assert.ok(!(await lstatFile(fileB)).isSymbolicLink(), 'the link to a block for another model is replaced');
-  const own = await readFile(fileB, 'utf8');
-  assert.ok(own.includes("--model 'gpt-6.2-terra'") && !own.includes("--model 'gpt-6.2-sol'"), 'B\'s commands start B\'s model');
-  assert.equal(await readFile(join(a, CONTEXT_PATH), 'utf8'), sharedText, 'A\'s file is untouched');
 });

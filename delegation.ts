@@ -131,28 +131,31 @@ async function readDelegationNow(root: string): Promise<DelegationState> {
  */
 async function refreshBlocks(root: string, choice: DelegationChoice, research: ResearchSlots) {
   if (choice.mode === 'bb') {
-    await replaceBetweenMarkers(join(root, CONTEXT_PATH), contextBlock(choice), START, END, [spawnFlags(choice)]);
-    if (choice.parallel) await replaceBetweenMarkers(join(root, PLAN_CONTEXT_PATH), planRuleBlock(), PLAN_START, PLAN_END, []);
+    await replaceBetweenMarkers(join(root, CONTEXT_PATH), contextBlock(choice), START, END, codeSettings);
+    if (choice.parallel) await replaceBetweenMarkers(join(root, PLAN_CONTEXT_PATH), planRuleBlock(), PLAN_START, PLAN_END, () => '');
   }
   const researchText = researchBlock(research);
-  const researchFlags = RESEARCH_ROLES.flatMap(r => { const c = research[r].mode === 'bb' ? research[r] : research.research; return c.mode === 'bb' ? [spawnFlags(c)] : []; });
-  if (researchText) await replaceBetweenMarkers(join(root, RESEARCH_PATH), researchText, RESEARCH_START, RESEARCH_END, researchFlags);
+  if (researchText) await replaceBetweenMarkers(join(root, RESEARCH_PATH), researchText, RESEARCH_START, RESEARCH_END, researchSettings);
 }
+
+// The owner's settings a block carries, all of them (provider, model, reasoning, tier, parallel), as modelSpec writes them.
+const codeSettings = (text: string) => /The project owner chose `([^`]*)`/.exec(text)?.[1] ?? '';
+const researchSettings = (text: string) => (text.match(/<!-- research-model[\w-]*: [^>]* -->/g) ?? []).join('\n');
 
 /**
  * Only the text between existing markers changes: a BOM, indentation and everything else of the owner stay byte for byte.
- * `choiceFlags` are the spawn flags this project's choice puts in the block.
+ * `settings` reads the owner's settings a block carries.
  */
-async function replaceBetweenMarkers(file: string, block: string, start_: string, end_: string, choiceFlags: string[]) {
+async function replaceBetweenMarkers(file: string, block: string, start_: string, end_: string, settings: (text: string) => string) {
   const linked = (await lstat(file).catch(() => null))?.isSymbolicLink() ?? false;
   const text = await readText(file);
   const start = text.indexOf(start_);
   const end = text.indexOf(end_, start);
   if (start < 0 || end < 0) return;
-  // A linked file may be shared by projects: a read never writes through the link. While its block launches this
-  // project's models the link stays, older wording and all; once it names another project's model, this project gets
-  // its own file (writeAtomic replaces the link), so its workers never start on a model its settings do not show.
-  if (linked && choiceFlags.every(f => text.slice(start, end).includes(f))) return;
+  // A linked file may be shared by projects: a read never writes through the link. While its block carries this
+  // project's settings the link stays, older wording and all; once its model, tier, reasoning or parallel mode differ,
+  // this project gets its own file (writeAtomic replaces the link), so it never runs on settings it does not show.
+  if (linked && settings(text.slice(start, end)) === settings(block)) return;
   // A file checked out with CRLF (core.autocrlf on Windows) gets the block in CRLF too, so git sees no change.
   const eol = text.slice(start, end).includes('\r\n') ? '\r\n' : '\n';
   const next = `${text.slice(0, start)}${start_}${eol}${block.trim().replace(/\r?\n/g, eol)}${eol}${text.slice(end)}`;

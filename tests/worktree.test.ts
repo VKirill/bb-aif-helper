@@ -693,3 +693,16 @@ test('a seeded copy is refused while a nested submodule sits on a commit its par
   sh(path.join(top, 'lib'), 'reset', '-q', 'inner');
   await assert.rejects(createWorktree({ basePath: top, name: 'seed-nested-unstaged', seed: true }), /подмодул[а-я]* lib/);
 });
+
+test('a seeded copy is refused for an edit inside a just-added submodule taken back out of the index', async () => {
+  const top = path.join(sandbox, 'seed-unstaged-submodule');
+  const sh = (cwd: string, ...args: string[]) => execFileSync('git', ['-C', cwd, '-c', 'user.email=t@t', '-c', 'user.name=t', '-c', 'protocol.file.allow=always', ...args], { encoding: 'utf8' }).trim();
+  const lib = path.join(sandbox, 'seed-unstaged-submodule-lib');
+  mkdirSync(lib, { recursive: true }); writeFileSync(path.join(lib, 'l.txt'), 'committed\n');
+  sh(lib, 'init', '-q'); sh(lib, 'add', '-A'); sh(lib, 'commit', '-qm', 'A');
+  mkdirSync(top, { recursive: true }); writeFileSync(path.join(top, 'a.txt'), 'a\n');
+  sh(top, 'init', '-q'); sh(top, 'add', '-A'); sh(top, 'commit', '-qm', 'init');
+  sh(top, 'submodule', 'add', '-q', lib, 'vendor/lib'); sh(top, 'restore', '--staged', '.');
+  writeFileSync(path.join(top, 'vendor', 'lib', 'l.txt'), 'edited by the coordinator\n');
+  await assert.rejects(createWorktree({ basePath: top, name: 'seed-unstaged-edit', seed: true }), /подмодул[а-я]* vendor\/lib/);
+});
