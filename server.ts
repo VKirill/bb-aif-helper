@@ -1007,8 +1007,6 @@ export default async function plugin(bb: BbPluginApi) {
   });
   // Parallel /aif-implement: the git and spawn steps run here and on the folder's machine, so no path or JSON ever
   // passes through the coordinator's shell (PowerShell, quoting, `git status` output copied by hand).
-  // spawn-worker titles; research workers' `AIF research · ` never match.
-  const WORKER_TITLE = 'AIF · ';
   async function parallelCommand(command: 'spawn-worker' | 'bring-back', threadId: string, target: string, options: Record<string, string>) {
     const { thread, environment } = await context(threadId);
     const root = environment.path!, hostId = environment.hostId;
@@ -1024,17 +1022,18 @@ export default async function plugin(bb: BbPluginApi) {
       const choice = state.choice;
       // The setting is read at each launch: a coordinator still following the parallel block after the owner turned it off must not spawn.
       if (!choice.parallel) throw new Error('Параллельный режим выключен: перечитайте блок в .ai-factory/skill-context/aif-implement/SKILL.md и работайте одним исполнителем.');
-      const children = await bb.sdk.threads.list({ parentThreadId: threadId, archived: false, limit: 100 });
-      // One-worker flow threads share this chat's environment and stay unarchived for dedup: only workers on their own copy hold a slot.
-      const running = children.filter(c => !c.archivedAt && c.title?.startsWith(WORKER_TITLE) && c.environmentId !== environment.id).length;
-      if (running >= choice.parallel) throw new Error(`Уже запущено исполнителей: ${running} из ${choice.parallel}. Дождитесь их, перенесите результат и архивируйте (bb thread archive <id>), затем запускайте следующих.`);
+      // The ids this command started, not titles or environments: a renamed worker or a moved chat keeps the count right.
+      const kvKey = `parallel-workers:${threadId}`;
+      const known = (await bb.storage.kv.get<string[]>(kvKey)) ?? [];
+      const running = (await Promise.all(known.map(id => bb.sdk.threads.get({ threadId: id }).then(t => (t.archivedAt ? null : id), () => null)))).filter((id): id is string => !!id);
+      if (running.length >= choice.parallel) throw new Error(`Уже запущено исполнителей: ${running.length} из ${choice.parallel}. Дождитесь их, перенесите результат и архивируйте (bb thread archive <id>), затем запускайте следующих.`);
       const { text } = await host.call('readBrief', { path: brief }, { hostId });
       const { sha } = await host.call('headCommit', { root }, { hostId });
       // A fresh suffix per launch: a retry never collides with a copy BB has not removed yet.
       const name = `${planName}-${task}-${randomUUID().slice(0, 8)}`;
       const prompt = `${text.trim()}\n\nYou work in your own copy of the project: the folder BB opened this thread in. Before any change run \`git rev-parse --show-toplevel\`; if it fails, \`cd\` into that folder first. The copy already holds the coordinator's uncommitted work from earlier tasks: \`git status\` shows it as changes. Keep it. Change files only: do not run git commands that change the index or the history (\`git add\`, \`rm\`, \`mv\`, \`stash\`, \`reset\`, \`checkout\`, \`restore\`, \`commit\`); the coordinator takes your changes from the files. If dependencies are missing, install them first. Do not commit.`;
       const spawned = await bb.sdk.threads.spawn({
-        projectId: thread.projectId, origin: 'plugin', title: `${WORKER_TITLE}${planName} · ${task}`, prompt,
+        projectId: thread.projectId, origin: 'plugin', title: `AIF · ${planName} · ${task}`, prompt,
         environment: { type: 'provider', environmentProviderId: WORKTREE_PROVIDER_ID, inputs: { basePath: root, name, ref: sha, seed: true }, machine: { type: 'existing', hostId } },
         parentThreadId: threadId, lifecycleOwnerThreadId: threadId, parentNotifications: 'off',
         providerId: choice.providerId, model: choice.model,
@@ -1045,7 +1044,8 @@ export default async function plugin(bb: BbPluginApi) {
         executionInputSources: { providerId: 'explicit', model: 'explicit',
           ...(choice.reasoning ? { reasoningLevel: 'explicit' as const } : {}), serviceTier: 'explicit' },
       });
-      bb.log.info(`aif-chat: worker spawned threadId=${threadId} worker=${spawned.id} task=${task} sha=${sha.slice(0, 12)}`);
+      await bb.storage.kv.set(kvKey, [...running, spawned.id]);
+      bb.log.info(`aif-chat: worker spawned threadId=${threadId} worker=${spawned.id} task=${task} sha=${sha.slice(0, 12)} running=${running.length + 1}/${choice.parallel}`);
       const data = { id: spawned.id, task, name, sha };
       return { ok: true, data, text: `Исполнитель задачи ${task}: ${spawned.id}` };
     }

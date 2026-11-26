@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { chmod, lstat, mkdir, readFile, realpath, rename, rm, stat, writeFile } from 'node:fs/promises';
+import { chmod, lstat, mkdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 import { RESEARCH_ROLES } from './model.ts';
 import { insideWorktrees } from './worktree.ts';
@@ -140,7 +140,8 @@ async function refreshBlocks(root: string, choice: DelegationChoice, research: R
 
 /** Only the text between existing markers changes: a BOM, indentation and everything else of the owner stay byte for byte. */
 async function replaceBetweenMarkers(file: string, block: string, start_: string, end_: string) {
-  // A linked file may be shared by projects with other choices: a read never rewrites it; an owner's save does.
+  // A linked file may be shared by projects with other choices: a read never rewrites it (the shared text keeps
+  // arriving); an owner's save gives the project its own file instead (writeAtomic).
   if ((await lstat(file).catch(() => null))?.isSymbolicLink()) return;
   const text = await readText(file);
   const start = text.indexOf(start_);
@@ -167,10 +168,10 @@ async function readImplement(root: string): Promise<Omit<DelegationState, Resear
     : { choice: { mode: 'self' }, configured: true, foreign: null, error: `phases.implement.model не в формате provider/model?reasoning=…&tier=…: ${String(phase.model).slice(0, 100)}` };
 }
 
-async function writeAtomic(file: string, content: string) {
-  await mkdir(dirname(file), { recursive: true });
-  // Renaming over a symbolic link would replace the link with a plain file: write to what it points at.
-  const path = await realpath(file).catch(() => file);
+// An owner's save writes this project's own file: renaming over a symbolic link replaces the link, so a file shared
+// with other projects never takes this project's choice.
+async function writeAtomic(path: string, content: string) {
+  await mkdir(dirname(path), { recursive: true });
   const tmp = `${path}.${process.pid}.${randomUUID()}.tmp`;
   // A new file gets the umask's mode; an existing one keeps its own (a private 0600 file stays private).
   const mode = await stat(path).then(s => s.mode & 0o777, () => undefined);

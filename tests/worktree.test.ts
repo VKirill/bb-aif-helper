@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 // On Windows rmSync can silently keep a file whose path has Cyrillic in it; tests delete files with unlinkSync.
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, realpathSync, renameSync, rmSync, unlinkSync, chmodSync, statSync, readdirSync, symlinkSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, realpathSync, renameSync, rmSync, unlinkSync, chmodSync, statSync, readdirSync, symlinkSync, utimesSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { createWorktree, removeWorktree, worktreesRoot } from '../worktree.ts';
@@ -659,4 +659,18 @@ test('a seeded copy is refused while the coordinator has uncommitted edits insid
   sh(path.join(top, 'vendor', 'lib'), 'checkout', '-q', '--', 'l.txt');
   writeFileSync(path.join(top, 'vendor', 'lib', 'new.ts'), 'export {}\n');
   await assert.rejects(createWorktree({ basePath: top, name: 'seed-submodule-new', seed: true }), /vendor\/lib/);
+  // ... even when the submodule hides untracked files from its status.
+  sh(path.join(top, 'vendor', 'lib'), 'config', 'status.showUntrackedFiles', 'no');
+  await assert.rejects(createWorktree({ basePath: top, name: 'seed-submodule-hidden', seed: true }), /vendor\/lib/);
+  unlinkSync(path.join(top, 'vendor', 'lib', 'new.ts'));
+  // A staged rename with spaces in the parent does not break the check, and the check leaves the index as it was.
+  writeFileSync(path.join(top, '1 draft.md'), 'd\n'); sh(top, 'add', '-A'); sh(top, 'commit', '-qm', 'draft');
+  sh(top, 'mv', '1 draft.md', '2 draft.md');
+  const indexFile = path.join(top, '.git', 'index');
+  const before = readFileSync(indexFile);
+  const later = new Date(Date.now() + 5000); utimesSync(path.join(top, 'vendor', 'lib', 'l.txt'), later, later);
+  const renamed = await createWorktree({ basePath: top, name: 'seed-submodule-rename', seed: true });
+  assert.ok(existsSync(path.join(renamed.path, '2 draft.md')));
+  assert.ok(readFileSync(indexFile).equals(before), 'the coordinator\'s index is not rewritten');
+  await removeWorktree({ basePath: top, root: renamed.root });
 });

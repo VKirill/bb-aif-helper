@@ -231,27 +231,32 @@ test('plan tasks go only to BB workers, survive a compaction, and the full suite
   assert.ok(parallel.includes('a task is verified only when its named checks pass'));
 });
 
-test('a linked SKILL.md stays a link: a read leaves the shared file alone, an owner save writes through the link', async t => {
-  const { symlink, lstat: lstatFile, mkdir: makeDir } = await import('node:fs/promises');
-  const root = await project();
+test('a linked SKILL.md: a read keeps the link and the shared text, a save gives this project its own file, other projects keep theirs', async t => {
+  const { symlink, lstat: lstatFile, rm: remove } = await import('node:fs/promises');
   const choice = { mode: 'bb' as const, providerId: 'codex', model: 'gpt-6.2-sol', parallel: 2 };
-  await writeDelegation(root, choice);
-  const file = join(root, CONTEXT_PATH);
   const shared = join(await mkdtemp(join(tmpdir(), 'aif-shared-')), 'SKILL.md');
+  const link = async (root: string) => { const file = join(root, CONTEXT_PATH); await remove(file); await symlink(shared, file, 'file'); return file; };
+  const a = await project(), b = await project();
+  await writeDelegation(a, choice); await writeDelegation(b, choice);
   // The shared file holds an older managed block, as after a plugin update.
-  const stale = (await readFile(file, 'utf8')).replace('bb plugin run aif-chat bring-back --worker <id> --json', 'OLD bring-back');
+  const stale = (await readFile(join(a, CONTEXT_PATH), 'utf8')).replace('bb plugin run aif-chat bring-back --worker <id> --json', 'OLD bring-back');
   await writeFile(shared, stale);
-  const { rm: remove } = await import('node:fs/promises');
-  await remove(file); await makeDir(join(root, '.ai-factory/skill-context/aif-implement'), { recursive: true });
-  try { await symlink(shared, file, 'file'); } catch (e: any) {
+  let fileA: string, fileB: string;
+  try { fileA = await link(a); fileB = await link(b); } catch (e: any) {
     if (process.platform === 'win32' && e.code === 'EPERM') return t.skip('symbolic links need Developer Mode on this Windows runner');
     throw e;
   }
-  await readDelegation(root);
-  assert.ok((await lstatFile(file)).isSymbolicLink(), 'the read keeps the link');
+  await readDelegation(a);
+  assert.ok((await lstatFile(fileA)).isSymbolicLink(), 'the read keeps the link');
   assert.equal(await readFile(shared, 'utf8'), stale, 'a read never rewrites a shared file');
-  await writeDelegation(root, { ...choice, model: 'gpt-6.2-terra' });
-  assert.ok((await lstatFile(file)).isSymbolicLink(), 'the save keeps the link');
-  const saved = await readFile(shared, 'utf8');
-  assert.ok(saved.includes('gpt-6.2-terra') && !saved.includes('OLD bring-back'), 'the owner\'s save reaches the shared file');
+  // Project B saves another model: B gets its own file, A and the shared file keep theirs.
+  await writeDelegation(b, { ...choice, model: 'gpt-6.2-terra' });
+  assert.ok(!(await lstatFile(fileB)).isSymbolicLink());
+  assert.ok((await readFile(fileB, 'utf8')).includes('gpt-6.2-terra'));
+  assert.equal(await readFile(shared, 'utf8'), stale, 'B\'s save does not reach the file A follows');
+  assert.ok(!(await readFile(fileA, 'utf8')).includes('gpt-6.2-terra'));
+  // A switches to self: only its own link goes, the shared file stays.
+  await writeDelegation(a, { mode: 'self' });
+  assert.equal(await exists(fileA), false);
+  assert.equal(await readFile(shared, 'utf8'), stale);
 });

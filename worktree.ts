@@ -72,16 +72,7 @@ async function seed(top: string, root: string, sha: string) {
   const inTemp = (args: string[]) => run('git', ['-C', top, ...args], { timeout: 120_000, maxBuffer: 4 << 20, env });
   try {
     if ((await git(top, ['ls-files', '-u'])).length) throw new Error('В рабочей папке не разрешён конфликт слияния: разрешите его до запуска исполнителей');
-    // A copy carries a submodule only as its commit: edits or new files inside it would silently be missing and the
-    // worker would test other code. Porcelain v2 marks such a submodule `S.M.` / `S..U` (`ignore = all` overridden).
-    const status = (await run('git', ['-C', top, 'status', '--porcelain=v2', '-z', '--ignore-submodules=none'], { timeout: 120_000, maxBuffer: 4 << 20 })).stdout.split('\0');
-    const dirty = status.flatMap(line => {
-      const fields = line.split(' ');
-      if (fields[0] !== '1' && fields[0] !== '2') return [];
-      const sub = fields[2];
-      if (!sub.startsWith('S') || (sub[2] !== 'M' && sub[3] !== 'U')) return [];
-      return [fields.slice(fields[0] === '1' ? 8 : 9).join(' ')];
-    });
+    const dirty = await dirtySubmodules(top);
     if (dirty.length) throw new Error(`Незакоммиченные изменения внутри подмодуля ${dirty.join(', ')}: копия исполнителя их не получит. Закоммитьте их в подмодуле или сделайте эту задачу сами`);
     // The temporary index starts as a copy of the coordinator's own: what it staged by hand (a force-added ignored
     // file, a case-only rename, a removal from the index) is part of its work too.
@@ -94,6 +85,27 @@ async function seed(top: string, root: string, sha: string) {
     await git(root, ['read-tree', '--reset', '-u', tree]);
     await writeFile(await git(root, ['rev-parse', '--path-format=absolute', '--git-path', BROUGHT_BACK]), `${tree}\n`);
   } finally { await removePath(dir).catch(() => undefined); }
+}
+
+/**
+ * Checked-out submodules (nested ones too) with uncommitted edits or new files. A copy carries a submodule only as
+ * its commit, so the worker would test other code. Each submodule is asked itself, with flags that override its own
+ * `ignore` and `status.showUntrackedFiles`; `--no-optional-locks` keeps the coordinator's index untouched.
+ */
+async function dirtySubmodules(repo: string, prefix = ''): Promise<string[]> {
+  const entries = (await run('git', ['-C', repo, 'ls-files', '-s', '-z'], { timeout: 120_000, maxBuffer: 16 << 20 })).stdout.split('\0');
+  const found: string[] = [];
+  for (const entry of entries) {
+    const tab = entry.indexOf('\t');
+    if (!entry.startsWith('160000 ') || tab < 0) continue;
+    const rel = entry.slice(tab + 1), sub = path.join(repo, rel);
+    // A submodule never checked out is an empty folder: git there would answer for the parent repository.
+    if (!(await present(path.join(sub, '.git')))) continue;
+    const changes = (await run('git', ['--no-optional-locks', '-C', sub, 'status', '--porcelain', '-z', '--untracked-files=all', '--ignore-submodules=all'], { timeout: 120_000, maxBuffer: 4 << 20 })).stdout;
+    if (changes) found.push(prefix + rel);
+    found.push(...await dirtySubmodules(sub, `${prefix}${rel}/`));
+  }
+  return found;
 }
 
 export async function createWorktree(input: { basePath: string; name: string; ref?: string; seed?: boolean }): Promise<CreatedWorktree> {
