@@ -72,6 +72,17 @@ async function seed(top: string, root: string, sha: string) {
   const inTemp = (args: string[]) => run('git', ['-C', top, ...args], { timeout: 120_000, maxBuffer: 4 << 20, env });
   try {
     if ((await git(top, ['ls-files', '-u'])).length) throw new Error('В рабочей папке не разрешён конфликт слияния: разрешите его до запуска исполнителей');
+    // A copy carries a submodule only as its commit: edits or new files inside it would silently be missing and the
+    // worker would test other code. Porcelain v2 marks such a submodule `S.M.` / `S..U` (`ignore = all` overridden).
+    const status = (await run('git', ['-C', top, 'status', '--porcelain=v2', '-z', '--ignore-submodules=none'], { timeout: 120_000, maxBuffer: 4 << 20 })).stdout.split('\0');
+    const dirty = status.flatMap(line => {
+      const fields = line.split(' ');
+      if (fields[0] !== '1' && fields[0] !== '2') return [];
+      const sub = fields[2];
+      if (!sub.startsWith('S') || (sub[2] !== 'M' && sub[3] !== 'U')) return [];
+      return [fields.slice(fields[0] === '1' ? 8 : 9).join(' ')];
+    });
+    if (dirty.length) throw new Error(`Незакоммиченные изменения внутри подмодуля ${dirty.join(', ')}: копия исполнителя их не получит. Закоммитьте их в подмодуле или сделайте эту задачу сами`);
     // The temporary index starts as a copy of the coordinator's own: what it staged by hand (a force-added ignored
     // file, a case-only rename, a removal from the index) is part of its work too.
     const index = await git(top, ['rev-parse', '--path-format=absolute', '--git-path', 'index']);

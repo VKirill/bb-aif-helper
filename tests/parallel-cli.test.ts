@@ -9,6 +9,8 @@ async function setup() {
   let choice: any = { mode: 'bb', providerId: 'codex', model: 'gpt-6.2-sol', reasoning: 'high', tier: 'fast', parallel: 2 };  // guardian: allow — loose mock of the BB SDK and host RPC in this test
   const calls: { method: string; input: any; hostId: string }[] = [];  // guardian: allow — loose mock of the BB SDK and host RPC in this test
   const spawns: any[] = [];  // guardian: allow — loose mock of the BB SDK and host RPC in this test
+  const children: any[] = [];  // guardian: allow — loose mock of the BB SDK and host RPC in this test
+  let trackChildren = false;
   const threads: Record<string, any> = {
     thr_test: makeThreadResponse({ id: 'thr_test', projectId: 'proj_test', environmentId: 'env_test', status: 'idle', runtime: { displayStatus: 'idle' } }),
     thr_worker: { ...makeThreadResponse({ id: 'thr_worker', projectId: 'proj_test', environmentId: 'env_worker', status: 'idle', runtime: { displayStatus: 'idle' } }), parentThreadId: 'thr_test' },
@@ -20,7 +22,8 @@ async function setup() {
   };
   const h = createFakePluginHost({ pluginId: 'aif-chat', agentSkillIds: ['aif-chat', 'aif-scout'], experimental_hostEntry: true,
     sdk: {
-      threads: { get: async ({ threadId }: any) => threads[threadId], list: async () => [], spawn: async (args: any) => { spawns.push(args); return { ...threads.thr_test, id: 'thr_new' }; },
+      // A spawned worker is listed as an unarchived child on its own copy, as BB answers after the spawn.
+      threads: { get: async ({ threadId }: any) => threads[threadId], list: async () => [...children], spawn: async (args: any) => { spawns.push(args); const t = { ...threads.thr_test, id: `thr_new${spawns.length}`, title: args.title, parentThreadId: 'thr_test', environmentId: `env_copy${spawns.length}` }; if (trackChildren) children.push(t); return { ...t, id: 'thr_new' }; },
         // thr_worker finished one turn: started at seq 1, completed at seq 2.
         events: { list: async ({ afterSeq = '0', types, order, limit }: any) => { let rows = [{ seq: 1, type: 'turn/started', createdAt: 0 }, { seq: 2, type: 'turn/completed', createdAt: 0, data: { status: 'completed' } }].filter(e => e.seq > Number(afterSeq) && (!types || types.includes(e.type))); if (order === 'desc') rows = rows.reverse(); return limit ? rows.slice(0, Number(limit)) : rows; },
           wait: async () => null },
@@ -38,7 +41,7 @@ async function setup() {
     },
   });
   await plugin(h.bb);
-  return { h, calls, spawns, setChoice: (c: any) => { choice = c; } };
+  return { h, calls, spawns, children, setChoice: (c: any) => { choice = c; }, track: () => { trackChildren = true; } };
 }
 
 test('spawn-worker starts the owner model on a fresh copy seeded with the coordinator\'s work, as a child of the chat', async () => {
@@ -131,5 +134,30 @@ test('a worker never inherits the coordinator\'s service tier: no tier in the Co
     assert.equal(result.exitCode, 0, result.stderr);
     assert.equal(spawns[0].serviceTier, 'default');
     assert.equal(spawns[0].executionInputSources.serviceTier, 'explicit');
+  } finally { await h.harness.lifecycle.dispose(); }
+});
+
+test('spawn-worker reads the setting at each launch: parallel off or the limit reached refuses, even for two launches at once', async () => {
+  const { h, spawns, children, setChoice, track } = await setup();
+  const spawn = (task: string) => h.harness.behavior.runCli(['spawn-worker', '--thread', 'thr_test', '--target', 'demo', '--task', task, '--brief', 'C:\\Temp\\brief.md', '--json']);
+  try {
+    track();
+    setChoice({ mode: 'bb', providerId: 'codex', model: 'gpt-6.2-sol' });
+    const off = await Promise.all([spawn('1'), spawn('2')]);
+    assert.deepEqual(off.map(r => r.exitCode), [1, 1]);
+    assert.match(off[0].stderr ?? '', /Параллельный режим выключен/);
+    assert.equal(spawns.length, 0, 'no worker starts after the owner turned parallel off');
+
+    setChoice({ mode: 'bb', providerId: 'codex', model: 'gpt-6.2-sol', parallel: 2 });
+    // A one-worker flow thread of this chat (same environment) and a research worker hold no slot.
+    children.push({ id: 'thr_one', title: 'AIF · demo · 9', parentThreadId: 'thr_test', environmentId: 'env_test', archivedAt: null },
+      { id: 'thr_research', title: 'AIF research · aif-scout · x', parentThreadId: 'thr_test', environmentId: 'env_r', archivedAt: null });
+    const three = await Promise.all([spawn('1'), spawn('2'), spawn('3')]);
+    assert.deepEqual(three.map(r => r.exitCode), [0, 0, 1], 'launched at once, the third waits for a slot');
+    assert.match(three[2].stderr ?? '', /Уже запущено исполнителей: 2 из 2/);
+    assert.equal(spawns.length, 2);
+    // Archiving a finished worker frees its slot.
+    children[2].archivedAt = '2026-11-26T00:00:00Z';
+    assert.equal((await spawn('3')).exitCode, 0);
   } finally { await h.harness.lifecycle.dispose(); }
 });

@@ -1007,6 +1007,8 @@ export default async function plugin(bb: BbPluginApi) {
   });
   // Parallel /aif-implement: the git and spawn steps run here and on the folder's machine, so no path or JSON ever
   // passes through the coordinator's shell (PowerShell, quoting, `git status` output copied by hand).
+  // spawn-worker titles; research workers' `AIF research · ` never match.
+  const WORKER_TITLE = 'AIF · ';
   async function parallelCommand(command: 'spawn-worker' | 'bring-back', threadId: string, target: string, options: Record<string, string>) {
     const { thread, environment } = await context(threadId);
     const root = environment.path!, hostId = environment.hostId;
@@ -1020,13 +1022,19 @@ export default async function plugin(bb: BbPluginApi) {
       const state = await host.call('delegation', { root }, { hostId });
       if (state.choice.mode !== 'bb') throw new Error('Делегирование кода выключено: выполняйте задачи сами.');
       const choice = state.choice;
+      // The setting is read at each launch: a coordinator still following the parallel block after the owner turned it off must not spawn.
+      if (!choice.parallel) throw new Error('Параллельный режим выключен: перечитайте блок в .ai-factory/skill-context/aif-implement/SKILL.md и работайте одним исполнителем.');
+      const children = await bb.sdk.threads.list({ parentThreadId: threadId, archived: false, limit: 100 });
+      // One-worker flow threads share this chat's environment and stay unarchived for dedup: only workers on their own copy hold a slot.
+      const running = children.filter(c => !c.archivedAt && c.title?.startsWith(WORKER_TITLE) && c.environmentId !== environment.id).length;
+      if (running >= choice.parallel) throw new Error(`Уже запущено исполнителей: ${running} из ${choice.parallel}. Дождитесь их, перенесите результат и архивируйте (bb thread archive <id>), затем запускайте следующих.`);
       const { text } = await host.call('readBrief', { path: brief }, { hostId });
       const { sha } = await host.call('headCommit', { root }, { hostId });
       // A fresh suffix per launch: a retry never collides with a copy BB has not removed yet.
       const name = `${planName}-${task}-${randomUUID().slice(0, 8)}`;
       const prompt = `${text.trim()}\n\nYou work in your own copy of the project: the folder BB opened this thread in. Before any change run \`git rev-parse --show-toplevel\`; if it fails, \`cd\` into that folder first. The copy already holds the coordinator's uncommitted work from earlier tasks: \`git status\` shows it as changes. Keep it. Change files only: do not run git commands that change the index or the history (\`git add\`, \`rm\`, \`mv\`, \`stash\`, \`reset\`, \`checkout\`, \`restore\`, \`commit\`); the coordinator takes your changes from the files. If dependencies are missing, install them first. Do not commit.`;
       const spawned = await bb.sdk.threads.spawn({
-        projectId: thread.projectId, origin: 'plugin', title: `AIF · ${planName} · ${task}`, prompt,
+        projectId: thread.projectId, origin: 'plugin', title: `${WORKER_TITLE}${planName} · ${task}`, prompt,
         environment: { type: 'provider', environmentProviderId: WORKTREE_PROVIDER_ID, inputs: { basePath: root, name, ref: sha, seed: true }, machine: { type: 'existing', hostId } },
         parentThreadId: threadId, lifecycleOwnerThreadId: threadId, parentNotifications: 'off',
         providerId: choice.providerId, model: choice.model,
@@ -1127,7 +1135,9 @@ export default async function plugin(bb: BbPluginApi) {
           return { exitCode: 0, stdout: json ? JSON.stringify(result) : text };
         }
         if (command === 'spawn-worker' || command === 'bring-back') {
-          const result = await parallelCommand(command, input.threadId, input.target, options);
+          // Launches of one chat run one by one, so two at once cannot both pass the worker limit.
+          const run = () => parallelCommand(command, input.threadId, input.target, options);
+          const result = command === 'spawn-worker' ? await serial(`spawn-worker:${input.threadId}`, run) : await run();
           return { exitCode: result.ok ? 0 : 1, stdout: json ? JSON.stringify(result.data) : result.text };
         }
         if (!['status', 'show', 'check-updates'].includes(command)) throw new Error('Неизвестная команда.');

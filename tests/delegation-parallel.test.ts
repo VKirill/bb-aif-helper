@@ -230,3 +230,28 @@ test('plan tasks go only to BB workers, survive a compaction, and the full suite
   assert.ok(parallel.includes("every check its tasks name that the workers skipped: the build, the full test suite, the project's full check script"));
   assert.ok(parallel.includes('a task is verified only when its named checks pass'));
 });
+
+test('a linked SKILL.md stays a link: a read leaves the shared file alone, an owner save writes through the link', async t => {
+  const { symlink, lstat: lstatFile, mkdir: makeDir } = await import('node:fs/promises');
+  const root = await project();
+  const choice = { mode: 'bb' as const, providerId: 'codex', model: 'gpt-6.2-sol', parallel: 2 };
+  await writeDelegation(root, choice);
+  const file = join(root, CONTEXT_PATH);
+  const shared = join(await mkdtemp(join(tmpdir(), 'aif-shared-')), 'SKILL.md');
+  // The shared file holds an older managed block, as after a plugin update.
+  const stale = (await readFile(file, 'utf8')).replace('bb plugin run aif-chat bring-back --worker <id> --json', 'OLD bring-back');
+  await writeFile(shared, stale);
+  const { rm: remove } = await import('node:fs/promises');
+  await remove(file); await makeDir(join(root, '.ai-factory/skill-context/aif-implement'), { recursive: true });
+  try { await symlink(shared, file, 'file'); } catch (e: any) {
+    if (process.platform === 'win32' && e.code === 'EPERM') return t.skip('symbolic links need Developer Mode on this Windows runner');
+    throw e;
+  }
+  await readDelegation(root);
+  assert.ok((await lstatFile(file)).isSymbolicLink(), 'the read keeps the link');
+  assert.equal(await readFile(shared, 'utf8'), stale, 'a read never rewrites a shared file');
+  await writeDelegation(root, { ...choice, model: 'gpt-6.2-terra' });
+  assert.ok((await lstatFile(file)).isSymbolicLink(), 'the save keeps the link');
+  const saved = await readFile(shared, 'utf8');
+  assert.ok(saved.includes('gpt-6.2-terra') && !saved.includes('OLD bring-back'), 'the owner\'s save reaches the shared file');
+});

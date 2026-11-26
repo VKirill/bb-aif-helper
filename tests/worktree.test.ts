@@ -638,3 +638,25 @@ test('review of 71dce6b: a submodule below a folder — unreadable, symlinked or
   assert.deepEqual([back.applied, back.files], [true, ['p.txt']], back.error);
   await removeWorktree({ basePath: top, root: copy.root });
 });
+
+test('a seeded copy is refused while the coordinator has uncommitted edits inside a submodule, naming it', async () => {
+  const top = path.join(sandbox, 'seed-submodule-edit');
+  const sh = (cwd: string, ...args: string[]) => execFileSync('git', ['-C', cwd, '-c', 'user.email=t@t', '-c', 'user.name=t', '-c', 'protocol.file.allow=always', ...args], { encoding: 'utf8' }).trim();
+  const lib = path.join(sandbox, 'seed-submodule-edit-lib');
+  mkdirSync(lib, { recursive: true }); writeFileSync(path.join(lib, 'l.txt'), 'committed\n');
+  sh(lib, 'init', '-q'); sh(lib, 'add', '-A'); sh(lib, 'commit', '-qm', 'A');
+  mkdirSync(top, { recursive: true });
+  sh(top, 'init', '-q'); sh(top, 'submodule', 'add', '-q', lib, 'vendor/lib'); sh(top, 'commit', '-qm', 'init');
+  // A clean submodule never blocks a copy.
+  const clean = await createWorktree({ basePath: top, name: 'seed-submodule-clean', seed: true });
+  await removeWorktree({ basePath: top, root: clean.root });
+  // The worker would test the committed text, not this edit: refused, and no copy is left behind.
+  writeFileSync(path.join(top, 'vendor', 'lib', 'l.txt'), 'edited by the coordinator\n');
+  sh(top, 'config', 'submodule.vendor/lib.ignore', 'all'); // hidden from a plain status, still found
+  await assert.rejects(createWorktree({ basePath: top, name: 'seed-submodule-edit', seed: true }), /подмодул[а-я]* vendor\/lib/);
+  assert.equal(existsSync(path.join(worktreesRoot(), path.basename(path.dirname(clean.root)), 'seed-submodule-edit')), false);
+  // A new file inside the submodule is such an edit too.
+  sh(path.join(top, 'vendor', 'lib'), 'checkout', '-q', '--', 'l.txt');
+  writeFileSync(path.join(top, 'vendor', 'lib', 'new.ts'), 'export {}\n');
+  await assert.rejects(createWorktree({ basePath: top, name: 'seed-submodule-new', seed: true }), /vendor\/lib/);
+});
