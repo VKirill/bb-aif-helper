@@ -1,0 +1,37 @@
+name: Own runners
+# Full suite on the maintainer's machines (Linux, macOS, Windows). No pull_request trigger:
+# code from forks never reaches them. Runs only in VKirill/bb-aif-helper, where the runners are
+# registered; resource limits live in each runner's service (see CONTRIBUTING.md).
+on:
+  push:
+    branches: [main, dev]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: own-runners-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: Own (${{ matrix.os }})
+    if: github.repository == 'VKirill/bb-aif-helper'
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [linux-ci, macos-ci, windows-ci]
+    runs-on: [self-hosted, '${{ matrix.os }}']
+    timeout-minutes: 30
+    env:
+      BB_TELEMETRY: 'false'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - run: node -v
+      - run: npm ci --include=dev --no-audit --no-fund --fetch-retries=5
+      - run: npm run typecheck
+      # Two test workers keep a shared machine responsive; the suite takes under a minute on Linux.
+      - run: npx tsx --test --test-force-exit --test-concurrency=2 --test-timeout=60000 tests/*.test.ts tests/*.test.mjs

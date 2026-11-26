@@ -29,6 +29,8 @@ React и frontend SDK предоставляет BB. Не коммитьте `no
 
 `.github/workflows/ci.yml` запускает typecheck, тесты и сборку на Windows и Linux для pull request и push в `main`. Используются Node 24 и зафиксированный CLI `bb-app@0.49.0`; сборка не требует работающего BB-сервера.
 
+`.github/workflows/own-runners.yml` работает только в форке `VKirill/bb-aif-helper`: при push в `main` и `dev` и при ручном запуске он прогоняет typecheck и тесты на своих машинах сопровождающего (`linux-ci`, `macos-ci`, `windows-ci`). Триггера `pull_request` нет, поэтому код из форков на эти машины не попадает. Ресурсы ограничены в службах раннеров: Linux — `CPUQuota=400%`, `MemoryMax=6G`, `Nice=10`; macOS — `Nice=15`, `LowPriorityIO`, `ProcessType=Background`; Windows — VM на 4 vCPU и 12 ГБ.
+
 После успешных проверок push в `main` в `ichinya/bb-aif-helper` получает аннотированный тег `v<version>` из `package.json`, например `v0.8.5`. Версии manifest и lockfile должны совпадать; автоматически выпускаются только стабильные `X.Y.Z`. При уже существующем теге он пропускается без изменения. Для следующего выпуска поднимите версии в обоих файлах и обновите CHANGELOG. Устаревший запуск, когда `main` уже ушёл вперёд, тоже пропускается.
 
 Права `contents: write` есть только у задачи тега, после всех проверок. Она не устанавливает зависимости и использует штатный `GITHUB_TOKEN`; отдельный PAT не нужен. PR, fork и другие ветки теги не создают. GitHub Release и npm-публикация не выполняются. Тег от `GITHUB_TOKEN` не запускает отдельные tag-push workflows, поэтому проверки находятся в этом же workflow.
