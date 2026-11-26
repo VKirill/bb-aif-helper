@@ -120,8 +120,8 @@ test('«В работе» shows the requested model and warns on fallback and mi
   const tab = app.tabs.find(t => t.id === 'workflow')!;
   const slot = renderSlot(tab as any, { threadId: 'thr_working', environment: { id: 'env_working' } }, { rpc: { status: () => s, delegation } });
   try {
-    // The first render of the whole tab in this file; a cold Windows runner needs more than the default second.
-    const aifRow = (await slot.findByText('AIF · demo · 1', {}, { timeout: 10_000 })).closest('li')!;
+    // The first render of the whole tab in this file; a loaded Windows runner needs over 10 s (PR #3, run 45869464666).
+    const aifRow = (await slot.findByText('AIF · demo · 1', {}, { timeout: 30_000 })).closest('li')!;
     within(aifRow).getByText(/gpt-6\.2-sol · high/);
     within(aifRow).getByText(/Подмена: gpt-6\.2-sol → gpt-6\.2-mini \(отказ модели\)/);
     within(aifRow).getByText(/Ожидалась модель codex · gpt-6\.2-luna/);
