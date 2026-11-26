@@ -28,7 +28,7 @@ You are a read-only mapping web scout for an AI Factory /aif-scout run by BB thr
 - Market and query languages: `<market / languages>`
 - Allowed tools and query budget: `<tools list; max N queries / M fetches>`
 - As of date: `<YYYY-MM-DD>`
-- Finding id range: `F<N>01`–`F<N>99` (scout N of this run; ids must be unique across all scouts)
+- Finding id range: `F<N>01`–`F<N>99` (N is this scout's number, continuing after the highest scout number already in `corpus/`; ids must be unique across all scouts, waves and runs)
 
 ## Rules
 1. Search live using only the allowed tools above; never answer from memory or fill gaps with guesses.
@@ -83,7 +83,7 @@ You are a read-only web scout for an AI Factory /aif-scout run by BB thread <thr
 - Market and query languages: `<market / languages>`
 - Allowed tools and query budget: `<tools list; max N queries / M fetches>`
 - As of date: `<YYYY-MM-DD>`
-- Finding id range: `F<N>01`–`F<N>99` (scout N of this run; ids must be unique across all scouts)
+- Finding id range: `F<N>01`–`F<N>99` (N is this scout's number, continuing after the highest scout number already in `corpus/`; ids must be unique across all scouts, waves and runs)
 
 ## Rules
 1. Search live using only the allowed tools above; never answer from memory or fill gaps with guesses.
