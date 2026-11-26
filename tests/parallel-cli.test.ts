@@ -22,7 +22,9 @@ async function setup() {
   const h = createFakePluginHost({ pluginId: 'aif-chat', agentSkillIds: ['aif-chat', 'aif-scout'], experimental_hostEntry: true,
     sdk: {
       // Each spawn gets its own id, readable afterwards, as BB answers; most tests archive it at once, so the limit never bites.
-      threads: { get: async ({ threadId }: any) => { if (!threads[threadId]) throw new Error('not found'); return threads[threadId]; }, list: async () => [], spawn: async (args: any) => { spawns.push(args); const id = spawns.length === 1 ? 'thr_new' : `thr_new${spawns.length}`; threads[id] = { ...threads.thr_test, id, title: args.title, parentThreadId: 'thr_test', environmentId: `env_copy${spawns.length}`, archivedAt: keepRunning ? null : 'archived' }; return threads[id]; },
+      threads: { get: async ({ threadId }: any) => { if (!threads[threadId]) throw new Error('not found'); return threads[threadId]; }, // list filters as BB does: children of a parent, spawned by a plugin, archived ones left out on request.
+        list: async (a: any = {}) => Object.values(threads).filter(t => (!a.parentThreadId || t.parentThreadId === a.parentThreadId) && (!a.originPluginId || t.originPluginId === a.originPluginId) && (a.archived !== false || !t.archivedAt)),
+        spawn: async (args: any) => { spawns.push(args); const id = spawns.length === 1 ? 'thr_new' : `thr_new${spawns.length}`; threads[id] = { ...threads.thr_test, id, title: args.title, parentThreadId: 'thr_test', originPluginId: 'aif-chat', environmentId: `env_copy${spawns.length}`, archivedAt: keepRunning ? null : 'archived' }; return threads[id]; },
         // thr_worker finished one turn: started at seq 1, completed at seq 2.
         events: { list: async ({ afterSeq = '0', types, order, limit }: any) => { let rows = [{ seq: 1, type: 'turn/started', createdAt: 0 }, { seq: 2, type: 'turn/completed', createdAt: 0, data: { status: 'completed' } }].filter(e => e.seq > Number(afterSeq) && (!types || types.includes(e.type))); if (order === 'desc') rows = rows.reverse(); return limit ? rows.slice(0, Number(limit)) : rows; },
           wait: async () => null },
@@ -160,5 +162,13 @@ test('spawn-worker reads the setting at each launch: parallel off or the limit r
     delete threads.thr_new2;
     assert.equal((await spawn('4')).exitCode, 0);
     assert.equal(spawns.length, 4);
+    // A worker restored from the archive takes its slot back.
+    threads.thr_new.archivedAt = null;
+    assert.match((await spawn('5')).stderr ?? '', /Уже запущено исполнителей: 3 из 2/);
+    // A worker an older plugin version started, with nothing recorded about it here, counts too.
+    for (const id of ['thr_new', 'thr_new3', 'thr_new4']) delete threads[id];
+    threads.thr_old = { ...threads.thr_test, id: 'thr_old', parentThreadId: 'thr_test', originPluginId: 'aif-chat', archivedAt: null };
+    assert.equal((await spawn('5')).exitCode, 0);
+    assert.equal((await spawn('6')).exitCode, 1, 'the old worker and the new one fill the two slots');
   } finally { await h.harness.lifecycle.dispose(); }
 });

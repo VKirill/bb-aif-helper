@@ -1022,10 +1022,10 @@ export default async function plugin(bb: BbPluginApi) {
       const choice = state.choice;
       // The setting is read at each launch: a coordinator still following the parallel block after the owner turned it off must not spawn.
       if (!choice.parallel) throw new Error('Параллельный режим выключен: перечитайте блок в .ai-factory/skill-context/aif-implement/SKILL.md и работайте одним исполнителем.');
-      // The ids this command started, not titles or environments: a renamed worker or a moved chat keeps the count right.
-      const kvKey = `parallel-workers:${threadId}`;
-      const known = (await bb.storage.kv.get<string[]>(kvKey)) ?? [];
-      const running = (await Promise.all(known.map(id => bb.sdk.threads.get({ threadId: id }).then(t => (t.archivedAt ? null : id), () => null)))).filter((id): id is string => !!id);
+      // BB's own record, not a list kept here: every unarchived child this plugin spawned under the chat counts — renamed,
+      // restored from the archive or started by an older version — and a failed write can never lose a live worker.
+      const running = (await bb.sdk.threads.list({ parentThreadId: threadId, originPluginId: 'aif-chat', archived: false, includeHidden: true, limit: 200 }))
+        .filter(t => !t.archivedAt);
       if (running.length >= choice.parallel) throw new Error(`Уже запущено исполнителей: ${running.length} из ${choice.parallel}. Дождитесь их, перенесите результат и архивируйте (bb thread archive <id>), затем запускайте следующих.`);
       const { text } = await host.call('readBrief', { path: brief }, { hostId });
       const { sha } = await host.call('headCommit', { root }, { hostId });
@@ -1044,7 +1044,6 @@ export default async function plugin(bb: BbPluginApi) {
         executionInputSources: { providerId: 'explicit', model: 'explicit',
           ...(choice.reasoning ? { reasoningLevel: 'explicit' as const } : {}), serviceTier: 'explicit' },
       });
-      await bb.storage.kv.set(kvKey, [...running, spawned.id]);
       bb.log.info(`aif-chat: worker spawned threadId=${threadId} worker=${spawned.id} task=${task} sha=${sha.slice(0, 12)} running=${running.length + 1}/${choice.parallel}`);
       const data = { id: spawned.id, task, name, sha };
       return { ok: true, data, text: `Исполнитель задачи ${task}: ${spawned.id}` };

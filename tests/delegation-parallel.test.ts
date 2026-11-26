@@ -260,3 +260,22 @@ test('a linked SKILL.md: a read keeps the link and the shared text, a save gives
   assert.equal(await exists(fileA), false);
   assert.equal(await readFile(shared, 'utf8'), stale);
 });
+
+test('a SKILL.md linked to another project\'s block: a read gives this project its own file with its own model', async t => {
+  const { symlink, lstat: lstatFile, rm: remove } = await import('node:fs/promises');
+  const a = await project(), b = await project();
+  await writeDelegation(a, { mode: 'bb', providerId: 'codex', model: 'gpt-6.2-sol' });
+  await writeDelegation(b, { mode: 'bb', providerId: 'codex', model: 'gpt-6.2-terra' });
+  const fileB = join(b, CONTEXT_PATH);
+  const sharedText = await readFile(join(a, CONTEXT_PATH), 'utf8');
+  await remove(fileB);
+  try { await symlink(join(a, CONTEXT_PATH), fileB, 'file'); } catch (e: any) {
+    if (process.platform === 'win32' && e.code === 'EPERM') return t.skip('symbolic links need Developer Mode on this Windows runner');
+    throw e;
+  }
+  await readDelegation(b);
+  assert.ok(!(await lstatFile(fileB)).isSymbolicLink(), 'the link to a block for another model is replaced');
+  const own = await readFile(fileB, 'utf8');
+  assert.ok(own.includes("--model 'gpt-6.2-terra'") && !own.includes("--model 'gpt-6.2-sol'"), 'B\'s commands start B\'s model');
+  assert.equal(await readFile(join(a, CONTEXT_PATH), 'utf8'), sharedText, 'A\'s file is untouched');
+});

@@ -674,3 +674,22 @@ test('a seeded copy is refused while the coordinator has uncommitted edits insid
   assert.ok(readFileSync(indexFile).equals(before), 'the coordinator\'s index is not rewritten');
   await removeWorktree({ basePath: top, root: renamed.root });
 });
+
+test('a seeded copy is refused while a nested submodule sits on a commit its parent submodule has not committed', async () => {
+  const top = path.join(sandbox, 'seed-nested-gitlink');
+  const sh = (cwd: string, ...args: string[]) => execFileSync('git', ['-C', cwd, '-c', 'user.email=t@t', '-c', 'user.name=t', '-c', 'protocol.file.allow=always', ...args], { encoding: 'utf8' }).trim();
+  const inner = path.join(sandbox, 'seed-nested-gitlink-inner'), lib = path.join(sandbox, 'seed-nested-gitlink-lib');
+  mkdirSync(inner, { recursive: true }); writeFileSync(path.join(inner, 'i.txt'), 'A\n');
+  sh(inner, 'init', '-q'); sh(inner, 'add', '-A'); sh(inner, 'commit', '-qm', 'A');
+  mkdirSync(lib, { recursive: true }); sh(lib, 'init', '-q'); sh(lib, '-c', 'protocol.file.allow=always', 'submodule', 'add', '-q', inner, 'inner'); sh(lib, 'commit', '-qm', 'lib');
+  mkdirSync(top, { recursive: true }); sh(top, 'init', '-q'); sh(top, 'submodule', 'add', '-q', lib, 'lib'); sh(top, 'commit', '-qm', 'init');
+  sh(top, 'submodule', 'update', '-q', '--init', '--recursive');
+  // The coordinator moves the nested submodule to a newer commit and stages it in lib, without committing lib.
+  const nested = path.join(top, 'lib', 'inner');
+  writeFileSync(path.join(nested, 'i.txt'), 'B\n'); sh(nested, 'commit', '-qam', 'B');
+  sh(path.join(top, 'lib'), 'add', 'inner');
+  await assert.rejects(createWorktree({ basePath: top, name: 'seed-nested-staged', seed: true }), /подмодул[а-я]* lib/);
+  // Unstaged, the move is the same uncommitted change.
+  sh(path.join(top, 'lib'), 'reset', '-q', 'inner');
+  await assert.rejects(createWorktree({ basePath: top, name: 'seed-nested-unstaged', seed: true }), /подмодул[а-я]* lib/);
+});
